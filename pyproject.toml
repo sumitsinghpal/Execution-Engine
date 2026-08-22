@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schwab-execution-engine"
+version = "0.1.0"
+description = "Deterministic Schwab execution microservice with hard safety controls"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [{name = "Trading Team"}]
+
+dependencies = [
+    "fastapi==0.104.1",
+    "uvicorn[standard]==0.24.0",
+    "pydantic==2.5.0",
+    "pydantic-settings==2.1.0",
+    "httpx==0.25.1",
+    "sqlalchemy==2.0.23",
+    "alembic==1.12.1",
+    "sqlmodel==0.0.14",
+    "psycopg[binary]==3.3.4",
+    "python-dotenv==1.0.0",
+    "python-jose[cryptography]==3.3.0",
+    "passlib[bcrypt]==1.7.4",
+    "structlog==23.2.0",
+    "pytz==2023.3",
+    "cryptography==41.0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==7.4.3",
+    "pytest-asyncio==0.21.1",
+    "pytest-cov==4.1.0",
+    "pytest-xdist==3.5.0",
+    "ruff==0.1.8",
+    "mypy==1.7.1",
+    "black==23.12.0",
+    "isort==5.13.2",
+    "pre-commit==3.5.0",
+    "httpx[http2]==0.25.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=src --cov-report=term-missing --cov-report=html"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+]
+ignore = ["E501"]  # line-too-long (handled by formatter)
+
+[tool.ruff.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

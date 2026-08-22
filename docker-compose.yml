@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY:-test-key}
+      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET:-test-secret}
+      - SCHWAB_REFRESH_TOKEN=${SCHWAB_REFRESH_TOKEN:-test-token}
+      - DATABASE_URL=sqlite:///./execution_engine.db
+      - ENV=development
+      - LOG_LEVEL=INFO
+      - KILL_SWITCH_ENABLED=false
+      - API_KEY_ADMIN=change-me-in-prod
+    volumes:
+      - .:/app
+    command: python -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: execution_engine
+      POSTGRES_USER: engine_user
+      POSTGRES_PASSWORD: engine_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U engine_user -d execution_engine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
