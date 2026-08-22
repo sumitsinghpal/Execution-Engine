@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -45,7 +46,8 @@ class ExecutionServiceError(Exception):
 
 
 def _checksum(payload: dict[str, Any]) -> str:
-    return sha256(str(sorted(payload.items())).encode("utf-8")).hexdigest()
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _ensure_decision_freshness(decision_id: str) -> None:

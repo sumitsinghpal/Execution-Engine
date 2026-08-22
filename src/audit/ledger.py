@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from typing import Any
 
@@ -9,7 +10,7 @@ from src.models.orders import AuditLedgerEntry
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
-    encoded = str(sorted(payload.items())).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return sha256(encoded).hexdigest()
 
 

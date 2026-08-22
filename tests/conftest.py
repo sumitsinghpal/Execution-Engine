@@ -5,6 +5,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from src.config import get_settings
 from src.db import configure_engine, init_db
 
 
@@ -15,6 +16,7 @@ def client(tmp_path):
     os.environ["SCHWAB_MOCK_MODE"] = "true"
     os.environ["ADMIN_API_KEY"] = "test-admin-key"
     os.environ["ALLOWED_SYMBOLS"] = "QQQ,SPY"
+    get_settings.cache_clear()
     configure_engine(os.environ["DATABASE_URL"])
     init_db()
 
