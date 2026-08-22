@@ -6,8 +6,10 @@ All configuration comes from environment variables; no hardcoded secrets.
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from pydantic_settings import BaseSettings
+
+from src.accounts.profiles import AccountProfile, BrokerName
 
 
 class Settings(BaseSettings):
@@ -23,10 +25,23 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./execution_engine.db"
     
-    # Schwab credentials (optional for test/demo mode)
-    schwab_app_key: str = "test-key"
-    schwab_app_secret: str = "test-secret"
-    schwab_refresh_token: str = "test-token"
+    # Execution mode defaults to non-live simulation. LIVE is not implemented.
+    execution_mode: str = "PAPER"
+
+    # Account aliases prevent EDGE-TF callers from providing raw broker account IDs.
+    account_profiles: dict[str, AccountProfile] = Field(
+        default_factory=lambda: {
+            "primary": AccountProfile(broker=BrokerName.PAPER),
+            "retirement": AccountProfile(broker=BrokerName.PAPER),
+            "paper": AccountProfile(broker=BrokerName.PAPER),
+        }
+    )
+
+    # Schwab credentials must be explicitly supplied for the Schwab adapter.
+    schwab_app_key: Optional[str] = None
+    schwab_app_secret: Optional[str] = None
+    schwab_refresh_token: Optional[str] = None
+    schwab_redirect_uri: Optional[str] = None
     
     # Kill switch
     kill_switch_enabled: bool = False
@@ -58,6 +73,13 @@ class Settings(BaseSettings):
     schwab_preview_expiry_min: int = 5
     schwab_retry_max_attempts: int = 3
     schwab_retry_backoff_sec: float = 1.0
+
+    def get_account_profile(self, alias: str) -> AccountProfile:
+        """Resolve a safe account alias or fail closed."""
+        profile = self.account_profiles.get(alias)
+        if not profile:
+            raise ValueError(f"Unknown account alias: {alias}")
+        return profile
     
     def __init__(self, **data):
         """Parse comma-separated list fields."""

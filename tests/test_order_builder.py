@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from src.broker.order_builder import SchwabOrderBuilder
+from src.broker.order_builder import OrderBuilder
 from src.models.orders import AssetType, Instruction, OrderType, TradeProposal
 
 
@@ -11,7 +11,7 @@ class TestOrderBuilder:
     
     def test_build_limit_order_spec(self, sample_trade_proposal):
         """Build valid LIMIT order spec."""
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         spec = builder.build_order_spec(sample_trade_proposal, "primary")
         
         assert spec["orderId"] == sample_trade_proposal.decision_id
@@ -24,7 +24,7 @@ class TestOrderBuilder:
     
     def test_build_market_order_spec(self, sample_market_order):
         """Build valid MARKET order spec."""
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         spec = builder.build_order_spec(sample_market_order, "primary")
         
         assert spec["orderType"] == "MARKET"
@@ -33,7 +33,7 @@ class TestOrderBuilder:
     
     def test_build_stop_order_spec(self, sample_stop_order):
         """Build valid STOP order spec."""
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         spec = builder.build_order_spec(sample_stop_order, "primary")
         
         assert spec["orderType"] == "STOP"
@@ -54,7 +54,7 @@ class TestOrderBuilder:
             limit_price=Decimal("451.00"),
         )
         
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         spec = builder.build_order_spec(proposal, "primary")
         
         assert spec["orderType"] == "STOP_LIMIT"
@@ -67,7 +67,7 @@ class TestPayloadChecksum:
     
     def test_same_proposal_same_checksum(self, sample_trade_proposal):
         """Same proposal generates same checksum."""
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         
         checksum1 = builder.compute_payload_checksum(sample_trade_proposal)
         checksum2 = builder.compute_payload_checksum(sample_trade_proposal)
@@ -77,7 +77,7 @@ class TestPayloadChecksum:
     
     def test_different_proposals_different_checksums(self, sample_trade_proposal, sample_market_order):
         """Different proposals generate different checksums."""
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         
         checksum1 = builder.compute_payload_checksum(sample_trade_proposal)
         checksum2 = builder.compute_payload_checksum(sample_market_order)
@@ -86,7 +86,7 @@ class TestPayloadChecksum:
     
     def test_checksum_is_hex_string(self, sample_trade_proposal):
         """Checksum is valid hex string."""
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         checksum = builder.compute_payload_checksum(sample_trade_proposal)
         
         assert isinstance(checksum, str)
@@ -117,7 +117,7 @@ class TestPayloadChecksum:
             limit_price=Decimal("721.51"),  # Different price
         )
         
-        builder = SchwabOrderBuilder()
+        builder = OrderBuilder()
         checksum1 = builder.compute_payload_checksum(proposal1)
         checksum2 = builder.compute_payload_checksum(proposal2)
         

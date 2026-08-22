@@ -9,8 +9,12 @@ from typing import Optional
 
 from sqlmodel import SQLModel, Session, select, Field
 
-from src.broker.order_builder import SchwabOrderBuilder
-from src.broker.schwab_client import SchwabClient
+from src.accounts.profiles import BrokerName
+from src.broker.order_builder import OrderBuilder
+from src.brokers.base import BrokerAdapter
+from src.brokers.paper import PaperBrokerAdapter
+from src.brokers.schwab.adapter import SchwabBrokerAdapter
+from src.brokers.schwab.auth import SchwabOAuthClient
 from src.config import get_settings
 from src.execution.approval import ApprovalManager
 from src.execution.idempotency import IdempotencyManager, Operation
@@ -56,11 +60,16 @@ class OrderRecord(SQLModel, table=True):
 class Executor:
     """Orchestrate order preview and execution."""
     
-    def __init__(self, session: Session, mock_broker: bool = False):
+    def __init__(
+        self,
+        session: Session,
+        mock_broker: bool = False,
+        broker: Optional[BrokerAdapter] = None,
+    ):
         self.session = session
         self.settings = get_settings()
-        self.schwab = SchwabClient(mock=mock_broker)
-        self.builder = SchwabOrderBuilder()
+        self.builder = OrderBuilder()
+        self.broker = broker or self._build_broker_adapter(mock_broker)
         self.risk_checker = RiskChecker()
         self.idempotency = IdempotencyManager(session)
         self.approval_manager = ApprovalManager(session)
@@ -87,13 +96,14 @@ class Executor:
         verdict = self.risk_checker.evaluate(proposal, kill_switch_on)
         
         # Compute checksum for later verification
-        checksum = SchwabOrderBuilder.compute_payload_checksum(proposal)
+        checksum = OrderBuilder.compute_payload_checksum(proposal)
         
-        # Build order spec
+        # Build order spec from an internal alias profile; no raw account IDs are accepted.
+        profile = self.settings.get_account_profile(proposal.account)
         order_spec = self.builder.build_order_spec(proposal, proposal.account)
         
-        # Call Schwab preview
-        schwab_response = await self.schwab.preview_order(order_spec)
+        # Call the selected broker preview implementation.
+        broker_response = await self.broker.preview_order(profile, order_spec)
         
         # Generate preview ID
         preview_id = f"preview-{uuid.uuid4()}"
@@ -130,9 +140,9 @@ class Executor:
         return OrderPreview(
             preview_id=preview_id,
             decision_id=proposal.decision_id,
-            preview_details=schwab_response,
-            estimated_commission=schwab_response.get("estimatedCommission", 0.0),
-            estimated_cost=schwab_response.get("estimatedTotalInvestment", 0.0),
+            preview_details=broker_response,
+            estimated_commission=broker_response.get("estimatedCommission", 0.0),
+            estimated_cost=broker_response.get("estimatedTotalInvestment", 0.0),
             risk_verdict="APPROVED" if verdict.approved else "REJECTED",
             risk_details={"checks": verdict.checks, "rejections": verdict.rejections},
             payload_checksum=checksum,
@@ -209,7 +219,8 @@ class Executor:
             order.account,
         )
         
-        broker_response = await self.schwab.submit_order(order_spec)
+        profile = self.settings.get_account_profile(order.account)
+        broker_response = await self.broker.submit_order(profile, order_spec)
         
         # Extract broker order ID
         execution_id = broker_response.get("orderId", f"exec-{uuid.uuid4()}")
@@ -265,6 +276,32 @@ class Executor:
         """Get current kill switch state."""
         # In production, would query database
         return self.settings.kill_switch_enabled
+
+    def _build_broker_adapter(self, mock_broker: bool) -> BrokerAdapter:
+        """Choose the configured broker without allowing implicit live trading."""
+        if mock_broker or self.settings.execution_mode.upper() in {"PAPER", "SHADOW"}:
+            return PaperBrokerAdapter()
+
+        profiles = self.settings.account_profiles.values()
+        if all(profile.broker != BrokerName.SCHWAB for profile in profiles):
+            return PaperBrokerAdapter()
+
+        if not all(
+            [
+                self.settings.schwab_app_key,
+                self.settings.schwab_app_secret,
+                self.settings.schwab_redirect_uri,
+            ]
+        ):
+            raise ValueError("Schwab mode requires configured OAuth app key, app secret, and redirect URI")
+
+        oauth = SchwabOAuthClient(
+            app_key=self.settings.schwab_app_key,
+            app_secret=self.settings.schwab_app_secret,
+            redirect_uri=self.settings.schwab_redirect_uri,
+            refresh_token=self.settings.schwab_refresh_token,
+        )
+        return SchwabBrokerAdapter(oauth)
     
     def _audit_log(self, action: str, decision_id: str, details: dict) -> None:
         """Write audit log entry."""

@@ -8,9 +8,11 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY:-test-key}
-      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET:-test-secret}
-      - SCHWAB_REFRESH_TOKEN=${SCHWAB_REFRESH_TOKEN:-test-token}
+      - EXECUTION_MODE=${EXECUTION_MODE:-PAPER}
+      - SCHWAB_APP_KEY=${SCHWAB_APP_KEY:-}
+      - SCHWAB_APP_SECRET=${SCHWAB_APP_SECRET:-}
+      - SCHWAB_REFRESH_TOKEN=${SCHWAB_REFRESH_TOKEN:-}
+      - SCHWAB_REDIRECT_URI=${SCHWAB_REDIRECT_URI:-}
       - DATABASE_URL=sqlite:///./execution_engine.db
       - ENV=development
       - LOG_LEVEL=INFO

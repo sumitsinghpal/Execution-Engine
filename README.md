@@ -1,6 +1,6 @@
-# Schwab Execution Engine
+# EDGE-Execution
 
-A deterministic, production-grade microservice for Schwab order execution. Acts as a hard safety gate between EDGE-TF (decision engine) and Schwab trading infrastructure.
+A deterministic, production-grade broker-neutral microservice for order execution. Acts as a hard safety gate between EDGE-TF (decision engine) and broker trading infrastructure.
 
 ## Overview
 

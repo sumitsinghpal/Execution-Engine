@@ -1,7 +1,7 @@
 .PHONY: help install dev run test lint format migrate clean docker-up docker-down
 
 help:
-	@echo "Schwab Execution Engine - Development Commands"
+	@echo "EDGE-Execution - Development Commands"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""

@@ -8,7 +8,9 @@ from typing import Optional
 
 from sqlmodel import SQLModel, Field, Session, select
 
-from src.broker.schwab_client import SchwabClient
+from src.brokers.base import BrokerAdapter
+from src.brokers.paper import PaperBrokerAdapter
+from src.config import get_settings
 from src.logging_config import get_logger
 from src.models.orders import OrderStatus
 
@@ -61,18 +63,20 @@ class ReconciliationService:
         OrderStatus.FAILED: [],  # Terminal
     }
     
-    def __init__(self, session: Session, mock_broker: bool = False):
+    def __init__(self, session: Session, broker: Optional[BrokerAdapter] = None):
         self.session = session
-        self.schwab = SchwabClient(mock=mock_broker)
+        self.settings = get_settings()
+        self.broker = broker or PaperBrokerAdapter()
     
-    async def reconcile_order(self, decision_id: str, account_id: str, execution_id: str) -> bool:
+    async def reconcile_order(self, decision_id: str, account_alias: str, execution_id: str) -> bool:
         """
         Poll broker for order status and update local record.
         Return True if status changed, False otherwise.
         """
         
         # Get current broker status
-        broker_status = await self.schwab.get_order_status(account_id, execution_id)
+        profile = self.settings.get_account_profile(account_alias)
+        broker_status = await self.broker.get_order_status(profile, execution_id)
         
         logger.info(
             "broker_status_polled",

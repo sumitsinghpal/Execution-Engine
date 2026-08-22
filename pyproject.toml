@@ -3,9 +3,9 @@ requires = ["setuptools>=65.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "schwab-execution-engine"
+name = "edge-execution"
 version = "0.1.0"
-description = "Deterministic Schwab execution microservice with hard safety controls"
+description = "Deterministic broker-neutral execution microservice with hard safety controls"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}

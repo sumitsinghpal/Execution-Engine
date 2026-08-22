@@ -31,8 +31,8 @@ logger = get_logger(__name__)
 
 # Initialize app
 app = FastAPI(
-    title="Schwab Execution Engine",
-    description="Deterministic order execution microservice for EDGE-TF",
+    title="EDGE-Execution",
+    description="Deterministic broker-neutral order execution microservice for EDGE-TF",
     version="0.1.0",
 )
 
@@ -106,13 +106,12 @@ async def preview_order(
     """
     Preview an order before approval.
     
-    Validates proposal, runs risk checks, and returns Schwab preview.
+    Validates proposal, runs risk checks, and returns the configured broker preview.
     Does NOT submit the order; requires explicit /execute call.
     """
     
     try:
-        # Initialize executor with mock broker for demo
-        executor = Executor(session=db, mock_broker=True)
+        executor = Executor(session=db)
         
         # Execute preview flow
         preview = await executor.preview_order(proposal)
@@ -151,8 +150,7 @@ async def execute_order(
     """
     
     try:
-        # Initialize executor
-        executor = Executor(session=db, mock_broker=True)
+        executor = Executor(session=db)
         
         # Execute order
         receipt = await executor.execute_order(
@@ -188,7 +186,7 @@ async def get_order_status(
     """Query the status of an order by decision_id."""
     
     try:
-        executor = Executor(session=db, mock_broker=True)
+        executor = Executor(session=db)
         status = await executor.get_order_status(decision_id)
         
         logger.info("order_status_queried", decision_id=decision_id, status=status.status)

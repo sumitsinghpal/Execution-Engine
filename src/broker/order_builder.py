@@ -1,5 +1,5 @@
 """
-Order builder: construct deterministic Schwab order payloads from TradeProposal.
+Order builder: construct deterministic broker-neutral order payloads from TradeProposal.
 This ensures repeatable, auditable order construction.
 """
 
@@ -11,8 +11,8 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-class SchwabOrderBuilder:
-    """Build Schwab API order specs deterministically."""
+class OrderBuilder:
+    """Build deterministic broker-neutral order specs."""
     
     def build_order_spec(self, proposal: TradeProposal, account_id: str) -> dict:
         """

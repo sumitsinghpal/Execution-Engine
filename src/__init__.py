@@ -1,1 +1,1 @@
-"""Schwab Execution Engine - Root package."""
+"""EDGE-Execution - Root package."""
