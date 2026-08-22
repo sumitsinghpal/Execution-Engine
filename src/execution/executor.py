@@ -211,15 +211,18 @@ async def execute_trade(session: Session, request: ExecuteOrderRequest, correlat
     existing_execution = session.exec(
         select(ExecutionOrderRecord).where(ExecutionOrderRecord.decision_id == request.decision_id)
     ).first()
+    execution_id: str
     if existing_execution is None:
+        execution_record = ExecutionOrderRecord(
+            decision_id=request.decision_id,
+            preview_id=request.preview_id,
+            broker_order_id=broker_response.get("broker_order_id"),
+            status=execution_status,
+            broker_response=broker_response,
+        )
+        execution_id = execution_record.id
         session.add(
-            ExecutionOrderRecord(
-                decision_id=request.decision_id,
-                preview_id=request.preview_id,
-                broker_order_id=broker_response.get("broker_order_id"),
-                status=execution_status,
-                broker_response=broker_response,
-            )
+            execution_record
         )
     else:
         existing_execution.broker_order_id = broker_response.get("broker_order_id")
@@ -227,11 +230,12 @@ async def execute_trade(session: Session, request: ExecuteOrderRequest, correlat
         existing_execution.broker_response = broker_response
         existing_execution.updated_at = datetime.now(UTC)
         session.add(existing_execution)
+        execution_id = existing_execution.id
 
     response = {
         "decision_id": request.decision_id,
         "preview_id": request.preview_id,
-        "execution_id": str(uuid4()),
+        "execution_id": execution_id,
         "broker_order_id": broker_response.get("broker_order_id"),
         "status": execution_status,
         "submitted_at": broker_response.get("submitted_at", datetime.now(UTC).isoformat()),

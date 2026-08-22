@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -13,12 +14,15 @@ from src.execution.executor import ExecutionServiceError, execute_trade, order_s
 from src.models.orders import ExecuteOrderRequest, KillSwitchState, TradeProposal
 
 settings = get_settings()
-app = FastAPI(title="Schwab Execution Engine", version="1.0.0")
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     init_db()
+    yield
+
+
+app = FastAPI(title="Schwab Execution Engine", version="1.0.0", lifespan=lifespan)
 
 
 @app.exception_handler(ExecutionServiceError)

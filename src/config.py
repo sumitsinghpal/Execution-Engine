@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     max_order_notional: Decimal = Field(default=Decimal("100000"))
     account_equity_notional: Decimal = Field(default=Decimal("1000000"))
     max_position_concentration: Decimal = Field(default=Decimal("0.25"))
+    market_order_assumed_price: Decimal = Field(default=Decimal("100"))
     enforce_market_hours: bool = False
     preview_ttl_minutes: int = 15
     decision_max_age_days: int = 2

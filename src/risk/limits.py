@@ -13,7 +13,7 @@ class RiskViolation(ValueError):
 
 def _price_for_notional(proposal: TradeProposal) -> Decimal:
     if proposal.limit_price is None:
-        return Decimal("100")
+        return get_settings().market_order_assumed_price
     return Decimal(str(proposal.limit_price))
 
 
