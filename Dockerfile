@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY pyproject.toml /app/
-RUN pip install --no-cache-dir .[dev]
+RUN pip install --no-cache-dir .
 
 COPY src /app/src
 COPY README.md /app/README.md

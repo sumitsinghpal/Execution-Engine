@@ -203,6 +203,9 @@ async def execute_trade(session: Session, request: ExecuteOrderRequest, correlat
             signature=request.approval.signature,
         )
     )
+    preview.status = OrderStatus.APPROVED.value
+    session.add(preview)
+    submit_before_status = preview.status
 
     client = SchwabClient()
     broker_response = await client.submit_order(preview.normalized_order)
@@ -258,7 +261,7 @@ async def execute_trade(session: Session, request: ExecuteOrderRequest, correlat
         decision_id=request.decision_id,
         payload=preview.normalized_order,
         correlation_id=correlation_id,
-        before_status=OrderStatus.APPROVED.value,
+        before_status=submit_before_status,
         after_status=execution_status,
         details={"broker_order_id": broker_response.get("broker_order_id")},
     )
