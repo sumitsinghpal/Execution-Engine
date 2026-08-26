@@ -71,5 +71,19 @@ class PaperBrokerAdapter(BrokerAdapter):
     async def get_positions(self, profile: AccountProfile) -> list[dict[str, Any]]:
         return []
 
+    # Fixed paper-mode starting equity. This is a deliberately simple,
+    # honestly-labeled placeholder — not a real P&L ledger. Tracking actual
+    # paper equity (cash +/- synthetic fills over time) would need a
+    # stateful balance table of its own; out of scope here. What matters
+    # for DrawdownGuard is that get_balances() returns *some* stable
+    # "net_liquidation_value" so a baseline can be captured and compared,
+    # instead of the previous permanent $0 that made every account look
+    # like a 100% drawdown.
+    _PAPER_STARTING_EQUITY = 1_000_000.0
+
     async def get_balances(self, profile: AccountProfile) -> dict[str, Any]:
-        return {"availableFunds": 0, "mode": "PAPER"}
+        return {
+            "availableFunds": self._PAPER_STARTING_EQUITY,
+            "net_liquidation_value": self._PAPER_STARTING_EQUITY,
+            "mode": "PAPER",
+        }

@@ -311,14 +311,36 @@ class TestKillSwitchEndpoints:
 
 class TestMarketStatusEndpoint:
     """Test GET /v1/market-status."""
-    
+
     def test_market_status(self, client):
         """Market status returns info."""
         response = client.get("/v1/market-status")
-        
+
         assert response.status_code == 200
         data = response.json()
         assert "in_market_hours" in data
         assert "current_time_et" in data
         assert "market_open" in data
         assert "market_close" in data
+
+
+class TestDrawdownCheckEndpoint:
+    """Test POST /v1/risk/drawdown-check."""
+
+    def test_drawdown_check_reports_no_breach_for_flat_paper_account(self, client):
+        """
+        The default paper broker returns the same fixed equity every call,
+        so a first-of-the-day check against it must report zero drawdown
+        and never touch the kill switch.
+        """
+        response = client.post("/v1/risk/drawdown-check", params={"account": "primary"})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["account"] == "primary"
+        assert data["breached"] is False
+        assert data["drawdown_pct"] == 0
+        assert data["baseline_equity"] == data["current_equity"]
+
+        status = client.get("/v1/kill-switch/status")
+        assert status.json()["enabled"] is False

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from src.accounts.profiles import AccountProfile, BrokerName
-from src.brokers.base import LiveTradingDisabledError
+from src.brokers.base import BrokerAPIOutageError, BrokerError, LiveTradingDisabledError
 from src.brokers.paper import PaperBrokerAdapter
 from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab.auth import SchwabOAuthClient
@@ -117,6 +117,98 @@ async def test_paper_adapter_market_order_preview_does_not_estimate_zero() -> No
     preview = await adapter.preview_order(profile, order)
 
     assert preview["estimatedTotalInvestment"] > 0
+
+
+class _FlakyThenOKTransport:
+    """Fails with a 500 a fixed number of times, then succeeds — simulates a transient outage that clears."""
+
+    def __init__(self, fail_times: int):
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "access-token", "expires_in": 1800})
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            return httpx.Response(500, json={"error": "internal server error"})
+        return httpx.Response(200, json={"accounts": []})
+
+
+class _AlwaysDownTransport:
+    """Always returns a 503 — simulates a sustained outage that never clears within the retry budget."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "access-token", "expires_in": 1800})
+        return httpx.Response(503, json={"error": "service unavailable"})
+
+
+class _BadRequestTransport:
+    """Always returns a 400 — a real client error that retrying can never fix."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "access-token", "expires_in": 1800})
+        return httpx.Response(400, json={"error": "bad request"})
+
+
+def _adapter_with_transport(transport_fn, retry_max_attempts=3, retry_backoff_sec=0.001) -> SchwabBrokerAdapter:
+    transport = httpx.MockTransport(transport_fn)
+    oauth = SchwabOAuthClient(
+        app_key="test-app-key",
+        app_secret="test-app-secret",
+        redirect_uri="https://localhost/callback",
+        refresh_token="test-refresh-token",
+        transport=transport,
+    )
+    return SchwabBrokerAdapter(
+        oauth,
+        transport=transport,
+        retry_max_attempts=retry_max_attempts,
+        retry_backoff_sec=retry_backoff_sec,
+    )
+
+
+@pytest.mark.asyncio
+async def test_transient_5xx_is_retried_and_recovers() -> None:
+    """A 500 that clears within the retry budget succeeds transparently."""
+    flaky = _FlakyThenOKTransport(fail_times=2)
+    adapter = _adapter_with_transport(flaky, retry_max_attempts=3)
+
+    result = await adapter.list_accounts()
+
+    assert result == []
+    assert flaky.calls == 3  # failed twice, succeeded on the 3rd
+
+
+@pytest.mark.asyncio
+async def test_sustained_outage_raises_after_exhausting_retries() -> None:
+    """A 503 that never clears exhausts the retry budget and raises a distinct, catchable error."""
+    adapter = _adapter_with_transport(_AlwaysDownTransport(), retry_max_attempts=3)
+
+    with pytest.raises(BrokerAPIOutageError):
+        await adapter.list_accounts()
+
+
+@pytest.mark.asyncio
+async def test_client_error_is_not_retried() -> None:
+    """A 400 is a real request error, not an outage — it must fail immediately, not after 3 retries."""
+    transport = _BadRequestTransport()
+    original_call = transport.__call__
+    call_count = {"n": 0}
+
+    def counting_call(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1/oauth/token":
+            call_count["n"] += 1
+        return original_call(request)
+
+    adapter = _adapter_with_transport(counting_call, retry_max_attempts=3)
+
+    with pytest.raises(BrokerError):
+        await adapter.list_accounts()
+
+    assert call_count["n"] == 1, "a 4xx client error must not be retried"
 
 
 @pytest.mark.asyncio

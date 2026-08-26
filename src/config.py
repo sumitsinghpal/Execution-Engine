@@ -69,7 +69,13 @@ class Settings(BaseSettings):
     # likely mispriced (fat-finger protection) rather than silently routed.
     max_quote_age_seconds: int = 10
     max_limit_price_deviation_pct: Decimal = Decimal("0.03")
-    
+
+    # Daily loss/drawdown shutdown: once an account's net liquidation value
+    # falls this far below its captured start-of-day baseline, trading
+    # auto-halts via the kill switch until a human clears it. See
+    # DrawdownGuard (src/execution/drawdown_guard.py).
+    max_daily_drawdown_pct: Decimal = Decimal("0.05")
+
     # API Security
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False

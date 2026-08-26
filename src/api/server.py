@@ -12,9 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.brokers.base import BrokerAuthenticationError
+from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
+from src.execution.drawdown_guard import DrawdownGuard
 from src.execution.executor import Executor
 from src.execution.kill_switch_state import KillSwitchService
 from src.execution.position_reconciliation import PositionReconciliationService
@@ -148,6 +149,14 @@ async def preview_order(
             status_code=503,
             detail=f"Broker authentication failed; trading halted pending re-authentication: {e}",
         )
+    except BrokerAPIOutageError as e:
+        # Transient (connectivity/5xx) — already retried internally by the
+        # adapter and still failed. Deliberately does NOT trip the kill
+        # switch the way an auth failure does: an outage is often
+        # self-resolving within seconds, and forcing a dual-authorization
+        # reset for something that clears itself would be its own hazard.
+        logger.critical("preview_broker_api_outage", decision_id=proposal.decision_id, error=str(e))
+        raise HTTPException(status_code=503, detail=f"Broker API unreachable, try again shortly: {e}")
     except Exception as e:
         logger.error("preview_error", decision_id=proposal.decision_id, error=str(e))
         raise HTTPException(status_code=500, detail="Preview failed")
@@ -200,6 +209,9 @@ async def execute_order(
             status_code=503,
             detail=f"Broker authentication failed; trading halted pending re-authentication: {e}",
         )
+    except BrokerAPIOutageError as e:
+        logger.critical("execute_broker_api_outage", decision_id=request.decision_id, error=str(e))
+        raise HTTPException(status_code=503, detail=f"Broker API unreachable, try again shortly: {e}")
     except Exception as e:
         logger.error("execute_error", decision_id=request.decision_id, error=str(e))
         raise HTTPException(status_code=500, detail="Execution failed")
@@ -318,6 +330,33 @@ async def reconcile_positions(
     except Exception as e:
         logger.error("position_reconciliation_error", account=account, error=str(e))
         raise HTTPException(status_code=500, detail=f"Position reconciliation failed: {e}")
+
+
+@app.post("/v1/risk/drawdown-check")
+async def check_drawdown(
+    account: str = "primary",
+    db: Session = Depends(get_db),
+):
+    """
+    Compare this account's current equity against its captured start-of-day
+    baseline (capturing the baseline now if this is the first check today).
+
+    On breaching settings.max_daily_drawdown_pct, this automatically trips
+    the kill switch — no admin key required to call this endpoint, since
+    its only possible side effect is halting trading, never resuming it
+    (resuming still requires the admin-gated /v1/kill-switch/off). Intended
+    to be polled periodically through the trading day, the same way
+    /v1/reconciliation/positions is intended to run before it starts.
+    """
+    try:
+        guard = DrawdownGuard(session=db)
+        report = await guard.check_and_halt(account, halted_by="drawdown_check_endpoint")
+        return report.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("drawdown_check_error", account=account, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Drawdown check failed: {e}")
 
 
 if __name__ == "__main__":

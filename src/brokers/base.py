@@ -14,6 +14,16 @@ class LiveTradingDisabledError(BrokerError):
     """Raised when a live order submission is attempted without explicit enablement."""
 
 
+class BrokerAPIOutageError(BrokerError):
+    """
+    Raised when the broker is unreachable or erroring after all configured
+    retry attempts are exhausted — a transient connectivity/5xx issue that
+    was retried and still failed, distinct from a normal 4xx client error
+    (bad request, not found, etc.) which is never retried and surfaces as
+    a plain BrokerError instead.
+    """
+
+
 class BrokerAuthenticationError(BrokerError):
     """
     Raised specifically when the broker rejects our credentials — an expired

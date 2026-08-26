@@ -406,7 +406,12 @@ class Executor:
             redirect_uri=self.settings.schwab_redirect_uri,
             refresh_token=self.settings.schwab_refresh_token,
         )
-        return SchwabBrokerAdapter(oauth)
+        return SchwabBrokerAdapter(
+            oauth,
+            timeout_sec=self.settings.schwab_api_timeout_sec,
+            retry_max_attempts=self.settings.schwab_retry_max_attempts,
+            retry_backoff_sec=self.settings.schwab_retry_backoff_sec,
+        )
     
     def _audit_log(self, action: str, decision_id: str, details: dict) -> None:
         """Write audit log entry."""

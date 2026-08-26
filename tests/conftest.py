@@ -15,6 +15,7 @@ from sqlmodel import Session, SQLModel
 # Import all models to register them with SQLModel.metadata
 from src.execution.idempotency import IdempotencyRecord
 from src.execution.approval import ApprovalRecord
+from src.execution.drawdown_guard import DailyEquityBaseline
 from src.execution.executor import OrderRecord
 from src.execution.kill_switch_state import KillSwitchRecord
 from src.execution.reconciliation import ReconciliationEvent
