@@ -323,6 +323,54 @@ class TestMultiAgentKillSwitch:
             )
 
 
+class TestAgentExposureCheckEndpoint:
+    """Test POST /v1/risk/agent-exposure-check."""
+
+    def test_reports_zero_exposure_for_an_agent_with_no_orders(self, client):
+        resp = client.post("/v1/risk/agent-exposure-check", params={"agent_id": "exposure-endpoint-fresh-agent"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agent_id"] == "exposure-endpoint-fresh-agent"
+        assert data["committed_notional_usd"] == "0"
+        assert data["cap_usd"] is None
+        assert data["breached"] is False
+
+    def test_rejects_reserved_global_scope(self, client):
+        resp = client.post("/v1/risk/agent-exposure-check", params={"agent_id": "__global__"})
+        assert resp.status_code == 400
+
+    def test_executed_order_counts_toward_exposure(self, client, sample_trade_proposal):
+        """A full preview -> approve -> execute flow should show up in this agent's committed notional."""
+        proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-exposure-flow", "agent_id": "exposure-flow-agent"}
+        )
+        preview_resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        assert preview_resp.status_code == 200
+        preview = preview_resp.json()
+        assert preview["risk_verdict"] == "APPROVED"
+
+        execute_resp = client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview["preview_id"],
+                "approval": {
+                    "preview_id": preview["preview_id"],
+                    "approved_by": "test-operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "approved for test",
+                    "idempotency_key": f"idem-{proposal.decision_id}",
+                },
+            },
+        )
+        assert execute_resp.status_code == 200
+
+        exposure_resp = client.post("/v1/risk/agent-exposure-check", params={"agent_id": "exposure-flow-agent"})
+        assert exposure_resp.status_code == 200
+        assert float(exposure_resp.json()["committed_notional_usd"]) == pytest.approx(float(preview["estimated_cost"]))
+
+
 class TestHealthEndpoint:
     """Test GET /v1/health."""
     

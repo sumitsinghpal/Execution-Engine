@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Path, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Path, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from sqlmodel import select
 from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
+from src.execution.agent_exposure_guard import AgentExposureGuard
 from src.execution.drawdown_guard import DrawdownGuard
 from src.execution.executor import Executor, OrderRecord
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
@@ -465,6 +466,35 @@ async def check_drawdown(
     except Exception as e:
         logger.error("drawdown_check_error", account=account, error=str(e))
         raise HTTPException(status_code=500, detail=f"Drawdown check failed: {e}")
+
+
+@app.post("/v1/risk/agent-exposure-check")
+async def check_agent_exposure(
+    agent_id: str = Query(..., pattern=r"^[A-Za-z0-9_-]{1,64}$"),
+    db: Session = Depends(get_db),
+):
+    """
+    Sum this agent's committed notional (orders actually submitted to the
+    broker, not merely previewed) for today and compare it against
+    AgentRiskProfile.max_daily_notional_usd for this agent, if one is
+    configured. A redundant, agent-scoped backstop alongside the
+    account-level /v1/risk/drawdown-check — see AgentExposureGuard for why
+    the two are independent.
+
+    On breaching the cap, this halts only this agent's own kill switch
+    scope — no admin key required, since the only possible side effect is
+    halting this one agent, never resuming it or affecting any other agent
+    (resuming still requires the admin-gated
+    /v1/kill-switch/agents/{agent_id}/off).
+    """
+    _reject_global_scope_as_agent_id(agent_id)
+    try:
+        guard = AgentExposureGuard(session=db)
+        report = guard.check_and_halt(agent_id, halted_by="agent_exposure_check_endpoint")
+        return report.to_dict()
+    except Exception as e:
+        logger.error("agent_exposure_check_error", agent_id=agent_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Agent exposure check failed: {e}")
 
 
 if __name__ == "__main__":

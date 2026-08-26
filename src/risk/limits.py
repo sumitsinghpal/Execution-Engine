@@ -45,6 +45,7 @@ class RiskChecker:
         """
         checks = {}
         rejections = []
+        agent_profile = self.settings.get_agent_risk_profile(proposal.agent_id)
 
         # 1. Kill switch
         checks["kill_switch_off"] = not kill_switch_on
@@ -56,13 +57,23 @@ class RiskChecker:
         if not checks["account_allowed"]:
             rejections.append(f"Account '{proposal.account}' not in allowlist")
 
-        # 3. Symbol allowlist
-        checks["symbol_allowed"] = proposal.symbol in self.settings.symbol_allowlist
+        # 3. Symbol allowlist — an agent's own allowlist (if configured)
+        # can only narrow the fleet-wide one, never loosen it: the
+        # effective list is the intersection, not a full override.
+        effective_symbol_allowlist = self.settings.symbol_allowlist
+        if agent_profile.symbol_allowlist is not None:
+            effective_symbol_allowlist = [
+                s for s in effective_symbol_allowlist if s in set(agent_profile.symbol_allowlist)
+            ]
+        checks["symbol_allowed"] = proposal.symbol in effective_symbol_allowlist
         if not checks["symbol_allowed"]:
-            rejections.append(f"Symbol '{proposal.symbol}' not in allowlist")
+            rejections.append(f"Symbol '{proposal.symbol}' not in allowlist for agent '{proposal.agent_id}'")
 
-        # 4. Symbol denylist
-        checks["symbol_not_denied"] = proposal.symbol not in self.settings.symbol_denylist
+        # 4. Symbol denylist — an agent's own denylist (if configured) adds
+        # to the fleet-wide one (union), so a per-agent config can never
+        # accidentally lift a global block.
+        effective_symbol_denylist = set(self.settings.symbol_denylist) | set(agent_profile.symbol_denylist or [])
+        checks["symbol_not_denied"] = proposal.symbol not in effective_symbol_denylist
         if not checks["symbol_not_denied"]:
             rejections.append(f"Symbol '{proposal.symbol}' is denied")
 
@@ -82,7 +93,12 @@ class RiskChecker:
             if price_reject_reason:
                 rejections.append(price_reject_reason)
 
-        # 7. Order notional limit
+        # 7. Order notional limit — an agent's own cap (if configured) can
+        # only tighten the fleet-wide one, never raise it above it.
+        effective_notional_limit = self.settings.max_order_notional_usd
+        if agent_profile.max_order_notional_usd is not None:
+            effective_notional_limit = min(effective_notional_limit, agent_profile.max_order_notional_usd)
+
         notional = self._calculate_notional(proposal, quote, quote_ok)
         if notional is None:
             checks["notional_limit"] = False
@@ -91,10 +107,11 @@ class RiskChecker:
                 "(no limit_price and no usable live quote)"
             )
         else:
-            checks["notional_limit"] = notional <= self.settings.max_order_notional_usd
+            checks["notional_limit"] = notional <= effective_notional_limit
             if not checks["notional_limit"]:
                 rejections.append(
-                    f"Order notional ${notional} exceeds limit ${self.settings.max_order_notional_usd}"
+                    f"Order notional ${notional} exceeds limit ${effective_notional_limit} "
+                    f"for agent '{proposal.agent_id}'"
                 )
 
         logger.info(

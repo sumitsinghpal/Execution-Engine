@@ -10,6 +10,7 @@ from pydantic import ConfigDict, Field
 from pydantic_settings import BaseSettings
 
 from src.accounts.profiles import AccountProfile, BrokerName
+from src.agents.profiles import AgentRiskProfile
 
 
 class Settings(BaseSettings):
@@ -76,6 +77,10 @@ class Settings(BaseSettings):
     # DrawdownGuard (src/execution/drawdown_guard.py).
     max_daily_drawdown_pct: Decimal = Decimal("0.05")
 
+    # Per-agent risk overrides, keyed by agent_id — see src/agents/profiles.py.
+    # An agent with no entry here uses the global defaults above unchanged.
+    agent_risk_profiles: dict[str, AgentRiskProfile] = Field(default_factory=dict)
+
     # API Security
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False
@@ -98,6 +103,17 @@ class Settings(BaseSettings):
         if not profile:
             raise ValueError(f"Unknown account alias: {alias}")
         return profile
+
+    def get_agent_risk_profile(self, agent_id: str) -> AgentRiskProfile:
+        """
+        An agent with no configured profile gets an all-defaults
+        AgentRiskProfile — every field None, meaning "use the global
+        setting" — never a missing-config error. Unlike account aliases,
+        an unrecognized agent_id is expected and fine: a new agent can
+        start trading under fleet-wide defaults before anyone gets around
+        to giving it its own tighter limits.
+        """
+        return self.agent_risk_profiles.get(agent_id, AgentRiskProfile())
 
     @staticmethod
     def _split_csv(value: str) -> list[str]:

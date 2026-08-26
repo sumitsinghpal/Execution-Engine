@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from src.agents.profiles import AgentRiskProfile
 from src.models.orders import TradeProposal, AssetType, Instruction, OrderType
 from src.risk.limits import RiskChecker
 
@@ -157,3 +158,93 @@ class TestRiskChecker:
 
         assert not verdict.approved
         assert not verdict.checks["quote_fresh"]
+
+
+class TestPerAgentRiskOverrides:
+    """
+    An agent's own AgentRiskProfile can only tighten the fleet-wide
+    defaults, never loosen them — allowlist is intersected, denylist is
+    unioned, and the notional cap is the min of the two.
+    """
+
+    def test_agent_symbol_allowlist_narrows_the_fleet_wide_one(self, sample_trade_proposal, sample_quote):
+        """An agent-specific allowlist that excludes this symbol rejects it even though the fleet allows it."""
+        checker = RiskChecker()
+        assert sample_trade_proposal.symbol in checker.settings.symbol_allowlist  # sanity: fleet allows QQQ
+
+        proposal = sample_trade_proposal.model_copy(update={"agent_id": "narrow-agent"})
+        checker.settings.agent_risk_profiles["narrow-agent"] = AgentRiskProfile(symbol_allowlist=["SPY"])
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=sample_quote)
+
+        assert not verdict.approved
+        assert not verdict.checks["symbol_allowed"]
+
+    def test_agent_symbol_allowlist_cannot_add_a_symbol_the_fleet_denies(self, sample_quote):
+        """An agent's own allowlist is intersected with the fleet's, not substituted for it."""
+        proposal = TradeProposal(
+            decision_id="edge-agent-allowlist-cannot-loosen",
+            agent_id="loosening-agent",
+            account="primary",
+            symbol="XOMXX",  # valid symbol shape, but not in the fleet-wide allowlist
+            asset_type=AssetType.ETF,
+            instruction=Instruction.BUY,
+            quantity=1,
+            order_type=OrderType.MARKET,
+        )
+        checker = RiskChecker()
+        checker.settings.agent_risk_profiles["loosening-agent"] = AgentRiskProfile(symbol_allowlist=["XOMXX"])
+
+        quote = dict(sample_quote)
+        quote["symbol"] = "XOMXX"
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=quote)
+
+        assert not verdict.approved
+        assert not verdict.checks["symbol_allowed"], (
+            "a symbol not in the fleet-wide allowlist must stay rejected even if an agent's own list includes it"
+        )
+
+    def test_agent_symbol_denylist_adds_to_the_fleet_wide_one(self, sample_trade_proposal, sample_quote):
+        """An agent-specific denylist entry rejects a symbol the fleet-wide denylist doesn't touch."""
+        checker = RiskChecker()
+        proposal = sample_trade_proposal.model_copy(update={"agent_id": "extra-denylist-agent"})
+        checker.settings.agent_risk_profiles["extra-denylist-agent"] = AgentRiskProfile(
+            symbol_denylist=[sample_trade_proposal.symbol]
+        )
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=sample_quote)
+
+        assert not verdict.approved
+        assert not verdict.checks["symbol_not_denied"]
+
+    def test_agent_notional_cap_is_the_tighter_of_agent_and_fleet(self, sample_quote):
+        """A lower agent-specific notional cap rejects an order the fleet-wide cap alone would approve."""
+        proposal = TradeProposal(
+            decision_id="edge-agent-notional-cap",
+            agent_id="tight-cap-agent",
+            account="primary",
+            symbol="QQQ",
+            asset_type=AssetType.ETF,
+            instruction=Instruction.BUY,
+            quantity=10,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("270.50"),  # $2,705 total — well under the $100k fleet default
+        )
+        checker = RiskChecker()
+        checker.settings.agent_risk_profiles["tight-cap-agent"] = AgentRiskProfile(
+            max_order_notional_usd=Decimal("1000")
+        )
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=sample_quote)
+
+        assert not verdict.approved
+        assert not verdict.checks["notional_limit"]
+
+    def test_unconfigured_agent_uses_fleet_wide_defaults_unchanged(self, sample_trade_proposal, sample_quote):
+        """An agent with no profile entry at all behaves exactly like single-agent callers always did."""
+        checker = RiskChecker()
+        proposal = sample_trade_proposal.model_copy(update={"agent_id": "never-configured-agent"})
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=sample_quote)
+
+        assert verdict.approved

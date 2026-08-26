@@ -57,6 +57,11 @@ class OrderRecord(SQLModel, table=True):
     broker_status: Optional[str] = None
     broker_message: Optional[str] = None
     raw_broker_response: Optional[str] = None
+    # Estimated notional at preview time (see OrderPreview.estimated_cost),
+    # persisted so AgentExposureGuard can sum an agent's committed capital
+    # for the day without re-deriving prices from scratch. Stored as a
+    # string, matching average_fill_price above, to avoid float drift.
+    estimated_notional_usd: Optional[str] = None
 
 
 class Executor:
@@ -135,12 +140,14 @@ class Executor:
         
         # Generate preview ID
         preview_id = f"preview-{uuid.uuid4()}"
-        
+
         # Determine expiry
         expires_at = datetime.utcnow() + timedelta(
             minutes=self.settings.schwab_preview_expiry_min
         )
-        
+
+        estimated_cost = broker_response.get("estimatedTotalInvestment", 0.0)
+
         # Persist order record
         order_record = OrderRecord(
             decision_id=proposal.decision_id,
@@ -154,6 +161,7 @@ class Executor:
             payload_checksum=checksum,
             risk_approved=verdict.approved,
             preview_expires_at=expires_at,
+            estimated_notional_usd=str(estimated_cost),
         )
         self.session.add(order_record)
         self.session.commit()
@@ -171,7 +179,7 @@ class Executor:
             decision_id=proposal.decision_id,
             preview_details=broker_response,
             estimated_commission=broker_response.get("estimatedCommission", 0.0),
-            estimated_cost=broker_response.get("estimatedTotalInvestment", 0.0),
+            estimated_cost=estimated_cost,
             risk_verdict="APPROVED" if verdict.approved else "REJECTED",
             risk_details={"checks": verdict.checks, "rejections": verdict.rejections},
             payload_checksum=checksum,
