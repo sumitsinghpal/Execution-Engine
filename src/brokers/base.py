@@ -14,6 +14,17 @@ class LiveTradingDisabledError(BrokerError):
     """Raised when a live order submission is attempted without explicit enablement."""
 
 
+class BrokerAuthenticationError(BrokerError):
+    """
+    Raised specifically when the broker rejects our credentials — an expired
+    or revoked refresh token, not a generic network/API failure. Kept
+    distinct from BrokerError so callers can react differently: a broker
+    authentication failure means every subsequent call will fail the same
+    way until a human re-authenticates, so it should halt trading rather
+    than retry or surface as one more generic error among many.
+    """
+
+
 class BrokerAdapter(ABC):
     """Broker-neutral API used by the execution core."""
 

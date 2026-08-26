@@ -8,11 +8,16 @@ from typing import Optional
 import uuid
 
 from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.brokers.base import BrokerAuthenticationError
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
 from src.execution.executor import Executor
+from src.execution.kill_switch_state import KillSwitchService
+from src.execution.position_reconciliation import PositionReconciliationService
 from src.execution.reconciliation import ReconciliationService
 from src.logging_config import configure_logging, get_logger
 from src.models.orders import (
@@ -36,11 +41,16 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Global state
-_kill_switch_state = False
-_kill_switch_actor = "system"
-_kill_switch_timestamp = datetime.utcnow()
-
+# Local-dev CORS: permissive so the operator widget (served from a different
+# port) can call this API directly from the browser. Tighten this to a named
+# allowlist of origins before this is ever deployed anywhere reachable
+# outside localhost.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_db() -> Session:
     """Dependency for database session."""
@@ -81,7 +91,7 @@ async def health_check(db: Session = Depends(get_db)) -> HealthStatus:
     # Check database
     db_status = "ok"
     try:
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
     except Exception as e:
         db_status = "error"
         logger.error("database_health_check_failed", error=str(e))
@@ -127,6 +137,17 @@ async def preview_order(
     except ValueError as e:
         logger.error("preview_validation_error", decision_id=proposal.decision_id, error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+    except BrokerAuthenticationError as e:
+        # The kill switch has already been auto-engaged by Executor at this
+        # point (see _shutdown_on_auth_failure) — this response just needs
+        # to make the *cause* legible, distinctly from a generic 500, so an
+        # operator sees "re-authenticate with the broker" rather than
+        # guessing from a bare "Preview failed".
+        logger.critical("preview_broker_auth_failed", decision_id=proposal.decision_id, error=str(e))
+        raise HTTPException(
+            status_code=503,
+            detail=f"Broker authentication failed; trading halted pending re-authentication: {e}",
+        )
     except Exception as e:
         logger.error("preview_error", decision_id=proposal.decision_id, error=str(e))
         raise HTTPException(status_code=500, detail="Preview failed")
@@ -173,6 +194,12 @@ async def execute_order(
     except ValueError as e:
         logger.error("execute_validation_error", decision_id=request.decision_id, error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+    except BrokerAuthenticationError as e:
+        logger.critical("execute_broker_auth_failed", decision_id=request.decision_id, error=str(e))
+        raise HTTPException(
+            status_code=503,
+            detail=f"Broker authentication failed; trading halted pending re-authentication: {e}",
+        )
     except Exception as e:
         logger.error("execute_error", decision_id=request.decision_id, error=str(e))
         raise HTTPException(status_code=500, detail="Execution failed")
@@ -210,20 +237,17 @@ async def kill_switch_on(
     Prevents all new order executions.
     Requires admin API key.
     """
-    
-    global _kill_switch_state, _kill_switch_actor, _kill_switch_timestamp
-    
-    _kill_switch_state = True
-    _kill_switch_actor = "admin"
-    _kill_switch_timestamp = datetime.utcnow()
-    
-    logger.warning("kill_switch_enabled", actor=_kill_switch_actor)
-    
+    record = KillSwitchService(db).set_state(
+        enabled=True, set_by="admin", reason="Manually activated by admin"
+    )
+
+    logger.warning("kill_switch_enabled", actor=record.set_by)
+
     return KillSwitchStatus(
-        enabled=True,
-        set_by=_kill_switch_actor,
-        set_at=_kill_switch_timestamp,
-        reason="Manually activated by admin",
+        enabled=record.enabled,
+        set_by=record.set_by,
+        set_at=record.set_at,
+        reason=record.reason,
     )
 
 
@@ -237,30 +261,29 @@ async def kill_switch_off(
     Allows order executions to resume.
     Requires admin API key.
     """
-    
-    global _kill_switch_state, _kill_switch_actor, _kill_switch_timestamp
-    
-    _kill_switch_state = False
-    _kill_switch_actor = "admin"
-    _kill_switch_timestamp = datetime.utcnow()
-    
-    logger.info("kill_switch_disabled", actor=_kill_switch_actor)
-    
+    record = KillSwitchService(db).set_state(
+        enabled=False, set_by="admin", reason="Manually deactivated by admin"
+    )
+
+    logger.info("kill_switch_disabled", actor=record.set_by)
+
     return KillSwitchStatus(
-        enabled=False,
-        set_by=_kill_switch_actor,
-        set_at=_kill_switch_timestamp,
-        reason="Manually deactivated by admin",
+        enabled=record.enabled,
+        set_by=record.set_by,
+        set_at=record.set_at,
+        reason=record.reason,
     )
 
 
 @app.get("/v1/kill-switch/status", response_model=KillSwitchStatus)
-async def get_kill_switch_status() -> KillSwitchStatus:
+async def get_kill_switch_status(db: Session = Depends(get_db)) -> KillSwitchStatus:
     """Query current kill switch state."""
+    record = KillSwitchService(db).get_state()
     return KillSwitchStatus(
-        enabled=_kill_switch_state,
-        set_by=_kill_switch_actor,
-        set_at=_kill_switch_timestamp,
+        enabled=record.enabled,
+        set_by=record.set_by,
+        set_at=record.set_at,
+        reason=record.reason,
     )
 
 
@@ -269,6 +292,32 @@ async def get_market_status():
     """Query current US market hours status."""
     validator = MarketHoursValidator()
     return validator.get_market_status()
+
+
+@app.post("/v1/reconciliation/positions")
+async def reconcile_positions(
+    account: str = "primary",
+    db: Session = Depends(get_db),
+):
+    """
+    Reconcile this system's believed positions (summed from filled order
+    history) against what the broker actually reports for the account.
+    Intended to run before every trading session begins — see
+    PositionReconciliationService for why per-order status polling alone
+    doesn't answer this question.
+
+    On any mismatch, this automatically trips the kill switch — no admin
+    key required to call this endpoint, since its only possible side effect
+    is halting trading, never resuming it (resuming still requires the
+    admin-gated /v1/kill-switch/off).
+    """
+    try:
+        service = PositionReconciliationService(session=db)
+        report = await service.reconcile_or_halt(account, halted_by="reconciliation_check")
+        return report.to_dict()
+    except Exception as e:
+        logger.error("position_reconciliation_error", account=account, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Position reconciliation failed: {e}")
 
 
 if __name__ == "__main__":

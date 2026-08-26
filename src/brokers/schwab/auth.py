@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from src.brokers.base import BrokerError
+from src.brokers.base import BrokerAuthenticationError, BrokerError
 
 
 class SchwabOAuthClient:
@@ -52,7 +52,7 @@ class SchwabOAuthClient:
         if self.access_token and self.access_token_expires_at and datetime.now(UTC) < self.access_token_expires_at:
             return self.access_token
         if not self.refresh_token:
-            raise BrokerError("Schwab refresh token is required for authenticated API calls")
+            raise BrokerAuthenticationError("Schwab refresh token is required for authenticated API calls")
         data = await self._request_token({"grant_type": "refresh_token", "refresh_token": self.refresh_token})
         self._store_token_response(data)
         return self.access_token or ""
@@ -60,6 +60,18 @@ class SchwabOAuthClient:
     async def _request_token(self, payload: dict[str, str]) -> dict[str, Any]:
         async with httpx.AsyncClient(transport=self.transport) as client:
             response = await client.post(self.TOKEN_URL, auth=(self.app_key, self.app_secret), data=payload)
+            if response.status_code in (400, 401, 403):
+                # Schwab refresh tokens are valid for 7 days and cannot be
+                # renewed automatically — this status means ours is expired,
+                # revoked, or otherwise rejected, and every subsequent call
+                # will fail identically until a human re-authenticates
+                # in-browser. Surface that distinctly from a transient
+                # network/5xx failure, which is worth retrying.
+                raise BrokerAuthenticationError(
+                    f"Schwab rejected the OAuth token request (HTTP {response.status_code}); "
+                    f"the refresh token is likely expired or revoked and requires interactive "
+                    f"re-authentication: {response.text}"
+                )
             response.raise_for_status()
             return response.json()
 

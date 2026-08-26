@@ -1,6 +1,6 @@
 """Tests for API endpoints."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -71,6 +71,180 @@ class TestPreviewEndpoint:
         )
         
         assert response.status_code == 422
+
+
+class TestExecuteEndpoint:
+    """
+    Test POST /v1/orders/execute — the endpoint that actually submits to the
+    broker. Previously untested: execute_order() checked for a pre-existing
+    approval record before ever recording one, so every execute call failed
+    with "No valid approval found" regardless of what was sent. These tests
+    exist to keep that path exercised going forward.
+    """
+
+    def _preview(self, client, proposal):
+        resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        assert resp.status_code == 200
+        return resp.json()["preview_id"]
+
+    @staticmethod
+    def _unique_proposal(sample_trade_proposal, suffix):
+        # The idempotency dedup below is intentionally keyed by
+        # (decision_id, operation) alone, not by idempotency_key — that's
+        # correct production behavior (it should not be possible to
+        # re-execute the same decision twice just by minting a fresh
+        # idempotency_key). Test isolation therefore has to come from giving
+        # each test its own decision_id, not from varying idempotency_key.
+        return sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-{suffix}"}
+        )
+
+    def test_execute_valid_order_succeeds(self, client, sample_trade_proposal):
+        """A previewed order can be executed with a complete, fresh approval."""
+        proposal = self._unique_proposal(sample_trade_proposal, "exec-ok")
+        preview_id = self._preview(client, proposal)
+
+        response = client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview_id,
+                "approval": {
+                    "preview_id": preview_id,
+                    "approved_by": "test_operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "Approved for integration test",
+                    "idempotency_key": f"{proposal.decision_id}:exec:1",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["decision_id"] == proposal.decision_id
+        assert data["status"] == "SUBMITTED"
+        assert "execution_id" in data
+
+    def test_execute_rejects_empty_attestation(self, client, sample_trade_proposal):
+        """An approval with an empty attestation is rejected, not silently accepted."""
+        proposal = self._unique_proposal(sample_trade_proposal, "empty-attest")
+        preview_id = self._preview(client, proposal)
+
+        response = client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview_id,
+                "approval": {
+                    "preview_id": preview_id,
+                    "approved_by": "test_operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "",
+                    "idempotency_key": f"{proposal.decision_id}:exec:2",
+                },
+            },
+        )
+
+        assert response.status_code == 400
+
+    def test_execute_rejects_stale_approval(self, client, sample_trade_proposal):
+        """An approval older than the configured max age is rejected."""
+        proposal = self._unique_proposal(sample_trade_proposal, "stale")
+        preview_id = self._preview(client, proposal)
+        stale_time = datetime.utcnow() - timedelta(hours=2)
+
+        response = client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview_id,
+                "approval": {
+                    "preview_id": preview_id,
+                    "approved_by": "test_operator",
+                    "approved_at": stale_time.isoformat(),
+                    "attestation": "Approved but stale",
+                    "idempotency_key": f"{proposal.decision_id}:exec:3",
+                },
+            },
+        )
+
+        assert response.status_code == 400
+
+    def test_duplicate_execute_returns_cached_response(self, client, sample_trade_proposal):
+        """
+        Executing the same decision twice returns the original result rather
+        than resubmitting to the broker a second time.
+        """
+        proposal = self._unique_proposal(sample_trade_proposal, "dup")
+        preview_id = self._preview(client, proposal)
+        payload = {
+            "decision_id": proposal.decision_id,
+            "preview_id": preview_id,
+            "approval": {
+                "preview_id": preview_id,
+                "approved_by": "test_operator",
+                "approved_at": datetime.utcnow().isoformat(),
+                "attestation": "Approved for integration test",
+                "idempotency_key": f"{proposal.decision_id}:exec:4",
+            },
+        }
+
+        first = client.post("/v1/orders/execute", json=payload)
+        assert first.status_code == 200
+
+        second = client.post("/v1/orders/execute", json=payload)
+        assert second.status_code == 200
+        assert second.json()["execution_id"] == first.json()["execution_id"]
+
+
+class TestKillSwitchActuallyBlocksOrders:
+    """
+    The kill switch admin endpoints and the actual order-blocking check used
+    to be completely disconnected: POST /v1/kill-switch/on updated an
+    in-process module global that only /v1/kill-switch/status ever read,
+    while Executor._get_kill_switch_state() read a totally different, static
+    value (settings.kill_switch_enabled from .env) that the endpoint never
+    touched. Enabling the kill switch through the API did not, in fact,
+    prevent a single new order from being previewed. These tests exercise
+    the real end-to-end path — through the actual HTTP endpoints, not a
+    directly-constructed RiskChecker.evaluate(kill_switch_on=True) call —
+    since that's exactly the seam where the wiring was broken.
+    """
+
+    def test_preview_rejected_while_kill_switch_on(self, client, sample_trade_proposal):
+        # A unique decision_id, not the fixture's plain one — other tests in
+        # this file preview that same decision_id, and the (correctly
+        # working) preview idempotency cache would otherwise hand back
+        # their cached, pre-kill-switch APPROVED result here instead of
+        # actually exercising this test's own request.
+        proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-ks-on"}
+        )
+        on_resp = client.post("/v1/kill-switch/on", headers={"x-admin-key": "change-me-in-prod"})
+        assert on_resp.status_code == 200
+        assert on_resp.json()["enabled"] is True
+
+        try:
+            preview_resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+            assert preview_resp.status_code == 200
+            data = preview_resp.json()
+            assert data["risk_verdict"] == "REJECTED", (
+                "Order was still APPROVED while the kill switch was ON via the real API"
+            )
+            assert data["risk_details"]["checks"]["kill_switch_off"] is False
+        finally:
+            client.post("/v1/kill-switch/off", headers={"x-admin-key": "change-me-in-prod"})
+
+    def test_preview_allowed_again_after_kill_switch_off(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-ks-off"}
+        )
+        client.post("/v1/kill-switch/on", headers={"x-admin-key": "change-me-in-prod"})
+        client.post("/v1/kill-switch/off", headers={"x-admin-key": "change-me-in-prod"})
+
+        preview_resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        assert preview_resp.status_code == 200
+        assert preview_resp.json()["risk_verdict"] == "APPROVED"
 
 
 class TestHealthEndpoint:

@@ -11,13 +11,14 @@ from sqlmodel import SQLModel, Session, select, Field
 
 from src.accounts.profiles import BrokerName
 from src.broker.order_builder import OrderBuilder
-from src.brokers.base import BrokerAdapter
+from src.brokers.base import BrokerAdapter, BrokerAuthenticationError
 from src.brokers.paper import PaperBrokerAdapter
 from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab.auth import SchwabOAuthClient
 from src.config import get_settings
 from src.execution.approval import ApprovalManager
 from src.execution.idempotency import IdempotencyManager, Operation
+from src.execution.kill_switch_state import KillSwitchService
 from src.logging_config import get_logger
 from src.models.orders import (
     OrderPreview,
@@ -84,11 +85,18 @@ class Executor:
         5. Persist and return preview
         """
         
-        # Check for duplicate preview
+        # Check for duplicate preview. This must actually short-circuit:
+        # OrderRecord.decision_id is a unique column, so letting execution
+        # fall through to insert a second preview row for the same
+        # decision_id below would raise a database integrity error instead
+        # of a clean response.
         if self.idempotency.is_duplicate(proposal.decision_id, Operation.PREVIEW):
-            logger.warning("duplicate_preview", decision_id=proposal.decision_id)
-            # Could return cached response here
-        
+            cached = self.idempotency.get_existing_response(proposal.decision_id, Operation.PREVIEW)
+            if cached:
+                logger.warning("duplicate_preview_returned_cached_response", decision_id=proposal.decision_id)
+                return OrderPreview.model_validate_json(cached)
+            logger.warning("duplicate_preview_no_cached_response_found", decision_id=proposal.decision_id)
+
         # Get current kill switch state
         kill_switch_on = self._get_kill_switch_state()
         
@@ -103,7 +111,11 @@ class Executor:
         order_spec = self.builder.build_order_spec(proposal, proposal.account)
         
         # Call the selected broker preview implementation.
-        broker_response = await self.broker.preview_order(profile, order_spec)
+        try:
+            broker_response = await self.broker.preview_order(profile, order_spec)
+        except BrokerAuthenticationError as exc:
+            self._shutdown_on_auth_failure(exc)
+            raise
         
         # Generate preview ID
         preview_id = f"preview-{uuid.uuid4()}"
@@ -137,7 +149,7 @@ class Executor:
         )
         
         # Build response
-        return OrderPreview(
+        preview = OrderPreview(
             preview_id=preview_id,
             decision_id=proposal.decision_id,
             preview_details=broker_response,
@@ -148,6 +160,17 @@ class Executor:
             payload_checksum=checksum,
             expires_at=expires_at,
         )
+
+        # Register idempotency with the actual response, so a duplicate
+        # preview request (see the check above) can return this same result.
+        self.idempotency.register(
+            proposal.decision_id,
+            Operation.PREVIEW,
+            f"preview:{proposal.decision_id}",
+            response_body=preview.model_dump_json(),
+        )
+
+        return preview
     
     async def execute_order(
         self,
@@ -167,30 +190,57 @@ class Executor:
         5. Persist execution and return receipt
         """
         
-        # Check for duplicate execution
+        # Check for duplicate execution. This must actually short-circuit and
+        # return the original result, not just log a warning and continue —
+        # otherwise a retried/duplicated request resubmits to the broker a
+        # second time, which is exactly what idempotency protection exists
+        # to prevent.
         if self.idempotency.is_duplicate(decision_id, Operation.EXECUTE):
-            logger.warning("duplicate_execute", decision_id=decision_id)
-        
+            cached = self.idempotency.get_existing_response(decision_id, Operation.EXECUTE)
+            if cached:
+                logger.warning("duplicate_execute_returned_cached_response", decision_id=decision_id)
+                return ExecutionReceipt.model_validate_json(cached)
+            logger.warning("duplicate_execute_no_cached_response_found", decision_id=decision_id)
+
         # Fetch order record
         stmt = select(OrderRecord).where(OrderRecord.decision_id == decision_id)
         order = self.session.exec(stmt).first()
-        
+
         if not order:
             raise ValueError(f"Order {decision_id} not found")
-        
+
         # Verify preview hasn't expired
         if order.preview_expires_at and datetime.utcnow() > order.preview_expires_at:
             raise ValueError(f"Preview expired at {order.preview_expires_at}")
-        
+
         # Verify preview_id matches
         if order.preview_id != preview_id:
             raise ValueError(f"Preview ID mismatch: expected {order.preview_id}, got {preview_id}")
-        
-        # Verify approval exists and is recent
-        if not self.approval_manager.verify_approval(preview_id, decision_id):
-            raise ValueError(f"No valid approval found for {preview_id}")
-        
-        # Record approval
+
+        # Verify the approval supplied with this request is complete and
+        # fresh. There is no separate "record approval first" endpoint in
+        # this API — the approval artifact arrives inline in this single
+        # call — so there is no pre-existing database record to look up yet.
+        # (Checking approval_manager.verify_approval() here, before ever
+        # calling record_approval(), would always fail: it queries for a
+        # record that cannot exist until the line below creates it. That bug
+        # meant no order could ever be executed through this endpoint.)
+        if not approved_by or not approved_by.strip():
+            raise ValueError("Approval must include a non-empty approved_by.")
+        if not attestation or not attestation.strip():
+            raise ValueError("Approval must include a non-empty attestation.")
+
+        approved_at_naive = approved_at.replace(tzinfo=None) if approved_at.tzinfo else approved_at
+        approval_age = datetime.utcnow() - approved_at_naive
+        if approval_age < timedelta(0):
+            raise ValueError("Approval timestamp is in the future.")
+        if approval_age > timedelta(minutes=self.approval_manager.MAX_APPROVAL_AGE_MINUTES):
+            raise ValueError(
+                f"Approval is stale ({approval_age.total_seconds() / 60:.1f} min old; "
+                f"must be within {self.approval_manager.MAX_APPROVAL_AGE_MINUTES} min)."
+            )
+
+        # Record approval for the audit trail
         self.approval_manager.record_approval(
             preview_id=preview_id,
             decision_id=decision_id,
@@ -199,7 +249,7 @@ class Executor:
             attestation=attestation,
             idempotency_key=idempotency_key,
         )
-        
+
         # Re-run kill switch check (critical)
         kill_switch_on = self._get_kill_switch_state()
         if kill_switch_on:
@@ -220,7 +270,11 @@ class Executor:
         )
         
         profile = self.settings.get_account_profile(order.account)
-        broker_response = await self.broker.submit_order(profile, order_spec)
+        try:
+            broker_response = await self.broker.submit_order(profile, order_spec)
+        except BrokerAuthenticationError as exc:
+            self._shutdown_on_auth_failure(exc)
+            raise
         
         # Extract broker order ID
         execution_id = broker_response.get("orderId", f"exec-{uuid.uuid4()}")
@@ -234,24 +288,31 @@ class Executor:
         
         self.session.add(order)
         self.session.commit()
-        
-        # Register idempotency
-        self.idempotency.register(decision_id, Operation.EXECUTE, idempotency_key)
-        
-        # Audit log
-        self._audit_log(
-            "ORDER_EXECUTED",
-            decision_id,
-            {"execution_id": execution_id, "approved_by": approved_by},
-        )
-        
-        return ExecutionReceipt(
+
+        receipt = ExecutionReceipt(
             decision_id=decision_id,
             execution_id=execution_id,
             status=OrderStatus.SUBMITTED,
             submitted_at=datetime.utcnow(),
             broker_response=broker_response,
         )
+
+        # Register idempotency with the actual response body, so a duplicate
+        # request (see the check at the top of this method) can return the
+        # original result instead of resubmitting to the broker.
+        self.idempotency.register(
+            decision_id, Operation.EXECUTE, idempotency_key,
+            response_body=receipt.model_dump_json(),
+        )
+
+        # Audit log
+        self._audit_log(
+            "ORDER_EXECUTED",
+            decision_id,
+            {"execution_id": execution_id, "approved_by": approved_by},
+        )
+
+        return receipt
     
     async def get_order_status(self, decision_id: str) -> OrderStatus_Model:
         """Query order status."""
@@ -273,9 +334,39 @@ class Executor:
         )
     
     def _get_kill_switch_state(self) -> bool:
-        """Get current kill switch state."""
-        # In production, would query database
-        return self.settings.kill_switch_enabled
+        """
+        Get current kill switch state.
+
+        This must read the same persisted state the admin API endpoints
+        (POST /v1/kill-switch/on and /off) actually write — previously it
+        read settings.kill_switch_enabled, a static default sourced from
+        .env that those endpoints never touched, so turning the kill switch
+        "on" through the API did not stop a single new order from being
+        previewed or executed. settings.kill_switch_enabled is still
+        consulted as a startup default (e.g. force it on for a given
+        environment via .env), but the persisted, API-controlled state
+        always wins once anyone has actually toggled it.
+        """
+        if self.settings.kill_switch_enabled:
+            return True
+        return KillSwitchService(self.session).is_enabled()
+
+    def _shutdown_on_auth_failure(self, exc: BrokerAuthenticationError) -> None:
+        """
+        A broker authentication failure (expired/revoked refresh token) means
+        every subsequent call will fail identically until a human
+        re-authenticates interactively — there is nothing productive left
+        for this process to retry. Automatically trip the kill switch so the
+        system halts and demands attention, rather than surfacing this one
+        error and silently accepting the next request as if nothing were
+        wrong.
+        """
+        logger.critical("broker_authentication_failed_auto_shutdown", error=str(exc))
+        KillSwitchService(self.session).set_state(
+            enabled=True,
+            set_by="system",
+            reason=f"Auto-shutdown: broker authentication failed ({exc})",
+        )
 
     def _build_broker_adapter(self, mock_broker: bool) -> BrokerAdapter:
         """Choose the configured broker without allowing implicit live trading."""

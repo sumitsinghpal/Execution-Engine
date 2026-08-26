@@ -46,12 +46,17 @@ class Settings(BaseSettings):
     # Kill switch
     kill_switch_enabled: bool = False
     
-    # Account allowlist
-    account_allowlist: list[str] = ["primary"]
-    
-    # Symbol configuration
-    symbol_allowlist: list[str] = ["QQQ", "SPY", "IWM", "EEM", "GLD", "TLT"]
-    symbol_denylist: list[str] = []
+    # Account allowlist. Stored raw (comma-separated) because pydantic-settings tries
+    # to JSON-parse any list[str]-typed field loaded from an env var / .env file and
+    # crashes on a plain "primary,secondary" string. See the *_allowlist/*_denylist
+    # properties below for the parsed list form actually used elsewhere in the code.
+    account_allowlist_raw: str = Field(default="primary", validation_alias="ACCOUNT_ALLOWLIST")
+
+    # Symbol configuration (comma-separated strings; see parsed properties below)
+    symbol_allowlist_raw: str = Field(
+        default="QQQ,SPY,IWM,EEM,GLD,TLT", validation_alias="SYMBOL_ALLOWLIST"
+    )
+    symbol_denylist_raw: str = Field(default="", validation_alias="SYMBOL_DENYLIST")
     
     # Risk limits
     max_order_notional_usd: Decimal = Decimal("100000")
@@ -80,14 +85,34 @@ class Settings(BaseSettings):
         if not profile:
             raise ValueError(f"Unknown account alias: {alias}")
         return profile
-    
-    def __init__(self, **data):
-        """Parse comma-separated list fields."""
-        # Handle comma-separated lists
-        for field in ["account_allowlist", "symbol_allowlist", "symbol_denylist"]:
-            if field in data and isinstance(data[field], str):
-                data[field] = [s.strip() for s in data[field].split(",") if s.strip()]
-        super().__init__(**data)
+
+    @staticmethod
+    def _split_csv(value: str) -> list[str]:
+        return [s.strip() for s in value.split(",") if s.strip()]
+
+    @property
+    def account_allowlist(self) -> list[str]:
+        return self._split_csv(self.account_allowlist_raw)
+
+    @account_allowlist.setter
+    def account_allowlist(self, value: list[str]) -> None:
+        self.account_allowlist_raw = ",".join(value)
+
+    @property
+    def symbol_allowlist(self) -> list[str]:
+        return self._split_csv(self.symbol_allowlist_raw)
+
+    @symbol_allowlist.setter
+    def symbol_allowlist(self, value: list[str]) -> None:
+        self.symbol_allowlist_raw = ",".join(value)
+
+    @property
+    def symbol_denylist(self) -> list[str]:
+        return self._split_csv(self.symbol_denylist_raw)
+
+    @symbol_denylist.setter
+    def symbol_denylist(self, value: list[str]) -> None:
+        self.symbol_denylist_raw = ",".join(value)
 
 
 def get_settings() -> Settings:

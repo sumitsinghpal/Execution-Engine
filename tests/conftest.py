@@ -15,6 +15,7 @@ from sqlmodel import Session, SQLModel
 from src.execution.idempotency import IdempotencyRecord
 from src.execution.approval import ApprovalRecord
 from src.execution.executor import OrderRecord
+from src.execution.kill_switch_state import KillSwitchRecord
 from src.execution.reconciliation import ReconciliationEvent
 from src.audit.ledger import AuditLedger
 
@@ -30,10 +31,12 @@ def test_settings():
     os.close(db_fd)
     
     return Settings(
+        _env_file=None,  # ignore any local .env so tests are hermetic
         database_url=f"sqlite:///{db_path}",
         schwab_app_key="test-key",
         schwab_app_secret="test-secret",
         schwab_refresh_token="test-token",
+        api_key_admin="change-me-in-prod",
         env="test",
         kill_switch_enabled=False,
     )
@@ -67,24 +70,29 @@ def test_db(test_db_engine_and_session):
 
 
 @pytest.fixture
-def app_with_test_db(test_db_engine_and_session):
+def app_with_test_db(test_db_engine_and_session, test_settings):
     """Create app with test database."""
-    from src.api.server import app, get_db
-    
+    from src.api.server import app, get_db, get_settings_dep
+
     engine, test_session = test_db_engine_and_session
-    
+
     def get_test_db_session():
         """Test database dependency."""
         try:
             yield test_session
         finally:
             pass
-    
+
     # Override the get_db dependency
     app.dependency_overrides[get_db] = get_test_db_session
-    
+    # Override settings too, so tests don't silently pick up whatever the
+    # developer's local .env happens to contain (e.g. a non-default admin
+    # API key), which otherwise makes admin-key-gated tests fail/pass based
+    # on machine-local state rather than the fixture's known test values.
+    app.dependency_overrides[get_settings_dep] = lambda: test_settings
+
     yield app
-    
+
     app.dependency_overrides.clear()
 
 
