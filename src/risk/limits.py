@@ -21,6 +21,12 @@ class RiskVerdict:
     approved: bool
     checks: dict[str, bool]
     rejections: list[str]
+    # The notional this evaluation computed (see _calculate_notional), None
+    # if it couldn't be determined. Exposed so callers with DB access (this
+    # class has none) can layer further checks on the same number instead
+    # of re-deriving it — e.g. Executor's cross-agent combined-symbol-
+    # exposure check (src/execution/symbol_coordination.py).
+    notional_usd: Optional[Decimal] = None
 
 
 class RiskChecker:
@@ -125,6 +131,7 @@ class RiskChecker:
             approved=len(rejections) == 0,
             checks=checks,
             rejections=rejections,
+            notional_usd=notional,
         )
 
     def _check_quote_freshness(

@@ -38,7 +38,7 @@ logger = get_logger(__name__)
 # Orders that represent capital actually committed to the broker — not a
 # preview that was never approved, and not one that was submitted and then
 # definitively didn't happen.
-_COMMITTED_STATUSES = {
+COMMITTED_ORDER_STATUSES = {
     OrderStatus.SUBMITTED.value,
     OrderStatus.ACKNOWLEDGED.value,
     OrderStatus.PARTIAL_FILL.value,
@@ -81,7 +81,7 @@ class AgentExposureGuard:
         today = self._today()
         stmt = select(OrderRecord).where(
             OrderRecord.agent_id == agent_id,
-            OrderRecord.status.in_(_COMMITTED_STATUSES),
+            OrderRecord.status.in_(COMMITTED_ORDER_STATUSES),
         )
         total = Decimal("0")
         for order in self.session.exec(stmt).all():
@@ -144,4 +144,4 @@ class AgentExposureGuard:
         return report
 
 
-__all__ = ["AgentExposureReport", "AgentExposureGuard"]
+__all__ = ["AgentExposureReport", "AgentExposureGuard", "COMMITTED_ORDER_STATUSES"]

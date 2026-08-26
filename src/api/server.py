@@ -4,6 +4,7 @@ External contract for EDGE-TF integration.
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 import uuid
 
@@ -22,6 +23,7 @@ from src.execution.executor import Executor, OrderRecord
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
 from src.execution.position_reconciliation import PositionReconciliationService
 from src.execution.reconciliation import ReconciliationService
+from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.logging_config import configure_logging, get_logger
 from src.models.orders import (
     TradeProposal,
@@ -495,6 +497,29 @@ async def check_agent_exposure(
     except Exception as e:
         logger.error("agent_exposure_check_error", agent_id=agent_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Agent exposure check failed: {e}")
+
+
+@app.get("/v1/risk/symbol-exposure")
+async def get_symbol_exposure(
+    account: str,
+    symbol: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Read-only view of today's combined committed notional for one
+    (account, symbol) pair, summed across every agent — the same number
+    Executor checks synchronously at preview time (see
+    SymbolCoordinationGuard). Useful for a coordination dashboard, or for
+    an agent to check headroom before proposing an order rather than
+    finding out from a rejection.
+    """
+    try:
+        guard = SymbolCoordinationGuard(session=db)
+        report = guard.check(account, symbol, Decimal("0"))
+        return report.to_dict()
+    except Exception as e:
+        logger.error("symbol_exposure_query_error", account=account, symbol=symbol, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Symbol exposure query failed: {e}")
 
 
 if __name__ == "__main__":

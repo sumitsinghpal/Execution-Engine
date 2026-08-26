@@ -19,6 +19,7 @@ from src.config import get_settings
 from src.execution.approval import ApprovalManager
 from src.execution.idempotency import IdempotencyManager, Operation
 from src.execution.kill_switch_state import KillSwitchService
+from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.logging_config import get_logger
 from src.models.orders import (
     OrderPreview,
@@ -123,7 +124,27 @@ class Executor:
 
         # Run risk checks
         verdict = self.risk_checker.evaluate(proposal, kill_switch_on, quote=quote)
-        
+
+        # Cross-agent coordination check: does this order, combined with
+        # what every agent has already committed to this (account, symbol)
+        # today, exceed the fleet-wide combined cap — even though this
+        # order alone is within its own agent's limits. Only meaningful
+        # when RiskChecker could price the order at all and settings has
+        # opted into a combined cap; see SymbolCoordinationGuard's own
+        # docstring for the concurrency caveat.
+        if verdict.notional_usd is not None and self.settings.max_combined_symbol_notional_usd is not None:
+            coordination_report = SymbolCoordinationGuard(self.session, settings=self.settings).check(
+                proposal.account, proposal.symbol, verdict.notional_usd
+            )
+            verdict.checks["combined_symbol_exposure_ok"] = not coordination_report.breached
+            if coordination_report.breached:
+                verdict.approved = False
+                verdict.rejections.append(
+                    f"Combined notional ${coordination_report.combined_notional_usd} across all agents for "
+                    f"'{proposal.symbol}' in account '{proposal.account}' would exceed the fleet-wide cap "
+                    f"${coordination_report.cap_usd}"
+                )
+
         # Compute checksum for later verification
         checksum = OrderBuilder.compute_payload_checksum(proposal)
         

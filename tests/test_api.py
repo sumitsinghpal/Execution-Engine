@@ -371,6 +371,21 @@ class TestAgentExposureCheckEndpoint:
         assert float(exposure_resp.json()["committed_notional_usd"]) == pytest.approx(float(preview["estimated_cost"]))
 
 
+class TestSymbolExposureEndpoint:
+    """Test GET /v1/risk/symbol-exposure."""
+
+    def test_reports_zero_for_a_never_traded_symbol(self, client):
+        resp = client.get("/v1/risk/symbol-exposure", params={"account": "primary", "symbol": "EEM"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["account"] == "primary"
+        assert data["symbol"] == "EEM"
+        assert data["committed_notional_usd"] == "0"
+        assert data["cap_usd"] is None
+        assert data["breached"] is False
+
+
 class TestHealthEndpoint:
     """Test GET /v1/health."""
     

@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # An agent with no entry here uses the global defaults above unchanged.
     agent_risk_profiles: dict[str, AgentRiskProfile] = Field(default_factory=dict)
 
+    # Cross-agent coordination: the combined committed notional across
+    # EVERY agent trading a given (account, symbol) today, checked at
+    # preview time so two agents that are each individually under their
+    # own limits can't collectively over-concentrate in one symbol without
+    # either noticing. Opt-in (None disables it) — see
+    # src/execution/symbol_coordination.py.
+    max_combined_symbol_notional_usd: Optional[Decimal] = None
+
     # API Security
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False
