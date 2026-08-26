@@ -39,6 +39,7 @@ class OrderRecord(SQLModel, table=True):
     
     id: Optional[int] = Field(default=None, primary_key=True)
     decision_id: str = Field(unique=True, index=True)
+    agent_id: str = Field(default="default", index=True)
     preview_id: Optional[str] = Field(default=None, index=True)
     execution_id: Optional[str] = Field(default=None, index=True)
     account: str
@@ -97,8 +98,9 @@ class Executor:
                 return OrderPreview.model_validate_json(cached)
             logger.warning("duplicate_preview_no_cached_response_found", decision_id=proposal.decision_id)
 
-        # Get current kill switch state
-        kill_switch_on = self._get_kill_switch_state()
+        # Get current kill switch state — both the fleet-wide switch and
+        # this proposal's own agent's switch; either one blocks it.
+        kill_switch_on = self._get_kill_switch_state(proposal.agent_id)
 
         # Fetch a live quote for stale-quote / notional / limit-price-sanity
         # checks. A failure to fetch one is not fatal here — it's not an
@@ -142,6 +144,7 @@ class Executor:
         # Persist order record
         order_record = OrderRecord(
             decision_id=proposal.decision_id,
+            agent_id=proposal.agent_id,
             preview_id=preview_id,
             account=proposal.account,
             symbol=proposal.symbol,
@@ -159,7 +162,7 @@ class Executor:
         self._audit_log(
             "ORDER_PREVIEWED",
             proposal.decision_id,
-            {"preview_id": preview_id, "risk_approved": verdict.approved},
+            {"preview_id": preview_id, "risk_approved": verdict.approved, "agent_id": proposal.agent_id},
         )
         
         # Build response
@@ -264,15 +267,18 @@ class Executor:
             idempotency_key=idempotency_key,
         )
 
-        # Re-run kill switch check (critical)
-        kill_switch_on = self._get_kill_switch_state()
+        # Re-run kill switch check (critical) — both fleet-wide and this
+        # order's own agent's switch, so halting one agent mid-flight still
+        # blocks its in-flight orders at execute time, not just at preview.
+        kill_switch_on = self._get_kill_switch_state(order.agent_id)
         if kill_switch_on:
             raise ValueError("Kill switch is ON - order rejected")
-        
+
         # Build and submit order
         order_spec = self.builder.build_order_spec(
             TradeProposal(
                 decision_id=decision_id,
+                agent_id=order.agent_id,
                 account=order.account,
                 symbol=order.symbol,
                 asset_type="ETF",  # Would need to store this
@@ -323,7 +329,7 @@ class Executor:
         self._audit_log(
             "ORDER_EXECUTED",
             decision_id,
-            {"execution_id": execution_id, "approved_by": approved_by},
+            {"execution_id": execution_id, "approved_by": approved_by, "agent_id": order.agent_id},
         )
 
         return receipt
@@ -338,6 +344,7 @@ class Executor:
         
         return OrderStatus_Model(
             decision_id=decision_id,
+            agent_id=order.agent_id,
             execution_id=order.execution_id,
             status=OrderStatus(order.status),
             created_at=order.created_at,
@@ -347,23 +354,30 @@ class Executor:
             broker_message=order.broker_message,
         )
     
-    def _get_kill_switch_state(self) -> bool:
+    def _get_kill_switch_state(self, agent_id: str) -> bool:
         """
-        Get current kill switch state.
+        Get current kill switch state for a given agent.
 
         This must read the same persisted state the admin API endpoints
-        (POST /v1/kill-switch/on and /off) actually write — previously it
-        read settings.kill_switch_enabled, a static default sourced from
-        .env that those endpoints never touched, so turning the kill switch
-        "on" through the API did not stop a single new order from being
-        previewed or executed. settings.kill_switch_enabled is still
-        consulted as a startup default (e.g. force it on for a given
-        environment via .env), but the persisted, API-controlled state
-        always wins once anyone has actually toggled it.
+        (POST /v1/kill-switch/on and /off, and their per-agent equivalents
+        under /v1/kill-switch/agents/{agent_id}) actually write —
+        previously it read settings.kill_switch_enabled, a static default
+        sourced from .env that those endpoints never touched, so turning
+        the kill switch "on" through the API did not stop a single new
+        order from being previewed or executed. settings.kill_switch_enabled
+        is still consulted as a startup default (e.g. force it on for a
+        given environment via .env), but the persisted, API-controlled
+        state always wins once anyone has actually toggled it.
+
+        Checks both the fleet-wide switch and this agent's own switch (see
+        KillSwitchService.is_halted) — a deployment running multiple
+        coordinating agents needs to be able to halt one misbehaving agent
+        without an all-stop, while the fleet-wide switch still overrides
+        every agent regardless of its own state.
         """
         if self.settings.kill_switch_enabled:
             return True
-        return KillSwitchService(self.session).is_enabled()
+        return KillSwitchService(self.session).is_halted(agent_id)
 
     def _shutdown_on_auth_failure(self, exc: BrokerAuthenticationError) -> None:
         """

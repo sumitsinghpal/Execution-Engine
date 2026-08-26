@@ -7,17 +7,18 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Path, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from sqlmodel import select
 
 from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
 from src.execution.drawdown_guard import DrawdownGuard
-from src.execution.executor import Executor
-from src.execution.kill_switch_state import KillSwitchService
+from src.execution.executor import Executor, OrderRecord
+from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
 from src.execution.position_reconciliation import PositionReconciliationService
 from src.execution.reconciliation import ReconciliationService
 from src.logging_config import configure_logging, get_logger
@@ -297,6 +298,113 @@ async def get_kill_switch_status(db: Session = Depends(get_db)) -> KillSwitchSta
         set_at=record.set_at,
         reason=record.reason,
     )
+
+
+_AGENT_ID_PATH = Path(..., pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _reject_global_scope_as_agent_id(agent_id: str) -> None:
+    if agent_id == GLOBAL_SCOPE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{GLOBAL_SCOPE}' is reserved for the fleet-wide kill switch; use /v1/kill-switch/on|off|status",
+        )
+
+
+@app.post("/v1/kill-switch/agents/{agent_id}/on", response_model=KillSwitchStatus)
+async def agent_kill_switch_on(
+    agent_id: str = _AGENT_ID_PATH,
+    _: bool = Depends(verify_admin_key),
+    db: Session = Depends(get_db),
+) -> KillSwitchStatus:
+    """
+    Halt one agent, without affecting any other agent or the fleet-wide
+    switch — the redundant, per-agent half of the kill switch (see
+    KillSwitchService.is_halted). Requires admin API key.
+    """
+    _reject_global_scope_as_agent_id(agent_id)
+    record = KillSwitchService(db).set_state(
+        enabled=True, set_by="admin", reason=f"Manually activated by admin for agent '{agent_id}'", scope=agent_id
+    )
+    logger.warning("agent_kill_switch_enabled", agent_id=agent_id, actor=record.set_by)
+    return KillSwitchStatus(enabled=record.enabled, set_by=record.set_by, set_at=record.set_at, reason=record.reason)
+
+
+@app.post("/v1/kill-switch/agents/{agent_id}/off", response_model=KillSwitchStatus)
+async def agent_kill_switch_off(
+    agent_id: str = _AGENT_ID_PATH,
+    _: bool = Depends(verify_admin_key),
+    db: Session = Depends(get_db),
+) -> KillSwitchStatus:
+    """
+    Clear one agent's own halt. Does not clear the fleet-wide switch — if
+    that is also on, the agent stays blocked until it is cleared too.
+    Requires admin API key.
+    """
+    _reject_global_scope_as_agent_id(agent_id)
+    record = KillSwitchService(db).set_state(
+        enabled=False, set_by="admin", reason=f"Manually deactivated by admin for agent '{agent_id}'", scope=agent_id
+    )
+    logger.info("agent_kill_switch_disabled", agent_id=agent_id, actor=record.set_by)
+    return KillSwitchStatus(enabled=record.enabled, set_by=record.set_by, set_at=record.set_at, reason=record.reason)
+
+
+@app.get("/v1/kill-switch/agents/{agent_id}/status", response_model=KillSwitchStatus)
+async def get_agent_kill_switch_status(
+    agent_id: str = _AGENT_ID_PATH,
+    db: Session = Depends(get_db),
+) -> KillSwitchStatus:
+    """
+    Query one agent's own switch state — not whether the agent is actually
+    halted (that also depends on the fleet-wide switch; see
+    GET /v1/agents/status for the combined view).
+    """
+    _reject_global_scope_as_agent_id(agent_id)
+    record = KillSwitchService(db).get_state(scope=agent_id)
+    return KillSwitchStatus(enabled=record.enabled, set_by=record.set_by, set_at=record.set_at, reason=record.reason)
+
+
+@app.get("/v1/agents/status")
+async def get_agents_status(db: Session = Depends(get_db)):
+    """
+    Coordination-layer view across every agent this system knows about:
+    every agent_id seen in order history, merged with every agent_id that
+    has ever had its own kill switch toggled (an agent halted before it
+    has ever placed an order still shows up here). For each, reports
+    whether it is currently halted and, if so, whether that's from its own
+    switch, the fleet-wide switch, or both.
+    """
+    kill_switch_service = KillSwitchService(db)
+    global_record = kill_switch_service.get_state(GLOBAL_SCOPE)
+
+    seen_in_orders = set(db.exec(select(OrderRecord.agent_id).distinct()).all())
+    seen_in_switches = set(kill_switch_service.known_agent_scopes())
+    agent_ids = sorted(seen_in_orders | seen_in_switches)
+
+    agents = []
+    for agent_id in agent_ids:
+        agent_record = kill_switch_service.get_state(agent_id)
+        agents.append(
+            {
+                "agent_id": agent_id,
+                "halted": global_record.enabled or agent_record.enabled,
+                "halted_by_global_switch": global_record.enabled,
+                "halted_by_own_switch": agent_record.enabled,
+                "own_switch_set_by": agent_record.set_by,
+                "own_switch_set_at": agent_record.set_at,
+                "own_switch_reason": agent_record.reason,
+            }
+        )
+
+    return {
+        "global_kill_switch": {
+            "enabled": global_record.enabled,
+            "set_by": global_record.set_by,
+            "set_at": global_record.set_at,
+            "reason": global_record.reason,
+        },
+        "agents": agents,
+    }
 
 
 @app.get("/v1/market-status")

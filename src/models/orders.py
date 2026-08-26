@@ -5,6 +5,7 @@ This module defines all Pydantic models for API contracts and internal data stru
 All price/quantity handling uses Decimal to avoid floating-point precision issues.
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -56,6 +57,16 @@ class TradeProposal(BaseModel):
     Unknown fields are rejected (model_config.extra = 'forbid').
     """
     decision_id: str = Field(..., description="Unique decision ID from EDGE-TF (e.g., 'edge-20260821-001')")
+    agent_id: str = Field(
+        default="default",
+        description=(
+            "Identifier of the originating agent, for deployments running multiple "
+            "coordinating agents (e.g. distinct strategies/asset classes). Defaults "
+            "to 'default' for single-agent callers. Each agent can be halted "
+            "independently via /v1/kill-switch/agents/{agent_id} without affecting "
+            "any other agent, in addition to the fleet-wide kill switch."
+        ),
+    )
     account: str = Field(..., description="Target account identifier")
     symbol: str = Field(..., pattern="^[A-Z]{1,5}$", description="Trading symbol (uppercase, max 5 chars)")
     asset_type: AssetType = Field(..., description="Type of asset being traded")
@@ -77,6 +88,15 @@ class TradeProposal(BaseModel):
     def validate_symbol_uppercase(cls, v: str) -> str:
         if not v.isupper():
             raise ValueError("Symbol must be uppercase")
+        return v
+
+    @field_validator("agent_id")
+    @classmethod
+    def validate_agent_id(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", v):
+            raise ValueError("agent_id must be 1-64 characters of letters, digits, '-', or '_'")
+        if v == "__global__":
+            raise ValueError("agent_id '__global__' is reserved for the fleet-wide kill switch scope")
         return v
     
     @model_validator(mode="after")
@@ -139,6 +159,7 @@ class ExecutionReceipt(BaseModel):
 class OrderStatus_Model(BaseModel):
     """Status query response."""
     decision_id: str
+    agent_id: str = "default"
     execution_id: Optional[str]
     status: OrderStatus
     created_at: datetime

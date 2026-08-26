@@ -247,6 +247,82 @@ class TestKillSwitchActuallyBlocksOrders:
         assert preview_resp.json()["risk_verdict"] == "APPROVED"
 
 
+class TestMultiAgentKillSwitch:
+    """
+    A deployment running multiple coordinating agents needs to be able to
+    halt one misbehaving agent without an all-stop, while the fleet-wide
+    switch still overrides every agent regardless of its own state. These
+    tests exercise the real HTTP endpoints end-to-end, the same way
+    TestKillSwitchActuallyBlocksOrders does for the fleet-wide switch.
+    """
+
+    def test_halting_one_agent_does_not_block_another(self, client, sample_trade_proposal):
+        halted_agent_proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-agent-halted", "agent_id": "momentum-agent"}
+        )
+        other_agent_proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-agent-other", "agent_id": "meanrev-agent"}
+        )
+
+        on_resp = client.post(
+            "/v1/kill-switch/agents/momentum-agent/on", headers={"x-admin-key": "change-me-in-prod"}
+        )
+        assert on_resp.status_code == 200
+        assert on_resp.json()["enabled"] is True
+
+        try:
+            halted_resp = client.post("/v1/orders/preview", json=halted_agent_proposal.model_dump(mode="json"))
+            assert halted_resp.json()["risk_verdict"] == "REJECTED"
+
+            other_resp = client.post("/v1/orders/preview", json=other_agent_proposal.model_dump(mode="json"))
+            assert other_resp.json()["risk_verdict"] == "APPROVED", (
+                "halting one agent must not block a different agent's orders"
+            )
+        finally:
+            client.post("/v1/kill-switch/agents/momentum-agent/off", headers={"x-admin-key": "change-me-in-prod"})
+
+    def test_agent_kill_switch_requires_admin_key(self, client):
+        resp = client.post("/v1/kill-switch/agents/some-agent/on")
+        assert resp.status_code == 403
+
+    def test_agent_kill_switch_rejects_reserved_global_scope(self, client):
+        resp = client.post("/v1/kill-switch/agents/__global__/on", headers={"x-admin-key": "change-me-in-prod"})
+        assert resp.status_code == 400
+
+    def test_agent_kill_switch_status_reflects_toggled_state(self, client):
+        client.post("/v1/kill-switch/agents/status-probe-agent/on", headers={"x-admin-key": "change-me-in-prod"})
+        try:
+            status_resp = client.get("/v1/kill-switch/agents/status-probe-agent/status")
+            assert status_resp.status_code == 200
+            assert status_resp.json()["enabled"] is True
+        finally:
+            client.post("/v1/kill-switch/agents/status-probe-agent/off", headers={"x-admin-key": "change-me-in-prod"})
+
+    def test_agents_status_reports_combined_global_and_own_state(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-coord-view", "agent_id": "coordination-probe"}
+        )
+        client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        client.post(
+            "/v1/kill-switch/agents/coordination-probe/on", headers={"x-admin-key": "change-me-in-prod"}
+        )
+
+        try:
+            resp = client.get("/v1/agents/status")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["global_kill_switch"]["enabled"] is False
+
+            agent_entry = next(a for a in data["agents"] if a["agent_id"] == "coordination-probe")
+            assert agent_entry["halted"] is True
+            assert agent_entry["halted_by_own_switch"] is True
+            assert agent_entry["halted_by_global_switch"] is False
+        finally:
+            client.post(
+                "/v1/kill-switch/agents/coordination-probe/off", headers={"x-admin-key": "change-me-in-prod"}
+            )
+
+
 class TestHealthEndpoint:
     """Test GET /v1/health."""
     

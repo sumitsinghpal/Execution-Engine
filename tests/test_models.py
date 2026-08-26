@@ -27,6 +27,29 @@ class TestTradeProposalValidation:
         assert sample_market_order.order_type == OrderType.MARKET
         assert sample_market_order.limit_price is None
         assert sample_market_order.stop_price is None
+
+    def test_agent_id_defaults_to_default_for_single_agent_callers(self, sample_trade_proposal):
+        """A caller that doesn't know about multi-agent deployments still works unchanged."""
+        assert sample_trade_proposal.agent_id == "default"
+
+    def test_agent_id_accepts_a_reasonable_custom_value(self, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(update={"agent_id": "momentum-agent_01"})
+        assert proposal.agent_id == "momentum-agent_01"
+
+    def test_agent_id_rejects_disallowed_characters(self, sample_trade_proposal):
+        # model_copy(update=...) skips validation entirely in Pydantic v2,
+        # so this must go through model_validate to actually exercise the
+        # field_validator.
+        with pytest.raises(ValidationError):
+            TradeProposal.model_validate(
+                {**sample_trade_proposal.model_dump(), "agent_id": "bad agent id!"}
+            )
+
+    def test_agent_id_rejects_reserved_global_scope(self, sample_trade_proposal):
+        with pytest.raises(ValidationError):
+            TradeProposal.model_validate(
+                {**sample_trade_proposal.model_dump(), "agent_id": "__global__"}
+            )
     
     def test_limit_order_requires_limit_price(self):
         """LIMIT order must have limit_price."""
