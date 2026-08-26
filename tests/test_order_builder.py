@@ -19,7 +19,7 @@ class TestOrderBuilder:
         assert spec["quantity"] == 10
         assert spec["instruction"] == "BUY"
         assert spec["orderType"] == "LIMIT"
-        assert spec["limitPrice"] == "721.50"
+        assert spec["limitPrice"] == "270.50"
         assert "stopPrice" not in spec
     
     def test_build_market_order_spec(self, sample_market_order):

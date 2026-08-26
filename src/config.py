@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     max_order_notional_usd: Decimal = Decimal("100000")
     max_position_concentration_pct: Decimal = Decimal("15")
     market_hours_only: bool = True
+
+    # Stale-quote protection: a quote older than this is refused outright
+    # rather than trusted for notional/price-sanity checks, and a LIMIT
+    # order priced further than this from the live quote is rejected as
+    # likely mispriced (fat-finger protection) rather than silently routed.
+    max_quote_age_seconds: int = 10
+    max_limit_price_deviation_pct: Decimal = Decimal("0.03")
     
     # API Security
     api_key_admin: str = "change-me-in-prod"

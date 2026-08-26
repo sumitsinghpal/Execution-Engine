@@ -53,3 +53,11 @@ class BrokerAdapter(ABC):
     @abstractmethod
     async def get_balances(self, profile: AccountProfile) -> dict[str, Any]:
         """Return balances for an account profile."""
+
+    @abstractmethod
+    async def get_quote(self, symbol: str) -> dict[str, Any]:
+        """
+        Return a real-time quote for a symbol. Must include a "quote_time"
+        (ISO-8601, timezone-aware) so callers can enforce a staleness limit
+        — never fabricate a fresh timestamp on a cached/delayed value.
+        """

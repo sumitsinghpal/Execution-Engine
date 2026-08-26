@@ -30,6 +30,20 @@ def schwab_transport(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"securitiesAccount": {"currentBalances": {"cashAvailableForTrading": 1000}}})
     if request.url.path == "/trader/v1/accounts/account-hash/orders/42":
         return httpx.Response(200, json={"orderId": "42", "status": "WORKING"})
+    if request.url.path == "/marketdata/v1/QQQ/quotes":
+        return httpx.Response(
+            200,
+            json={
+                "QQQ": {
+                    "quote": {
+                        "bidPrice": 270.11,
+                        "askPrice": 270.37,
+                        "lastPrice": 270.24,
+                        "quoteTime": 1735689600000,  # ms since epoch
+                    }
+                }
+            },
+        )
     return httpx.Response(404, json={"error": "unexpected mock route"})
 
 
@@ -73,6 +87,39 @@ async def test_paper_adapter_simulates_preview_and_submission() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_adapter_quote_is_stable_and_fresh() -> None:
+    """
+    The paper broker's synthetic quote must be deterministic (same symbol,
+    same price, every call — so a preview and a later execute for the same
+    order see consistent numbers) and always timestamped as fresh.
+    """
+    adapter = PaperBrokerAdapter()
+
+    quote1 = await adapter.get_quote("QQQ")
+    quote2 = await adapter.get_quote("QQQ")
+
+    assert quote1["last"] == quote2["last"]
+    assert quote1["bid"] < quote1["last"] < quote1["ask"]
+    assert "quote_time" in quote1
+
+
+@pytest.mark.asyncio
+async def test_paper_adapter_market_order_preview_does_not_estimate_zero() -> None:
+    """
+    A MARKET order (no limitPrice) must get its estimated investment from a
+    live quote, not silently report $0 regardless of size — the same bug
+    class as the notional-limit check bypass this preview feeds into.
+    """
+    adapter = PaperBrokerAdapter()
+    profile = AccountProfile(broker=BrokerName.PAPER)
+    order = {"orderId": "decision-2", "quantity": 100, "symbol": "QQQ"}  # no limitPrice
+
+    preview = await adapter.preview_order(profile, order)
+
+    assert preview["estimatedTotalInvestment"] > 0
+
+
+@pytest.mark.asyncio
 async def test_schwab_read_only_calls_and_preview_use_account_hash(
     schwab_adapter: SchwabBrokerAdapter, schwab_profile: AccountProfile
 ) -> None:
@@ -87,6 +134,24 @@ async def test_schwab_read_only_calls_and_preview_use_account_hash(
     assert positions == [{"symbol": "QQQ"}]
     assert balances["cashAvailableForTrading"] == 1000
     assert status["status"] == "WORKING"
+
+
+@pytest.mark.asyncio
+async def test_schwab_get_quote_parses_marketdata_response(
+    schwab_adapter: SchwabBrokerAdapter,
+) -> None:
+    """
+    get_quote() hits the separate market-data API base path (not the
+    trader/account one) and unwraps Schwab's per-symbol nested response
+    shape into the flat dict RiskChecker expects.
+    """
+    quote = await schwab_adapter.get_quote("QQQ")
+
+    assert quote["symbol"] == "QQQ"
+    assert quote["bid"] == 270.11
+    assert quote["ask"] == 270.37
+    assert quote["last"] == 270.24
+    assert "quote_time" in quote
 
 
 @pytest.mark.asyncio

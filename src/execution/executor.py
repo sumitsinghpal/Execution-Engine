@@ -99,9 +99,23 @@ class Executor:
 
         # Get current kill switch state
         kill_switch_on = self._get_kill_switch_state()
-        
+
+        # Fetch a live quote for stale-quote / notional / limit-price-sanity
+        # checks. A failure to fetch one is not fatal here — it's not an
+        # auth failure, just no quote — RiskChecker's quote-freshness check
+        # correctly fails closed on quote=None rather than silently skipping
+        # those checks.
+        try:
+            quote = await self.broker.get_quote(proposal.symbol)
+        except BrokerAuthenticationError as exc:
+            self._shutdown_on_auth_failure(exc)
+            raise
+        except Exception as exc:
+            logger.warning("quote_fetch_failed", decision_id=proposal.decision_id, symbol=proposal.symbol, error=str(exc))
+            quote = None
+
         # Run risk checks
-        verdict = self.risk_checker.evaluate(proposal, kill_switch_on)
+        verdict = self.risk_checker.evaluate(proposal, kill_switch_on, quote=quote)
         
         # Compute checksum for later verification
         checksum = OrderBuilder.compute_payload_checksum(proposal)

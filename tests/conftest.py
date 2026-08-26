@@ -4,6 +4,7 @@ Shared test fixtures and configuration.
 
 import os
 import tempfile
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -98,7 +99,16 @@ def app_with_test_db(test_db_engine_and_session, test_settings):
 
 @pytest.fixture
 def sample_trade_proposal():
-    """Create a sample trade proposal."""
+    """
+    Create a sample trade proposal.
+
+    limit_price is deliberately close to PaperBrokerAdapter's deterministic
+    synthetic quote for QQQ (see _synthetic_price in src/brokers/paper.py)
+    rather than an arbitrary number — RiskChecker now rejects a LIMIT price
+    that deviates too far from the live quote as likely mispriced, and this
+    fixture needs to actually pass that check to still mean "a valid order"
+    everywhere it's used as one.
+    """
     return TradeProposal(
         decision_id="edge-20260821-001",
         account="primary",
@@ -107,8 +117,27 @@ def sample_trade_proposal():
         instruction=Instruction.BUY,
         quantity=10,
         order_type=OrderType.LIMIT,
-        limit_price=Decimal("721.50"),
+        limit_price=Decimal("270.50"),
     )
+
+
+@pytest.fixture
+def sample_quote():
+    """
+    A fresh quote matching PaperBrokerAdapter's deterministic synthetic
+    price for QQQ (see _synthetic_price in src/brokers/paper.py) — the same
+    kind of dict RiskChecker.evaluate() expects from
+    BrokerAdapter.get_quote(), for tests that call evaluate() directly
+    without going through Executor's async quote-fetch.
+    """
+    return {
+        "symbol": "QQQ",
+        "bid": Decimal("270.11"),
+        "ask": Decimal("270.37"),
+        "last": Decimal("270.24"),
+        "quote_time": datetime.now(UTC).isoformat(),
+        "mode": "PAPER",
+    }
 
 
 @pytest.fixture

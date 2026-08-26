@@ -44,6 +44,9 @@ class FakeAuthFailingBroker:
     async def get_balances(self, profile):
         raise BrokerAuthenticationError("refresh token expired (fake)")
 
+    async def get_quote(self, symbol):
+        raise BrokerAuthenticationError("refresh token expired (fake)")
+
 
 @pytest.mark.asyncio
 async def test_oauth_client_raises_specific_error_on_expired_refresh_token():

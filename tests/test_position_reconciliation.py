@@ -47,6 +47,9 @@ class FakeBroker:
     async def get_balances(self, profile):
         raise NotImplementedError
 
+    async def get_quote(self, symbol):
+        raise NotImplementedError
+
 
 def _make_filled_order(session, account, symbol, instruction, filled_quantity):
     order = OrderRecord(

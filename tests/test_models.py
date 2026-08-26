@@ -19,7 +19,7 @@ class TestTradeProposalValidation:
     def test_valid_limit_order(self, sample_trade_proposal):
         """Valid LIMIT order with limit_price."""
         assert sample_trade_proposal.order_type == OrderType.LIMIT
-        assert sample_trade_proposal.limit_price == Decimal("721.50")
+        assert sample_trade_proposal.limit_price == Decimal("270.50")
         assert sample_trade_proposal.stop_price is None
     
     def test_valid_market_order(self, sample_market_order):
