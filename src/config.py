@@ -142,6 +142,70 @@ class Settings(BaseSettings):
     edge_tf_poll_interval_sec: int = 60
     edge_tf_executor_id: str = "execution-engine"
 
+    # Autonomous trading (src/execution/autonomous_trader.py): unlike the
+    # strategy scanner above, this ACTUALLY submits orders — no human
+    # approval step. Every decision is still 100% rule-based (the strategy
+    # catalog's fixed entry rules + a standardized risk:reward exit, never
+    # an LLM judgment call — see src/agentic/llm_narrator.py's docstring)
+    # and still runs through the same preview/risk-checks/kill-switch gate
+    # as any other order, scoped to its own agent_id so it can be halted
+    # independently via /v1/kill-switch/agents/{autonomous_agent_id}/on.
+    # Hard-coded to the paper broker regardless of this or any other
+    # setting — see autonomous_trader._build_broker()'s docstring for why
+    # that's a code-level guarantee, not a config one. Disabled by default.
+    autonomous_trading_enabled: bool = False
+    autonomous_agent_id: str = "autonomous-trader"
+    autonomous_account: str = "primary"
+    # Golden Cross, Turtle 20-Day Breakout, and RSI(2) Pullback — three
+    # historically well-documented strategies spanning trend-following,
+    # breakout, and mean-reversion (see src/strategy/catalog.py for
+    # citations). Deliberately starts small; add more of the catalog's ids
+    # here later.
+    autonomous_strategy_ids_raw: str = Field(
+        default="golden_cross,turtle_donchian,rsi2_connors", validation_alias="AUTONOMOUS_STRATEGY_IDS"
+    )
+    autonomous_watchlist_raw: str = Field(default="QQQ,SPY,IWM", validation_alias="AUTONOMOUS_WATCHLIST")
+    # Standardized exit: stop-loss at risk_pct below entry, take-profit at
+    # reward_risk_ratio times that same distance above entry — one uniform
+    # rule for every strategy above, replacing each strategy's own
+    # individually-taught convention (only used here, not for human-
+    # reviewed signals from the strategy scanner, which keep showing the
+    # real cited rule). Default 1% stop / 1:2 reward:risk.
+    autonomous_risk_pct: Decimal = Decimal("0.01")
+    autonomous_reward_risk_ratio: Decimal = Decimal("2")
+    # Fixed-notional position sizing (see risk_reward.size_position) —
+    # deliberately simple, not volatility-sized.
+    autonomous_notional_per_trade_usd: Decimal = Decimal("1000")
+    autonomous_scan_interval_sec: int = 60
+
+    @property
+    def autonomous_strategy_ids(self) -> list[str]:
+        return self._split_csv(self.autonomous_strategy_ids_raw)
+
+    @autonomous_strategy_ids.setter
+    def autonomous_strategy_ids(self, value: list[str]) -> None:
+        self.autonomous_strategy_ids_raw = ",".join(value)
+
+    @property
+    def autonomous_watchlist(self) -> list[str]:
+        return self._split_csv(self.autonomous_watchlist_raw)
+
+    @autonomous_watchlist.setter
+    def autonomous_watchlist(self, value: list[str]) -> None:
+        self.autonomous_watchlist_raw = ",".join(value)
+
+    # LLM narration (src/agentic/llm_narrator.py) — orchestration and
+    # rationale-writing only, consulted after an order already went
+    # through; never a decision-maker. Opt-in like Schwab credentials: the
+    # system runs with deterministic template narration when no key is
+    # set. Uses the Anthropic Messages API shape by default; point
+    # llm_api_base_url elsewhere for a different provider with the same
+    # request/response shape.
+    llm_narration_enabled: bool = False
+    llm_api_key: Optional[str] = None
+    llm_model: str = "claude-sonnet-5"
+    llm_api_base_url: str = "https://api.anthropic.com/v1/messages"
+
     # API Security
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False

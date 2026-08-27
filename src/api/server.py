@@ -22,6 +22,8 @@ from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
 from src.execution.algo_slices import AlgoSliceRecord
 from src.execution.drawdown_guard import DrawdownGuard
+from src.execution.autonomous_positions import AutonomousPositionService
+from src.execution.autonomous_trader import autonomous_cycle_once, run_autonomous_loop
 from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
 from src.execution.ep_edge_earnings_adapter import (
     ExternalSignalIngestRequest as EarningsIngestRequest,
@@ -97,6 +99,8 @@ _scanner_stop_event: Optional[asyncio.Event] = None
 _scanner_task: Optional[asyncio.Task] = None
 _edge_tf_connector_stop_event: Optional[asyncio.Event] = None
 _edge_tf_connector_task: Optional[asyncio.Task] = None
+_autonomous_trader_stop_event: Optional[asyncio.Event] = None
+_autonomous_trader_task: Optional[asyncio.Task] = None
 
 
 @app.on_event("startup")
@@ -106,6 +110,7 @@ async def startup_event():
     init_db()
 
     global _scanner_stop_event, _scanner_task, _edge_tf_connector_stop_event, _edge_tf_connector_task
+    global _autonomous_trader_stop_event, _autonomous_trader_task
     _scanner_stop_event = asyncio.Event()
     _scanner_task = asyncio.create_task(run_scanner_loop(SessionLocal, get_settings, _scanner_stop_event))
 
@@ -114,12 +119,17 @@ async def startup_event():
         run_connector_loop(SessionLocal, get_settings, _edge_tf_connector_stop_event)
     )
 
+    _autonomous_trader_stop_event = asyncio.Event()
+    _autonomous_trader_task = asyncio.create_task(
+        run_autonomous_loop(SessionLocal, get_settings, _autonomous_trader_stop_event)
+    )
+
     logger.info("startup_complete")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Stop the background strategy scanner and EDGE-TF connector cleanly."""
+    """Stop the background strategy scanner, EDGE-TF connector, and autonomous trader cleanly."""
     if _scanner_stop_event is not None:
         _scanner_stop_event.set()
     if _scanner_task is not None:
@@ -129,6 +139,11 @@ async def shutdown_event():
         _edge_tf_connector_stop_event.set()
     if _edge_tf_connector_task is not None:
         await asyncio.wait_for(_edge_tf_connector_task, timeout=10)
+
+    if _autonomous_trader_stop_event is not None:
+        _autonomous_trader_stop_event.set()
+    if _autonomous_trader_task is not None:
+        await asyncio.wait_for(_autonomous_trader_task, timeout=10)
 
 
 @app.get("/v1/health")
@@ -930,6 +945,65 @@ async def dismiss_external_signal(trade_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"External signal {trade_id} not found")
     updated = ExternalSignalService(db).mark_status(trade_id, ExternalSignalStatus.DISMISSED)
     return updated.to_dict()
+
+
+@app.get("/v1/autonomous/status")
+async def autonomous_status(settings: Settings = Depends(get_settings_dep)):
+    """
+    Read-only configuration snapshot for the autonomous trader
+    (src/execution/autonomous_trader.py) — whether it's enabled, which
+    strategies/symbols it's watching, and the standardized risk:reward it's
+    using. To actually stop it: either autonomous_trading_enabled=false, or
+    POST /v1/kill-switch/agents/{autonomous_agent_id}/on for an immediate
+    halt without a redeploy.
+    """
+    return {
+        "enabled": settings.autonomous_trading_enabled,
+        "agent_id": settings.autonomous_agent_id,
+        "account": settings.autonomous_account,
+        "strategy_ids": settings.autonomous_strategy_ids,
+        "watchlist": settings.autonomous_watchlist,
+        "risk_pct": str(settings.autonomous_risk_pct),
+        "reward_risk_ratio": str(settings.autonomous_reward_risk_ratio),
+        "notional_per_trade_usd": str(settings.autonomous_notional_per_trade_usd),
+        "scan_interval_sec": settings.autonomous_scan_interval_sec,
+        "broker": "PAPER (hard-coded, cannot be changed via settings)",
+        "llm_narration_enabled": settings.llm_narration_enabled,
+    }
+
+
+@app.post("/v1/autonomous/run-once")
+async def autonomous_run_once(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Triggers one immediate autonomous cycle (manage open positions, then
+    scan for new entries) instead of waiting for the next
+    autonomous_scan_interval_sec tick — same effect as an autonomous pass,
+    for testing/demo without waiting. Still requires
+    autonomous_trading_enabled=true; still submits real (paper) orders.
+    """
+    if not settings.autonomous_trading_enabled:
+        raise HTTPException(status_code=400, detail="Autonomous trading is disabled (autonomous_trading_enabled=false)")
+    try:
+        return await autonomous_cycle_once(db, settings)
+    except Exception as e:
+        logger.error("autonomous_run_once_error", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Autonomous cycle failed: {e}")
+
+
+@app.get("/v1/autonomous/positions")
+async def list_autonomous_positions(
+    status: Optional[str] = Query(default=None, description="Filter by OPEN/CLOSED_TARGET/CLOSED_STOP/CLOSED_ERROR; omit for all."),
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """Every position the autonomous trader has opened, most recent first, with its entry/exit rationale."""
+    records = AutonomousPositionService(db).list_all(limit=limit)
+    if status:
+        records = [r for r in records if r.status == status]
+    return {"positions": [r.to_dict() for r in records]}
 
 
 if __name__ == "__main__":

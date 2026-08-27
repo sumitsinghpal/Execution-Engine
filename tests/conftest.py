@@ -25,6 +25,7 @@ from src.execution.kill_switch_state import KillSwitchRecord
 from src.execution.reconciliation import ReconciliationEvent
 from src.execution.strategy_signals import StrategySignalRecord
 from src.execution.external_signals import ExternalSignalRecord
+from src.execution.autonomous_positions import AutonomousPositionRecord
 from src.audit.ledger import AuditLedger
 
 from src.config import Settings
