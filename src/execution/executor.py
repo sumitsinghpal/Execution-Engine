@@ -5,6 +5,7 @@ Core execution orchestration: preview and execute flows.
 import json
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Optional
 
 from sqlmodel import SQLModel, Session, select, Field
@@ -44,6 +45,15 @@ class OrderRecord(SQLModel, table=True):
     symbol: str
     quantity: int
     instruction: str
+    # What was actually previewed — execute_order() rebuilds the broker
+    # order spec from THESE, not hardcoded defaults. Losing this at
+    # execute time silently turns every LIMIT/STOP order into an
+    # unprotected MARKET order at the one moment it reaches the broker,
+    # which is exactly the class of bug this system exists to prevent.
+    asset_type: str = "ETF"
+    order_type: str = "MARKET"
+    limit_price: Optional[str] = None
+    stop_price: Optional[str] = None
     status: str = OrderStatus.PREVIEWED.value
     payload_checksum: str
     risk_approved: bool = False
@@ -180,6 +190,10 @@ class Executor:
             symbol=proposal.symbol,
             quantity=proposal.quantity,
             instruction=proposal.instruction.value,
+            asset_type=proposal.asset_type.value,
+            order_type=proposal.order_type.value,
+            limit_price=str(proposal.limit_price) if proposal.limit_price is not None else None,
+            stop_price=str(proposal.stop_price) if proposal.stop_price is not None else None,
             status=OrderStatus.PREVIEWED.value,
             payload_checksum=checksum,
             risk_approved=verdict.approved,
@@ -308,17 +322,23 @@ class Executor:
         if kill_switch_on:
             raise ValueError("Kill switch is ON - order rejected")
 
-        # Build and submit order
+        # Build and submit order using what was ACTUALLY previewed — not a
+        # hardcoded MARKET/ETF, which would silently discard a previewed
+        # LIMIT/STOP order's price protection at the one moment it reaches
+        # the broker. See OrderRecord.order_type/limit_price/stop_price,
+        # populated in preview_order() above.
         order_spec = self.builder.build_order_spec(
             TradeProposal(
                 decision_id=decision_id,
                 agent_id=order.agent_id,
                 account=order.account,
                 symbol=order.symbol,
-                asset_type="ETF",  # Would need to store this
+                asset_type=order.asset_type,
                 instruction=order.instruction,
                 quantity=order.quantity,
-                order_type="MARKET",  # Would need to store this
+                order_type=order.order_type,
+                limit_price=Decimal(order.limit_price) if order.limit_price is not None else None,
+                stop_price=Decimal(order.stop_price) if order.stop_price is not None else None,
             ),
             order.account,
         )
