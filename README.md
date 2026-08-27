@@ -45,6 +45,17 @@ hard-blocked in code regardless — see Security & Controls below):
 4. Set `EXECUTION_MODE=SCHWAB` (anything other than `PAPER`/`SHADOW` works) and add `SCHWAB_ACCOUNT_ALIAS`'s value (default `schwab_live`) to `ACCOUNT_ALLOWLIST`.
 5. Restart the server and check `GET /v1/health` — `broker_connectivity: "ok"` means the credentials work end-to-end (it calls Schwab's `/accounts` for real). `POST /v1/orders/preview` with `"account": "schwab_live"` now runs a real Schwab preview.
 
+### Trading dashboard
+
+`dashboard/index.html` is a self-contained, no-build front end for this API
+— account balance, positions, a real order ticket (preview → risk-check
+breakdown → human-approval modal → execute), an activity feed, and the
+kill switch, all against the live endpoints above. Serve it with any static
+file server (`python -m http.server 8080 --directory dashboard`) and open
+it — CORS on this API is permissive for local development. It defaults to
+`http://localhost:8000` and remembers the account/API base URL/admin key
+you enter (in the browser's own local storage, per browser).
+
 ### Docker Compose
 
 ```bash

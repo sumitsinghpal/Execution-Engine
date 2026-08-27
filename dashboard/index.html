@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EDGE Trading</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef0f3;
+    --raised: #ffffff;
+    --ink: #10121a;
+    --ink-muted: #5c6270;
+    --ink-faint: #8b91a0;
+    --border: #e2e4ea;
+    --border-strong: #cdd1db;
+
+    --accent: #0e9f6e;
+    --accent-ink: #ffffff;
+    --accent-soft: #e3f7ee;
+    --buy: #0e9f6e;
+    --buy-soft: #e3f7ee;
+    --sell: #d63c5e;
+    --sell-soft: #fbe6ea;
+    --warn: #b5790b;
+    --warn-soft: #faf1de;
+    --crit: #d63c5e;
+    --crit-soft: #fbe6ea;
+
+    --radius-lg: 20px;
+    --radius-md: 14px;
+    --radius-sm: 9px;
+    --font-display: "Sora", system-ui, sans-serif;
+    --font-body: "Manrope", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
+    --shadow-card: 0 1px 2px rgba(16,18,26,.04), 0 8px 24px -12px rgba(16,18,26,.12);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #06070a; --surface: #0e1015; --surface-2: #14171e; --raised: #171a22;
+      --ink: #f2f3f6; --ink-muted: #9aa0ad; --ink-faint: #656b78;
+      --border: #1f232c; --border-strong: #2c3140;
+      --accent: #3ddc97; --accent-ink: #05130d; --accent-soft: #12271f;
+      --buy: #3ddc97; --buy-soft: #12271f;
+      --sell: #ff5c72; --sell-soft: #2c1620;
+      --warn: #f5b942; --warn-soft: #2c2313;
+      --crit: #ff5c72; --crit-soft: #2c1620;
+      --shadow-card: 0 1px 0 rgba(255,255,255,.02) inset, 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #06070a; --surface: #0e1015; --surface-2: #14171e; --raised: #171a22;
+    --ink: #f2f3f6; --ink-muted: #9aa0ad; --ink-faint: #656b78;
+    --border: #1f232c; --border-strong: #2c3140;
+    --accent: #3ddc97; --accent-ink: #05130d; --accent-soft: #12271f;
+    --buy: #3ddc97; --buy-soft: #12271f;
+    --sell: #ff5c72; --sell-soft: #2c1620;
+    --warn: #f5b942; --warn-soft: #2c2313;
+    --crit: #ff5c72; --crit-soft: #2c1620;
+    --shadow-card: 0 1px 0 rgba(255,255,255,.02) inset, 0 12px 32px -16px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, select { font-family: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+  html { overflow-x: hidden; }
+  body { overflow-x: hidden; }
+  .shell { max-width: 1080px; margin: 0 auto; padding: 20px 20px 96px; overflow-x: hidden; }
+
+  /* Top bar */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 2px 24px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .brand .mark {
+    width: 32px; height: 32px; border-radius: 9px; flex: none;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #0a5c40));
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-display); font-weight: 800; font-size: 15px; color: var(--accent-ink);
+  }
+  .brand .name { font-family: var(--font-display); font-weight: 700; font-size: 17px; letter-spacing: -0.01em; min-width: 0; }
+  .brand .name small { display: block; font-family: var(--font-body); font-weight: 500; font-size: 11px; color: var(--ink-faint); letter-spacing: 0.02em; }
+
+  .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; width: 100%; }
+  .conn-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; flex: 1 1 auto; }
+  input.base-url {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--ink); font-family: var(--font-mono); font-size: 12px; padding: 7px 10px;
+    flex: 1 1 140px; min-width: 0; max-width: 240px;
+  }
+  select.account-select {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--ink); font-family: var(--font-mono); font-size: 12.5px; padding: 7px 10px;
+    flex: 0 1 auto; min-width: 0;
+  }
+  @media (max-width: 560px) {
+    .topbar-right { justify-content: flex-start; }
+  }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; letter-spacing: 0.01em;
+    padding: 6px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2);
+    white-space: nowrap;
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); flex: none; }
+  .pill.ok { color: var(--buy); border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
+  .pill.ok .dot { background: var(--buy); }
+  .pill.crit { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, var(--border)); background: var(--crit-soft); }
+  .pill.crit .dot { background: var(--crit); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* Layout */
+  .grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; min-width: 0; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 22px; box-shadow: var(--shadow-card); min-width: 0;
+  }
+  .card h2 {
+    font-family: var(--font-display); font-size: 14px; font-weight: 700; margin: 0 0 16px;
+    letter-spacing: 0.01em; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .card h2 .hint { font-family: var(--font-body); font-weight: 500; font-size: 12px; color: var(--ink-faint); }
+
+  /* Balance hero */
+  .hero-label { font-size: 12.5px; color: var(--ink-faint); font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; margin-bottom: 6px; }
+  .hero-value { font-family: var(--font-display); font-weight: 800; font-size: clamp(26px, 7vw, 42px); letter-spacing: -0.02em; line-height: 1.05; overflow-wrap: anywhere; }
+  .hero-sub { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--ink-muted); font-family: var(--font-mono); }
+  .hero-sub .chg { font-weight: 600; }
+  .hero-sub .chg.up { color: var(--buy); } .hero-sub .chg.down { color: var(--sell); }
+  .hero-foot { display: flex; gap: 22px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .stat-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; margin-bottom: 4px; }
+  .stat-value { font-family: var(--font-mono); font-size: 14.5px; font-weight: 600; }
+
+  /* Positions */
+  .pos-row { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--border); }
+  .pos-row:last-child { border-bottom: none; }
+  .pos-left { display: flex; align-items: center; gap: 11px; }
+  .sym-badge {
+    width: 36px; height: 36px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-weight: 700; font-size: 11px; color: var(--ink-muted);
+  }
+  .pos-symbol { font-weight: 700; font-size: 14px; }
+  .pos-qty { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); }
+  .empty-note { color: var(--ink-faint); font-size: 13px; padding: 8px 0; }
+
+  /* Order ticket */
+  .seg { display: flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px; gap: 3px; }
+  .seg button {
+    flex: 1; border: none; background: transparent; color: var(--ink-muted); font-weight: 700; font-size: 13px;
+    padding: 9px 0; border-radius: 7px; cursor: pointer; transition: background .12s, color .12s;
+  }
+  .seg button.active.buy { background: var(--buy); color: var(--accent-ink); }
+  .seg button.active.sell { background: var(--sell); color: #fff; }
+
+  .field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+  .field label { font-size: 11.5px; font-weight: 600; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+  .field input, .field select {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--ink); font-size: 14.5px; padding: 11px 12px; font-family: var(--font-mono);
+  }
+  .field-row { display: flex; gap: 10px; min-width: 0; }
+  .field-row .field { flex: 1; min-width: 0; }
+  .field input, .field select { width: 100%; min-width: 0; }
+
+  .btn {
+    width: 100%; border: none; border-radius: var(--radius-sm); padding: 13px 0; font-weight: 700; font-size: 14.5px;
+    font-family: var(--font-display); cursor: pointer; margin-top: 16px; transition: filter .12s, transform .06s;
+  }
+  .btn:active { transform: scale(.99); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .btn-ghost { background: var(--surface-2); color: var(--ink); border: 1px solid var(--border-strong); }
+  .btn-ghost:hover:not(:disabled) { background: var(--raised); }
+  .btn-danger { background: var(--crit); color: #fff; }
+  .btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+
+  /* Preview result */
+  .verdict-box { margin-top: 16px; border-radius: var(--radius-md); border: 1px solid var(--border); overflow: hidden; }
+  .verdict-head { padding: 13px 16px; display: flex; align-items: center; justify-content: space-between; font-weight: 700; font-size: 13.5px; }
+  .verdict-head.approved { background: var(--buy-soft); color: var(--buy); }
+  .verdict-head.rejected { background: var(--crit-soft); color: var(--crit); }
+  .verdict-body { padding: 4px 16px 14px; }
+  .check-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12.5px; font-family: var(--font-mono); }
+  .check-row .tick { width: 14px; text-align: center; font-weight: 700; }
+  .check-row.pass .tick { color: var(--buy); } .check-row.fail .tick { color: var(--crit); }
+  .check-row.fail { color: var(--crit); }
+  .rej-note { font-size: 12px; color: var(--crit); margin: 6px 0 0 22px; }
+  .cost-line { display: flex; justify-content: space-between; padding: 10px 0 2px; font-size: 13px; color: var(--ink-muted); border-top: 1px dashed var(--border); margin-top: 6px; }
+  .cost-line b { color: var(--ink); font-family: var(--font-mono); }
+
+  /* Activity feed */
+  .feed-row { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--border); gap: 10px; }
+  .feed-row:last-child { border-bottom: none; }
+  .feed-left { display: flex; align-items: center; gap: 11px; min-width: 0; }
+  .side-chip { font-family: var(--font-mono); font-size: 10.5px; font-weight: 800; padding: 4px 6px; border-radius: 6px; flex: none; }
+  .side-chip.buy { background: var(--buy-soft); color: var(--buy); }
+  .side-chip.sell { background: var(--sell-soft); color: var(--sell); }
+  .feed-meta { min-width: 0; }
+  .feed-symbol { font-weight: 700; font-size: 13.5px; }
+  .feed-sub { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  .status-chip { font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; padding: 4px 9px; border-radius: 999px; flex: none; text-transform: uppercase; letter-spacing: .02em; }
+  .status-chip.st-filled, .status-chip.st-submitted, .status-chip.st-acknowledged { background: var(--buy-soft); color: var(--buy); }
+  .status-chip.st-rejected, .status-chip.st-failed { background: var(--crit-soft); color: var(--crit); }
+  .status-chip.st-previewed { background: var(--surface-2); color: var(--ink-faint); }
+
+  /* Kill switch card */
+  .ks-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .ks-text .t1 { font-weight: 700; font-size: 14.5px; }
+  .ks-text .t2 { font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+  .toggle { position: relative; width: 46px; height: 26px; border-radius: 999px; border: none; background: var(--border-strong); cursor: pointer; flex: none; transition: background .15s; }
+  .toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .toggle.on { background: var(--buy); }
+  .toggle.on::after { transform: translateX(20px); }
+
+  /* Modal */
+  .overlay { position: fixed; inset: 0; background: rgba(5,6,9,.6); backdrop-filter: blur(2px); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+  .overlay.show { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; width: 100%; max-width: 380px; box-shadow: var(--shadow-card); }
+  .modal h3 { font-family: var(--font-display); margin: 0 0 6px; font-size: 17px; }
+  .modal p { margin: 0 0 16px; color: var(--ink-muted); font-size: 13px; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .modal-actions .btn { margin-top: 0; }
+
+  .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(12px); opacity: 0; pointer-events: none; transition: all .18s; background: var(--raised); border: 1px solid var(--border); color: var(--ink); padding: 12px 18px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; box-shadow: var(--shadow-card); z-index: 60; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .skeleton { color: var(--ink-faint); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="topbar">
+    <div class="brand">
+      <div class="mark">E</div>
+      <div class="name">EDGE Trading<small>Execution Engine console</small></div>
+    </div>
+    <div class="topbar-right">
+      <div class="conn-row">
+        <input class="base-url" id="baseUrl" spellcheck="false" title="Execution-Engine API base URL">
+        <select class="account-select" id="accountSelect" title="Account alias"></select>
+      </div>
+      <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="col">
+
+      <div class="card">
+        <div class="hero-label">Net liquidation value</div>
+        <div class="hero-value num" id="balanceValue">—</div>
+        <div class="hero-sub">
+          <span id="balanceChg" class="chg num"></span>
+          <span id="balanceMode" class="skeleton"></span>
+        </div>
+        <div class="hero-foot">
+          <div>
+            <div class="stat-label">Drawdown today</div>
+            <div class="stat-value num" id="drawdownStat">—</div>
+          </div>
+          <div>
+            <div class="stat-label">Market</div>
+            <div class="stat-value" id="marketStat">—</div>
+          </div>
+          <div>
+            <div class="stat-label">Agents active</div>
+            <div class="stat-value num" id="agentsStat">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Positions <span class="hint" id="positionsHint"></span></h2>
+        <div id="positionsList"><div class="empty-note">Loading…</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Activity <span class="hint">most recent first</span></h2>
+        <div id="feedList"><div class="empty-note">Loading…</div></div>
+      </div>
+
+    </div>
+
+    <div class="col">
+
+      <div class="card">
+        <h2>Kill switch</h2>
+        <div class="ks-row">
+          <div class="ks-text">
+            <div class="t1" id="ksTitle">Trading active</div>
+            <div class="t2" id="ksSub">Fleet-wide switch is off</div>
+          </div>
+          <button class="toggle" id="ksToggle" aria-label="Toggle kill switch"></button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>New order</h2>
+        <div class="seg">
+          <button type="button" class="active buy" id="sideBuy">Buy</button>
+          <button type="button" id="sideSell">Sell</button>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="fSymbol">Symbol</label>
+            <input id="fSymbol" value="QQQ" maxlength="5" style="text-transform:uppercase">
+          </div>
+          <div class="field">
+            <label for="fQty">Quantity</label>
+            <input id="fQty" type="number" min="1" value="10">
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="fType">Order type</label>
+            <select id="fType">
+              <option value="MARKET">Market</option>
+              <option value="LIMIT" selected>Limit</option>
+            </select>
+          </div>
+          <div class="field" id="limitPriceField">
+            <label for="fLimit">Limit price</label>
+            <input id="fLimit" type="number" step="0.01" placeholder="270.50">
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="fAgent">Agent</label>
+            <input id="fAgent" value="default">
+          </div>
+          <div class="field">
+            <label for="fAssetType">Asset type</label>
+            <select id="fAssetType">
+              <option value="ETF" selected>ETF</option>
+              <option value="EQUITY">Equity</option>
+            </select>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="previewBtn">Preview order</button>
+
+        <div id="verdictBox"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="approvalOverlay">
+  <div class="modal">
+    <h3>Confirm &amp; execute</h3>
+    <p>This places a real request against the execution engine's approval gate. Nothing reaches the broker without this.</p>
+    <div class="field">
+      <label for="mApprover">Approved by</label>
+      <input id="mApprover" placeholder="your name">
+    </div>
+    <div class="field">
+      <label for="mAttestation">Attestation</label>
+      <input id="mAttestation" placeholder="I have reviewed and approve this order">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="mCancel">Cancel</button>
+      <button class="btn btn-primary" id="mConfirm">Execute</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="adminOverlay">
+  <div class="modal">
+    <h3 id="adminTitle">Admin key required</h3>
+    <p>Toggling the kill switch requires the admin API key.</p>
+    <div class="field">
+      <label for="mAdminKey">X-Admin-Key</label>
+      <input id="mAdminKey" type="password" placeholder="••••••••">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="mAdminCancel">Cancel</button>
+      <button class="btn btn-danger" id="mAdminConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+
+  const baseUrlInput = $('baseUrl');
+  baseUrlInput.value = store.get('edge.baseUrl', 'http://localhost:8000');
+  baseUrlInput.addEventListener('change', () => { store.set('edge.baseUrl', baseUrlInput.value.trim()); refreshAll(); });
+
+  const accountSelect = $('accountSelect');
+  ['primary', 'retirement', 'paper', 'schwab_live'].forEach(a => {
+    const o = document.createElement('option'); o.value = a; o.textContent = a; accountSelect.appendChild(o);
+  });
+  accountSelect.value = store.get('edge.account', 'primary');
+  accountSelect.addEventListener('change', () => { store.set('edge.account', accountSelect.value); refreshAll(); });
+
+  function base() { return baseUrlInput.value.trim().replace(/\/$/, ''); }
+  function account() { return accountSelect.value; }
+  function adminKey() { return store.get('edge.adminKey', ''); }
+
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toast._h); toast._h = setTimeout(() => t.classList.remove('show'), 2600);
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(base() + path, {
+      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      ...opts,
+    });
+    let body = null;
+    try { body = await res.json(); } catch {}
+    if (!res.ok) {
+      const detail = body && body.detail ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)) : res.statusText;
+      const err = new Error(detail); err.status = res.status; err.body = body;
+      throw err;
+    }
+    return body;
+  }
+
+  function money(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+  }
+  function bigMoney(v) {
+    // Whole dollars only — avoids an awkward mid-number wrap on the large hero balance figure.
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+  }
+  function pct(v) { const n = Number(v); return isFinite(n) ? (n * 100).toFixed(2) + '%' : '—'; }
+  function timeAgo(iso) {
+    const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z'));
+    const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (s < 60) return Math.floor(s) + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+
+  // ---- Health ----
+  async function refreshHealth() {
+    const pill = $('healthPill');
+    try {
+      const h = await api('/v1/health');
+      const ok = h.status === 'healthy';
+      pill.className = 'pill ' + (ok ? 'ok' : 'crit');
+      pill.innerHTML = `<span class="dot"></span><span>${ok ? 'Connected' : 'Degraded'} · ${h.broker_connectivity}</span>`;
+    } catch (e) {
+      pill.className = 'pill crit';
+      pill.innerHTML = `<span class="dot"></span><span>Offline</span>`;
+    }
+  }
+
+  // ---- Balance / drawdown ----
+  async function refreshBalance() {
+    try {
+      const r = await api(`/v1/account/${encodeURIComponent(account())}/balances`);
+      const nlv = r.balances.net_liquidation_value ?? r.balances.availableFunds ?? 0;
+      $('balanceValue').textContent = bigMoney(nlv);
+      $('balanceMode').textContent = r.balances.mode ? `${r.balances.mode} mode` : '';
+    } catch (e) {
+      $('balanceValue').textContent = '—';
+      $('balanceMode').textContent = 'unavailable';
+    }
+
+    try {
+      const d = await api(`/v1/risk/drawdown-check?account=${encodeURIComponent(account())}`, { method: 'POST' });
+      const chg = $('balanceChg');
+      const pctVal = Number(d.drawdown_pct) || 0;
+      chg.textContent = (pctVal > 0 ? '−' : '') + pct(Math.abs(pctVal)) + ' today';
+      chg.className = 'chg num ' + (pctVal > 0.001 ? 'down' : 'up');
+      $('drawdownStat').textContent = pct(d.drawdown_pct) + (d.breached ? ' ⚠' : '');
+    } catch (e) {
+      $('drawdownStat').textContent = '—';
+    }
+  }
+
+  async function refreshMarket() {
+    try {
+      const m = await api('/v1/market-status');
+      $('marketStat').textContent = m.in_market_hours ? 'Open' : 'Closed';
+    } catch { $('marketStat').textContent = '—'; }
+  }
+
+  async function refreshAgents() {
+    try {
+      const a = await api('/v1/agents/status');
+      const active = a.agents.filter(x => !x.halted).length;
+      $('agentsStat').textContent = `${active}/${a.agents.length || 0}`;
+    } catch { $('agentsStat').textContent = '—'; }
+  }
+
+  // ---- Positions ----
+  async function refreshPositions() {
+    const el = $('positionsList');
+    try {
+      const r = await api(`/v1/account/${encodeURIComponent(account())}/positions`);
+      const positions = r.positions || [];
+      $('positionsHint').textContent = positions.length ? `${positions.length} held` : '';
+      if (!positions.length) { el.innerHTML = '<div class="empty-note">No open positions for this account.</div>'; return; }
+      el.innerHTML = positions.map(p => {
+        const instrument = p.instrument || {};
+        const symbol = instrument.symbol || p.symbol || '—';
+        const qty = (p.longQuantity ?? p.quantity ?? 0) - (p.shortQuantity ?? 0);
+        return `<div class="pos-row">
+          <div class="pos-left">
+            <div class="sym-badge">${symbol.slice(0,4)}</div>
+            <div><div class="pos-symbol">${symbol}</div><div class="pos-qty">${qty} shares</div></div>
+          </div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      el.innerHTML = '<div class="empty-note">Could not load positions.</div>';
+    }
+  }
+
+  // ---- Activity feed ----
+  async function refreshFeed() {
+    const el = $('feedList');
+    try {
+      const r = await api(`/v1/orders?account=${encodeURIComponent(account())}&limit=12`);
+      const orders = r.orders || [];
+      if (!orders.length) { el.innerHTML = '<div class="empty-note">No orders yet — place one from the ticket.</div>'; return; }
+      el.innerHTML = orders.map(o => {
+        const side = (o.instruction || '').toUpperCase() === 'SELL' ? 'sell' : 'buy';
+        const statusClass = 'st-' + (o.status || 'previewed').toLowerCase();
+        const notional = o.estimated_notional_usd ? money(o.estimated_notional_usd) : '';
+        return `<div class="feed-row">
+          <div class="feed-left">
+            <span class="side-chip ${side}">${side === 'buy' ? 'BUY' : 'SELL'}</span>
+            <div class="feed-meta">
+              <div class="feed-symbol">${o.symbol} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">×${o.quantity}</span></div>
+              <div class="feed-sub">${o.agent_id} · ${notional} · ${timeAgo(o.created_at)}</div>
+            </div>
+          </div>
+          <span class="status-chip ${statusClass}">${o.status}</span>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      el.innerHTML = '<div class="empty-note">Could not load activity.</div>';
+    }
+  }
+
+  // ---- Kill switch ----
+  async function refreshKillSwitch() {
+    try {
+      const s = await api('/v1/kill-switch/status');
+      const toggle = $('ksToggle');
+      toggle.classList.toggle('on', !s.enabled);
+      $('ksTitle').textContent = s.enabled ? 'Trading halted' : 'Trading active';
+      $('ksSub').textContent = s.enabled ? (s.reason || `Halted by ${s.set_by}`) : 'Fleet-wide switch is off';
+      toggle.dataset.enabled = String(s.enabled);
+    } catch (e) {
+      $('ksTitle').textContent = 'Unknown';
+      $('ksSub').textContent = 'Could not reach kill switch status';
+    }
+  }
+
+  $('ksToggle').addEventListener('click', () => {
+    const willEnable = $('ksToggle').dataset.enabled !== 'true';
+    openAdminModal(willEnable ? 'Halt all trading' : 'Resume trading', async (key) => {
+      await api(`/v1/kill-switch/${willEnable ? 'on' : 'off'}`, { method: 'POST', headers: { 'x-admin-key': key } });
+      toast(willEnable ? 'Kill switch engaged' : 'Kill switch cleared');
+      refreshKillSwitch();
+    });
+  });
+
+  function openAdminModal(title, onConfirm) {
+    $('adminTitle').textContent = title;
+    $('mAdminKey').value = store.get('edge.adminKey', '');
+    $('adminOverlay').classList.add('show');
+    const confirmBtn = $('mAdminConfirm');
+    const handler = async () => {
+      const key = $('mAdminKey').value.trim();
+      if (!key) return;
+      store.set('edge.adminKey', key);
+      confirmBtn.disabled = true;
+      try { await onConfirm(key); $('adminOverlay').classList.remove('show'); }
+      catch (e) { toast('Failed: ' + e.message); }
+      finally { confirmBtn.disabled = false; }
+    };
+    confirmBtn.onclick = handler;
+  }
+  $('mAdminCancel').addEventListener('click', () => $('adminOverlay').classList.remove('show'));
+
+  // ---- Order ticket ----
+  let side = 'BUY';
+  $('sideBuy').addEventListener('click', () => setSide('BUY'));
+  $('sideSell').addEventListener('click', () => setSide('SELL'));
+  function setSide(s) {
+    side = s;
+    $('sideBuy').classList.toggle('active', s === 'BUY');
+    $('sideSell').classList.toggle('active', s === 'SELL');
+  }
+
+  $('fType').addEventListener('change', () => {
+    $('limitPriceField').style.display = $('fType').value === 'LIMIT' ? '' : 'none';
+  });
+
+  let lastPreview = null;
+
+  $('previewBtn').addEventListener('click', async () => {
+    const btn = $('previewBtn');
+    btn.disabled = true; btn.textContent = 'Checking…';
+    const decisionId = `dash-${Date.now()}`;
+    const proposal = {
+      decision_id: decisionId,
+      agent_id: $('fAgent').value.trim() || 'default',
+      account: account(),
+      symbol: $('fSymbol').value.trim().toUpperCase(),
+      asset_type: $('fAssetType').value,
+      instruction: side,
+      quantity: parseInt($('fQty').value, 10) || 0,
+      order_type: $('fType').value,
+    };
+    if (proposal.order_type === 'LIMIT') {
+      const lp = $('fLimit').value;
+      if (!lp) { toast('Enter a limit price'); btn.disabled = false; btn.textContent = 'Preview order'; return; }
+      proposal.limit_price = lp;
+    }
+
+    try {
+      const preview = await api('/v1/orders/preview', { method: 'POST', body: JSON.stringify(proposal) });
+      lastPreview = { proposal, preview };
+      renderVerdict(preview);
+    } catch (e) {
+      $('verdictBox').innerHTML = `<div class="verdict-box"><div class="verdict-head rejected"><span>Request failed</span></div><div class="verdict-body"><div class="rej-note" style="margin-left:0">${e.message}</div></div></div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Preview order';
+    }
+  });
+
+  function renderVerdict(preview) {
+    const approved = preview.risk_verdict === 'APPROVED';
+    const checks = preview.risk_details.checks || {};
+    const rejections = preview.risk_details.rejections || [];
+    const rows = Object.entries(checks).map(([name, pass]) =>
+      `<div class="check-row ${pass ? 'pass' : 'fail'}"><span class="tick">${pass ? '✓' : '✕'}</span><span>${name.replace(/_/g, ' ')}</span></div>`
+    ).join('');
+    const rejNotes = rejections.map(r => `<div class="rej-note">${r}</div>`).join('');
+
+    $('verdictBox').innerHTML = `
+      <div class="verdict-box">
+        <div class="verdict-head ${approved ? 'approved' : 'rejected'}"><span>${approved ? 'Approved' : 'Rejected'}</span><span class="num">${money(preview.estimated_cost)}</span></div>
+        <div class="verdict-body">
+          ${rows}
+          ${rejNotes}
+          <div class="cost-line"><span>Commission</span><b class="num">${money(preview.estimated_commission)}</b></div>
+        </div>
+      </div>
+      ${approved ? '<button class="btn btn-primary" id="executeBtn">Approve &amp; execute</button>' : ''}
+    `;
+    if (approved) $('executeBtn').addEventListener('click', openApprovalModal);
+  }
+
+  function openApprovalModal() {
+    $('mApprover').value = store.get('edge.approver', '');
+    $('mAttestation').value = 'I have reviewed and approve this order';
+    $('approvalOverlay').classList.add('show');
+  }
+  $('mCancel').addEventListener('click', () => $('approvalOverlay').classList.remove('show'));
+  $('mConfirm').addEventListener('click', async () => {
+    const approvedBy = $('mApprover').value.trim();
+    const attestation = $('mAttestation').value.trim();
+    if (!approvedBy || !attestation) { toast('Fill in both fields'); return; }
+    store.set('edge.approver', approvedBy);
+
+    const btn = $('mConfirm'); btn.disabled = true; btn.textContent = 'Executing…';
+    try {
+      const req = {
+        decision_id: lastPreview.proposal.decision_id,
+        preview_id: lastPreview.preview.preview_id,
+        approval: {
+          preview_id: lastPreview.preview.preview_id,
+          approved_by: approvedBy,
+          approved_at: new Date().toISOString(),
+          attestation,
+          idempotency_key: `dash-${Date.now()}`,
+        },
+      };
+      const receipt = await api('/v1/orders/execute', { method: 'POST', body: JSON.stringify(req) });
+      toast(`Executed · ${receipt.execution_id}`);
+      $('approvalOverlay').classList.remove('show');
+      $('verdictBox').innerHTML = '';
+      refreshFeed(); refreshPositions(); refreshBalance();
+    } catch (e) {
+      toast('Execution failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Execute';
+    }
+  });
+
+  // ---- Refresh loop ----
+  function refreshAll() {
+    refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
+    refreshPositions(); refreshFeed(); refreshKillSwitch();
+  }
+  refreshAll();
+  setInterval(refreshAll, 15000);
+})();
+</script>
+</body>
+</html>

@@ -239,6 +239,93 @@ async def execute_order(
         raise HTTPException(status_code=500, detail="Execution failed")
 
 
+@app.get("/v1/orders")
+async def list_orders(
+    account: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    Recent orders, most recent first — read-only, no side effects (unlike
+    /v1/reconciliation/positions, which can trip the kill switch). Backs an
+    activity feed / dashboard rather than a single decision_id lookup.
+    """
+    limit = max(1, min(limit, 200))
+    stmt = select(OrderRecord)
+    if account:
+        stmt = stmt.where(OrderRecord.account == account)
+    if agent_id:
+        stmt = stmt.where(OrderRecord.agent_id == agent_id)
+    stmt = stmt.order_by(OrderRecord.created_at.desc()).limit(limit)
+
+    orders = db.exec(stmt).all()
+    return {
+        "orders": [
+            {
+                "decision_id": o.decision_id,
+                "agent_id": o.agent_id,
+                "account": o.account,
+                "symbol": o.symbol,
+                "instruction": o.instruction,
+                "quantity": o.quantity,
+                "status": o.status,
+                "risk_approved": o.risk_approved,
+                "estimated_notional_usd": o.estimated_notional_usd,
+                "filled_quantity": o.filled_quantity,
+                "broker_status": o.broker_status,
+                "created_at": o.created_at,
+                "updated_at": o.updated_at,
+            }
+            for o in orders
+        ]
+    }
+
+
+@app.get("/v1/account/{account}/balances")
+async def get_account_balances(
+    account: str,
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Read-only balances for one account alias — no side effects (unlike
+    DrawdownGuard, which captures/compares a baseline). Uses whichever
+    broker the current settings select (paper or real Schwab; see
+    src/brokers/factory.py), so this reflects real numbers once Schwab is
+    configured.
+    """
+    try:
+        profile = settings.get_account_profile(account)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        broker = build_broker_adapter(settings)
+        balances = await broker.get_balances(profile)
+        return {"account": account, "balances": balances}
+    except Exception as e:
+        logger.error("balances_query_error", account=account, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Could not fetch balances: {e}")
+
+
+@app.get("/v1/account/{account}/positions")
+async def get_account_positions(
+    account: str,
+    settings: Settings = Depends(get_settings_dep),
+):
+    """Read-only broker-reported positions for one account alias — no side effects."""
+    try:
+        profile = settings.get_account_profile(account)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        broker = build_broker_adapter(settings)
+        positions = await broker.get_positions(profile)
+        return {"account": account, "positions": positions}
+    except Exception as e:
+        logger.error("positions_query_error", account=account, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Could not fetch positions: {e}")
+
+
 @app.get("/v1/orders/{decision_id}", response_model=OrderStatus_Model)
 async def get_order_status(
     decision_id: str,

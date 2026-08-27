@@ -459,6 +459,51 @@ class TestKillSwitchEndpoints:
         assert isinstance(data["enabled"], bool)
 
 
+class TestReadOnlyAccountEndpoints:
+    """Test GET /v1/account/{account}/balances, /positions, and GET /v1/orders — all side-effect-free."""
+
+    def test_balances_returns_paper_broker_values(self, client):
+        resp = client.get("/v1/account/primary/balances")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["account"] == "primary"
+        assert data["balances"]["net_liquidation_value"] > 0
+
+    def test_positions_returns_a_list(self, client):
+        resp = client.get("/v1/account/primary/positions")
+        assert resp.status_code == 200
+        assert resp.json()["account"] == "primary"
+        assert isinstance(resp.json()["positions"], list)
+
+    def test_unknown_account_alias_is_404_not_500(self, client):
+        resp = client.get("/v1/account/not-a-real-alias/balances")
+        assert resp.status_code == 404
+
+    def test_list_orders_reflects_a_just_placed_preview(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-list-orders"}
+        )
+        client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+
+        resp = client.get("/v1/orders", params={"account": proposal.account, "limit": 5})
+
+        assert resp.status_code == 200
+        decision_ids = [o["decision_id"] for o in resp.json()["orders"]]
+        assert proposal.decision_id in decision_ids
+
+    def test_list_orders_filters_by_agent_id(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(
+            update={"decision_id": f"{sample_trade_proposal.decision_id}-agent-filter", "agent_id": "list-orders-probe-agent"}
+        )
+        client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+
+        resp = client.get("/v1/orders", params={"agent_id": "list-orders-probe-agent"})
+
+        orders = resp.json()["orders"]
+        assert len(orders) >= 1
+        assert all(o["agent_id"] == "list-orders-probe-agent" for o in orders)
+
+
 class TestMarketStatusEndpoint:
     """Test GET /v1/market-status."""
 
