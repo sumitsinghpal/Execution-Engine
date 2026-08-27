@@ -24,11 +24,18 @@ Three things make that safe to ship:
    it exactly like any other agent, including mid-position: a halt just
    stops new entries and stop/target management from firing, it doesn't
    touch what's already been submitted to the broker.
-3. _build_broker() below is hard-coded to PaperBrokerAdapter — not
-   build_broker_adapter(settings), which would follow settings.execution_mode
-   to a real Schwab connection if one were configured. No setting or .env
-   value can make this loop touch a real broker; that would require
-   changing this one function, a deliberate code change, not a config flip.
+3. _build_broker() below NEVER lets this loop preview or submit an order
+   against a real broker — that stays fixed regardless of settings. What
+   IS configurable is where its market data (quotes, price history) comes
+   from: real Schwab when settings.execution_mode == "SCHWAB" and
+   credentials are present (build_broker_adapter(settings) resolves this
+   exactly like every other component does), else the synthetic paper
+   generator. Either way, the object actually used for preview_order()/
+   submit_order() is SchwabDataPaperBroker or plain PaperBrokerAdapter —
+   both simulate every fill; see src/brokers/schwab_data_paper.py's
+   docstring for exactly which methods are real vs. simulated. Making
+   ORDERS (not just data) real would mean changing what this function
+   returns, a deliberate code change, not a config flip.
 """
 
 from __future__ import annotations
@@ -42,7 +49,10 @@ from typing import Callable
 from sqlmodel import Session
 
 from src.agentic.llm_narrator import narrate_entry, narrate_exit
-from src.brokers.paper import PaperBrokerAdapter
+from src.brokers.base import BrokerAdapter
+from src.brokers.factory import build_broker_adapter
+from src.brokers.schwab.adapter import SchwabBrokerAdapter
+from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
 from src.execution.executor import Executor
@@ -54,9 +64,20 @@ from src.strategy import engine as strategy_engine
 logger = get_logger(__name__)
 
 
-def _build_broker() -> PaperBrokerAdapter:
-    """Hard-coded paper broker — see module docstring, point 3. Do not change this to build_broker_adapter(settings)."""
-    return PaperBrokerAdapter()
+def _build_broker(settings: Settings) -> BrokerAdapter:
+    """
+    Real Schwab market data when configured, wrapped so every order
+    preview/submission still simulates — see module docstring, point 3,
+    and src/brokers/schwab_data_paper.py. build_broker_adapter(settings)
+    already resolves whether Schwab is actually usable (execution_mode,
+    credentials, an account profile that names it); if what it returns
+    isn't a SchwabBrokerAdapter, Schwab isn't configured and plain
+    PaperBrokerAdapter (fully synthetic, unchanged) is correct as-is.
+    """
+    broker = build_broker_adapter(settings)
+    if isinstance(broker, SchwabBrokerAdapter):
+        return SchwabDataPaperBroker(broker)
+    return broker
 
 
 async def manage_open_positions(session: Session, settings: Settings) -> int:
@@ -69,7 +90,7 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
     closed defensively (CLOSED_ERROR) rather than left silently retrying
     forever against a broker that may keep rejecting it.
     """
-    broker = _build_broker()
+    broker = _build_broker(settings)
     executor = Executor(session=session, broker=broker)
     service = AutonomousPositionService(session)
     closed = 0
@@ -148,7 +169,7 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
     submits it through the normal preview -> execute gate. Returns how many
     positions were opened.
     """
-    broker = _build_broker()
+    broker = _build_broker(settings)
     executor = Executor(session=session, broker=broker)
     service = AutonomousPositionService(session)
     opened = 0

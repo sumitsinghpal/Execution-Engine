@@ -17,6 +17,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from src.brokers.paper import PaperBrokerAdapter
+from src.brokers.schwab.adapter import SchwabBrokerAdapter
+from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
 from src.execution.autonomous_trader import manage_open_positions, scan_for_entries
@@ -28,6 +31,11 @@ import src.risk.limits as risk_limits_module
 from src.strategy import engine as strategy_engine
 from src.strategy.catalog import SignalDetail
 from sqlmodel import select
+
+# Captured before the autouse _fake_broker fixture below ever monkeypatches
+# autonomous_trader._build_broker — TestBuildBroker calls this directly to
+# test the real function, unaffected by that fixture's patch.
+_real_build_broker = autonomous_trader._build_broker
 
 
 class _FakeAutoBroker:
@@ -108,7 +116,7 @@ def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **ove
 def _fake_broker(monkeypatch):
     """Every test in this file gets a fresh _FakeAutoBroker in place of the real PaperBrokerAdapter."""
     broker = _FakeAutoBroker()
-    monkeypatch.setattr(autonomous_trader, "_build_broker", lambda: broker)
+    monkeypatch.setattr(autonomous_trader, "_build_broker", lambda settings: broker)
     return broker
 
 
@@ -345,3 +353,52 @@ class TestManageOpenPositions:
         # The second pass must not touch ZAUTN again — it's already CLOSED_TARGET.
         assert zautn_orders_after_first_pass == 1
         assert zautn_orders_after_second_pass == 1
+
+
+class TestBuildBroker:
+    """
+    _build_broker(settings) decides where the autonomous trader's market
+    data comes from (real Schwab vs. synthetic) — never whether its orders
+    are real, which stays fixed. See src/brokers/schwab_data_paper.py.
+    """
+
+    def test_paper_settings_return_a_plain_paper_broker(self):
+        settings = Settings(_env_file=None, env="test", execution_mode="PAPER")
+
+        broker = _real_build_broker(settings)
+
+        assert isinstance(broker, PaperBrokerAdapter)
+        assert not isinstance(broker, SchwabDataPaperBroker)
+
+    def test_schwab_settings_wrap_in_schwab_data_paper_broker(self, monkeypatch):
+        settings = Settings(_env_file=None, env="test", execution_mode="SCHWAB")
+        fake_schwab = SchwabBrokerAdapter.__new__(SchwabBrokerAdapter)  # isinstance-only double; never calls its methods
+        monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: fake_schwab)
+
+        broker = _real_build_broker(settings)
+
+        assert isinstance(broker, SchwabDataPaperBroker)
+
+    def test_schwab_not_actually_configured_falls_back_to_plain_paper(self, monkeypatch):
+        """build_broker_adapter itself falls back to PaperBrokerAdapter when Schwab isn't fully configured — _build_broker must not wrap that in SchwabDataPaperBroker."""
+        settings = Settings(_env_file=None, env="test", execution_mode="SCHWAB")
+        monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: PaperBrokerAdapter())
+
+        broker = _real_build_broker(settings)
+
+        assert isinstance(broker, PaperBrokerAdapter)
+        assert not isinstance(broker, SchwabDataPaperBroker)
+
+    def test_submit_order_is_never_reachable_through_the_real_schwab_adapter(self):
+        """
+        Even in the Schwab-wrapped case, preview_order/submit_order must
+        resolve to PaperBrokerAdapter's simulated implementations, not
+        SchwabBrokerAdapter's real ones — confirmed by class identity
+        rather than a live call, since this double's methods aren't safe
+        to invoke.
+        """
+        fake_schwab = SchwabBrokerAdapter.__new__(SchwabBrokerAdapter)
+        broker = SchwabDataPaperBroker(fake_schwab)
+
+        assert broker.submit_order.__func__ is PaperBrokerAdapter.submit_order
+        assert broker.preview_order.__func__ is PaperBrokerAdapter.preview_order

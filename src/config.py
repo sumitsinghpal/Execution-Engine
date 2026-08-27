@@ -150,9 +150,13 @@ class Settings(BaseSettings):
     # and still runs through the same preview/risk-checks/kill-switch gate
     # as any other order, scoped to its own agent_id so it can be halted
     # independently via /v1/kill-switch/agents/{autonomous_agent_id}/on.
-    # Hard-coded to the paper broker regardless of this or any other
-    # setting — see autonomous_trader._build_broker()'s docstring for why
-    # that's a code-level guarantee, not a config one. Disabled by default.
+    # Order preview/submission always simulates (paper fills), regardless
+    # of execution_mode below — that's a code-level guarantee, not a
+    # config one; see autonomous_trader._build_broker()'s docstring.
+    # execution_mode DOES control where its market data comes from: real
+    # Schwab quotes/history when SCHWAB is configured (more realistic
+    # signals — see src/brokers/schwab_data_paper.py), synthetic
+    # otherwise. Disabled by default.
     autonomous_trading_enabled: bool = False
     autonomous_agent_id: str = "autonomous-trader"
     autonomous_account: str = "primary"
