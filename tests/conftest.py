@@ -16,6 +16,7 @@ from sqlmodel import Session, SQLModel
 from src.brokers.paper import PaperBrokerAdapter
 
 # Import all models to register them with SQLModel.metadata
+from src.execution.algo_slices import AlgoSliceRecord
 from src.execution.idempotency import IdempotencyRecord
 from src.execution.approval import ApprovalRecord
 from src.execution.drawdown_guard import DailyEquityBaseline

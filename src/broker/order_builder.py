@@ -25,6 +25,13 @@ class OrderBuilder:
             OrderType.LIMIT: "LIMIT",
             OrderType.STOP: "STOP",
             OrderType.STOP_LIMIT: "STOP_LIMIT",
+            # TWAP/VWAP are this system's own execution algorithm, not a
+            # broker order type — the broker never sees "TWAP", only the
+            # individual MARKET child slices submitted over time (see
+            # src/execution/algo_slices.py). A preview of the aggregate
+            # order is priced as a MARKET-equivalent for cost estimation.
+            OrderType.TWAP: "MARKET",
+            OrderType.VWAP: "MARKET",
         }
         
         order_spec = {

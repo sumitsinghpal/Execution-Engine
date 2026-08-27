@@ -34,6 +34,11 @@ class OrderType(str, Enum):
     LIMIT = "LIMIT"
     STOP = "STOP"
     STOP_LIMIT = "STOP_LIMIT"
+    # Execution algorithms: the total quantity is split into several child
+    # MARKET slices submitted over time, not sent to the broker as a single
+    # order. See src/execution/algo_slices.py.
+    TWAP = "TWAP"
+    VWAP = "VWAP"
 
 
 class OrderStatus(str, Enum):
@@ -85,6 +90,11 @@ class TradeProposal(BaseModel):
     strategy_stop_loss_price: Optional[Decimal] = Field(default=None, description="Advisory stop-loss level")
     strategy_take_profit_price: Optional[Decimal] = Field(default=None, description="Advisory take-profit level")
 
+    # TWAP/VWAP only. Both default (30 minutes, 6 slices) when omitted —
+    # see validate_order_type_prices below.
+    algo_duration_minutes: Optional[int] = Field(default=None, ge=1, le=390, description="TWAP/VWAP: total execution window")
+    algo_slices: Optional[int] = Field(default=None, ge=2, le=50, description="TWAP/VWAP: number of child orders")
+
     model_config = ConfigDict(extra="forbid")  # Reject unknown fields
 
     @field_serializer("limit_price", "stop_price", "strategy_stop_loss_price", "strategy_take_profit_price", when_used="json")
@@ -122,6 +132,15 @@ class TradeProposal(BaseModel):
                 raise ValueError("limit_price is required for STOP_LIMIT orders")
             if self.stop_price is None:
                 raise ValueError("stop_price is required for STOP_LIMIT orders")
+        elif self.order_type in (OrderType.TWAP, OrderType.VWAP):
+            if self.limit_price is not None or self.stop_price is not None:
+                raise ValueError(f"{self.order_type.value} orders execute as child MARKET slices; limit_price/stop_price don't apply")
+            if self.algo_duration_minutes is None:
+                self.algo_duration_minutes = 30
+            if self.algo_slices is None:
+                self.algo_slices = 6
+        elif self.algo_duration_minutes is not None or self.algo_slices is not None:
+            raise ValueError("algo_duration_minutes/algo_slices only apply to TWAP/VWAP orders")
         return self
 
 

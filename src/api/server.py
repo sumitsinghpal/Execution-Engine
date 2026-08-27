@@ -20,6 +20,7 @@ from src.brokers.factory import build_broker_adapter
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
+from src.execution.algo_slices import AlgoSliceRecord
 from src.execution.drawdown_guard import DrawdownGuard
 from src.execution.executor import Executor, OrderRecord
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
@@ -375,6 +376,23 @@ async def get_order_status(
     except Exception as e:
         logger.error("status_query_error", decision_id=decision_id, error=str(e))
         raise HTTPException(status_code=500, detail="Status query failed")
+
+
+@app.get("/v1/orders/{decision_id}/slices")
+async def get_order_slices(decision_id: str, db: Session = Depends(get_db)):
+    """
+    Child MARKET slices submitted so far for a TWAP/VWAP order (see
+    src/execution/algo_slices.py) — empty for any non-algo order. The
+    audit trail of what was actually submitted, and why not for any slice
+    that wasn't (e.g. SKIPPED_KILL_SWITCH).
+    """
+    stmt = (
+        select(AlgoSliceRecord)
+        .where(AlgoSliceRecord.parent_decision_id == decision_id)
+        .order_by(AlgoSliceRecord.slice_index)
+    )
+    records = db.exec(stmt).all()
+    return {"decision_id": decision_id, "slices": [r.to_dict() for r in records]}
 
 
 @app.post("/v1/kill-switch/on", response_model=KillSwitchStatus)

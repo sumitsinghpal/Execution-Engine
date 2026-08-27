@@ -14,6 +14,7 @@ from src.broker.order_builder import OrderBuilder
 from src.brokers.base import BrokerAdapter, BrokerAuthenticationError
 from src.brokers.factory import build_broker_adapter
 from src.config import get_settings
+from src.execution.algo_slices import build_twap_plan, build_vwap_plan, schedule_algo_execution
 from src.execution.approval import ApprovalManager
 from src.execution.idempotency import IdempotencyManager, Operation
 from src.execution.kill_switch_state import KillSwitchService
@@ -54,6 +55,9 @@ class OrderRecord(SQLModel, table=True):
     order_type: str = "MARKET"
     limit_price: Optional[str] = None
     stop_price: Optional[str] = None
+    # TWAP/VWAP only — see src/execution/algo_slices.py.
+    algo_duration_minutes: Optional[int] = None
+    algo_slices: Optional[int] = None
     status: str = OrderStatus.PREVIEWED.value
     payload_checksum: str
     risk_approved: bool = False
@@ -194,6 +198,8 @@ class Executor:
             order_type=proposal.order_type.value,
             limit_price=str(proposal.limit_price) if proposal.limit_price is not None else None,
             stop_price=str(proposal.stop_price) if proposal.stop_price is not None else None,
+            algo_duration_minutes=proposal.algo_duration_minutes,
+            algo_slices=proposal.algo_slices,
             status=OrderStatus.PREVIEWED.value,
             payload_checksum=checksum,
             risk_approved=verdict.approved,
@@ -322,44 +328,54 @@ class Executor:
         if kill_switch_on:
             raise ValueError("Kill switch is ON - order rejected")
 
-        # Build and submit order using what was ACTUALLY previewed — not a
-        # hardcoded MARKET/ETF, which would silently discard a previewed
-        # LIMIT/STOP order's price protection at the one moment it reaches
-        # the broker. See OrderRecord.order_type/limit_price/stop_price,
-        # populated in preview_order() above.
-        order_spec = self.builder.build_order_spec(
-            TradeProposal(
-                decision_id=decision_id,
-                agent_id=order.agent_id,
-                account=order.account,
-                symbol=order.symbol,
-                asset_type=order.asset_type,
-                instruction=order.instruction,
-                quantity=order.quantity,
-                order_type=order.order_type,
-                limit_price=Decimal(order.limit_price) if order.limit_price is not None else None,
-                stop_price=Decimal(order.stop_price) if order.stop_price is not None else None,
-            ),
-            order.account,
-        )
-        
-        profile = self.settings.get_account_profile(order.account)
-        try:
-            broker_response = await self.broker.submit_order(profile, order_spec)
-        except BrokerAuthenticationError as exc:
-            self._shutdown_on_auth_failure(exc)
-            raise
-        
-        # Extract broker order ID
-        execution_id = broker_response.get("orderId", f"exec-{uuid.uuid4()}")
-        
+        if order.order_type in ("TWAP", "VWAP"):
+            # A TWAP/VWAP order was never going to be one broker order —
+            # it's this system's own instruction to submit several MARKET
+            # child slices over time (see src/execution/algo_slices.py).
+            # That loop runs in the background after this request returns
+            # (it can span many minutes) and re-checks the kill switch
+            # before every slice, not just once here.
+            execution_id, broker_response = await self._schedule_algo_execution(order)
+        else:
+            # Build and submit order using what was ACTUALLY previewed —
+            # not a hardcoded MARKET/ETF, which would silently discard a
+            # previewed LIMIT/STOP order's price protection at the one
+            # moment it reaches the broker. See
+            # OrderRecord.order_type/limit_price/stop_price, populated in
+            # preview_order() above.
+            order_spec = self.builder.build_order_spec(
+                TradeProposal(
+                    decision_id=decision_id,
+                    agent_id=order.agent_id,
+                    account=order.account,
+                    symbol=order.symbol,
+                    asset_type=order.asset_type,
+                    instruction=order.instruction,
+                    quantity=order.quantity,
+                    order_type=order.order_type,
+                    limit_price=Decimal(order.limit_price) if order.limit_price is not None else None,
+                    stop_price=Decimal(order.stop_price) if order.stop_price is not None else None,
+                ),
+                order.account,
+            )
+
+            profile = self.settings.get_account_profile(order.account)
+            try:
+                broker_response = await self.broker.submit_order(profile, order_spec)
+            except BrokerAuthenticationError as exc:
+                self._shutdown_on_auth_failure(exc)
+                raise
+
+            # Extract broker order ID
+            execution_id = broker_response.get("orderId", f"exec-{uuid.uuid4()}")
+            order.raw_broker_response = json.dumps(broker_response)
+
         # Update order record
         order.execution_id = execution_id
         order.status = OrderStatus.SUBMITTED.value
         order.updated_at = datetime.utcnow()
         order.broker_status = broker_response.get("status")
-        order.raw_broker_response = json.dumps(broker_response)
-        
+
         self.session.add(order)
         self.session.commit()
 
@@ -453,6 +469,50 @@ class Executor:
     def _build_broker_adapter(self, mock_broker: bool) -> BrokerAdapter:
         """Choose the configured broker without allowing implicit live trading — see src/brokers/factory.py."""
         return build_broker_adapter(self.settings, mock_broker=mock_broker)
+
+    async def _schedule_algo_execution(self, order: "OrderRecord") -> tuple[str, dict]:
+        """
+        Builds the TWAP/VWAP slice plan and hands it off to the background
+        loop in src/execution/algo_slices.py. Returns immediately (a
+        30-minute TWAP cannot run inside this HTTP request) — the "broker
+        response" here describes the plan this system committed to, not a
+        real broker order, since no single broker order exists yet.
+        """
+        slices = order.algo_slices or 6
+        duration_minutes = order.algo_duration_minutes or 30
+        interval_seconds = (duration_minutes * 60) / max(slices - 1, 1)
+
+        if order.order_type == "VWAP":
+            try:
+                bars = await self.broker.get_price_history(order.symbol, "5min", lookback_days=1)
+                volume_curve = [float(b.get("volume") or 0) for b in bars]
+            except Exception as exc:
+                logger.warning("vwap_volume_curve_unavailable", decision_id=order.decision_id, error=str(exc))
+                volume_curve = []
+            quantities = build_vwap_plan(order.quantity, slices, volume_curve)
+        else:
+            quantities = build_twap_plan(order.quantity, slices)
+
+        schedule_algo_execution(
+            decision_id=order.decision_id,
+            account=order.account,
+            agent_id=order.agent_id,
+            symbol=order.symbol,
+            asset_type=order.asset_type,
+            instruction=order.instruction,
+            quantities=quantities,
+            interval_seconds=interval_seconds,
+        )
+
+        execution_id = f"algo-{order.decision_id}"
+        broker_response = {
+            "mode": "ALGO",
+            "algo_type": order.order_type,
+            "planned_slices": quantities,
+            "interval_seconds": round(interval_seconds, 1),
+            "status": "WORKING",
+        }
+        return execution_id, broker_response
     
     def _audit_log(self, action: str, decision_id: str, details: dict) -> None:
         """Write audit log entry."""
