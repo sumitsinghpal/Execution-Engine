@@ -22,13 +22,16 @@ from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
 from src.execution.algo_slices import AlgoSliceRecord
 from src.execution.drawdown_guard import DrawdownGuard
+from src.execution.edge_tf_connector import claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
 from src.execution.executor import Executor, OrderRecord
+from src.execution.external_signals import ExternalSignalStatus, ExternalSignalService
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
 from src.execution.position_reconciliation import PositionReconciliationService
 from src.execution.reconciliation import ReconciliationService
 from src.execution.strategy_scanner import run_scanner_loop, scan_once
 from src.execution.strategy_signals import SignalStatus, StrategySignalService
 from src.execution.symbol_coordination import SymbolCoordinationGuard
+from src.integrations.edge_tf_client import EdgeTFGatewayError
 from src.logging_config import configure_logging, get_logger
 from src.models.orders import (
     TradeProposal,
@@ -87,6 +90,8 @@ def verify_admin_key(x_admin_key: Optional[str] = Header(None), settings: Settin
 
 _scanner_stop_event: Optional[asyncio.Event] = None
 _scanner_task: Optional[asyncio.Task] = None
+_edge_tf_connector_stop_event: Optional[asyncio.Event] = None
+_edge_tf_connector_task: Optional[asyncio.Task] = None
 
 
 @app.on_event("startup")
@@ -95,20 +100,30 @@ async def startup_event():
     configure_logging(get_settings().log_level, get_settings().log_format)
     init_db()
 
-    global _scanner_stop_event, _scanner_task
+    global _scanner_stop_event, _scanner_task, _edge_tf_connector_stop_event, _edge_tf_connector_task
     _scanner_stop_event = asyncio.Event()
     _scanner_task = asyncio.create_task(run_scanner_loop(SessionLocal, get_settings, _scanner_stop_event))
+
+    _edge_tf_connector_stop_event = asyncio.Event()
+    _edge_tf_connector_task = asyncio.create_task(
+        run_connector_loop(SessionLocal, get_settings, _edge_tf_connector_stop_event)
+    )
 
     logger.info("startup_complete")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Stop the background strategy scanner cleanly."""
+    """Stop the background strategy scanner and EDGE-TF connector cleanly."""
     if _scanner_stop_event is not None:
         _scanner_stop_event.set()
     if _scanner_task is not None:
         await asyncio.wait_for(_scanner_task, timeout=10)
+
+    if _edge_tf_connector_stop_event is not None:
+        _edge_tf_connector_stop_event.set()
+    if _edge_tf_connector_task is not None:
+        await asyncio.wait_for(_edge_tf_connector_task, timeout=10)
 
 
 @app.get("/v1/health")
@@ -212,22 +227,42 @@ async def preview_order(
 async def execute_order(
     request: ExecutionRequest,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
 ) -> ExecutionReceipt:
     """
     Execute a previously-approved order.
-    
+
     Requires:
     - decision_id from original proposal
     - preview_id from preview response
     - approval artifact (approved_by, approved_at, attestation)
     - idempotency_key for safety
-    
+
     Approval gates, kill switch, and risk checks are enforced server-side.
+
+    If decision_id matches a signal this system polled from EDGE-TF's
+    execution gateway (src/execution/edge_tf_connector.py), the trade is
+    atomically claimed there first — refused if something else already
+    claimed or it expired, in which case this aborts before touching the
+    broker — and the outcome is reported back upstream afterward, success
+    or failure, so EDGE-TF's own audit ledger stays accurate.
     """
-    
+
+    external_signal = ExternalSignalService(db).get_by_trade_id(request.decision_id)
+    if external_signal is not None and external_signal.status == ExternalSignalStatus.PENDING:
+        try:
+            await claim_upstream(external_signal, settings, executor_id=settings.edge_tf_executor_id)
+        except EdgeTFGatewayError as e:
+            logger.error("edge_tf_claim_failed", decision_id=request.decision_id, error=str(e))
+            raise HTTPException(
+                status_code=409,
+                detail=f"EDGE-TF refused to hand off this trade for execution: {e}",
+            )
+        ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.CLAIMED)
+
     try:
         executor = Executor(session=db)
-        
+
         # Execute order
         receipt = await executor.execute_order(
             decision_id=request.decision_id,
@@ -237,29 +272,42 @@ async def execute_order(
             attestation=request.approval.attestation,
             idempotency_key=request.approval.idempotency_key,
         )
-        
+
         logger.info(
             "execute_success",
             decision_id=request.decision_id,
             execution_id=receipt.execution_id,
         )
-        
+
+        if external_signal is not None:
+            order_status = await executor.get_order_status(request.decision_id)
+            await report_upstream(external_signal, settings, order_status)
+            ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.EXECUTED)
+
         return receipt
-        
+
     except ValueError as e:
         logger.error("execute_validation_error", decision_id=request.decision_id, error=str(e))
+        if external_signal is not None:
+            ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.FAILED)
         raise HTTPException(status_code=400, detail=str(e))
     except BrokerAuthenticationError as e:
         logger.critical("execute_broker_auth_failed", decision_id=request.decision_id, error=str(e))
+        if external_signal is not None:
+            ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.FAILED)
         raise HTTPException(
             status_code=503,
             detail=f"Broker authentication failed; trading halted pending re-authentication: {e}",
         )
     except BrokerAPIOutageError as e:
         logger.critical("execute_broker_api_outage", decision_id=request.decision_id, error=str(e))
+        if external_signal is not None:
+            ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.FAILED)
         raise HTTPException(status_code=503, detail=f"Broker API unreachable, try again shortly: {e}")
     except Exception as e:
         logger.error("execute_error", decision_id=request.decision_id, error=str(e))
+        if external_signal is not None:
+            ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.FAILED)
         raise HTTPException(status_code=500, detail="Execution failed")
 
 
@@ -769,6 +817,79 @@ async def dismiss_strategy_signal(signal_id: int, db: Session = Depends(get_db))
         return record.to_dict()
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/v1/external-signals/poll")
+async def poll_external_signals_now(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Triggers one immediate poll of EDGE-TF's execution gateway instead of
+    waiting for the next edge_tf_poll_interval_sec tick. Same effect as an
+    autonomous pass — records any newly-approved trades, places no orders.
+    """
+    if not settings.edge_tf_connector_enabled:
+        raise HTTPException(status_code=400, detail="EDGE-TF connector is disabled (edge_tf_connector_enabled=false)")
+    try:
+        new_count = await edge_tf_poll_once(db, settings)
+        return {"new_signals": new_count}
+    except Exception as e:
+        logger.error("edge_tf_poll_all_error", error=str(e))
+        raise HTTPException(status_code=502, detail=f"EDGE-TF poll failed: {e}")
+
+
+@app.get("/v1/external-signals")
+async def list_external_signals(
+    status: Optional[str] = Query(default=ExternalSignalStatus.PENDING),
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    Trades EDGE-TF (or, in future, another external decision engine) has
+    already approved on its own side — the human-review queue for signals
+    that didn't originate from this system's own strategy catalog. Defaults
+    to PENDING; pass status=DISMISSED/CLAIMED/EXECUTED/FAILED or omit status
+    entirely for the full history.
+    """
+    records = ExternalSignalService(db).list_signals(status=status or None, limit=limit)
+    return {"signals": [r.to_dict() for r in records]}
+
+
+@app.post("/v1/external-signals/{trade_id}/load")
+async def load_external_signal(
+    trade_id: str,
+    account: str = Query(..., description="Account alias to execute this trade against"),
+    agent_id: str = Query(default="default"),
+    db: Session = Depends(get_db),
+):
+    """
+    Shapes one PENDING external signal as a TradeProposal payload
+    (decision_id set to the upstream trade_id) ready to hand to
+    POST /v1/orders/preview — this does not preview or execute anything
+    itself, it only saves the operator from hand-transcribing the signal.
+    """
+    record = ExternalSignalService(db).get_by_trade_id(trade_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"External signal {trade_id} not found")
+    if record.status != ExternalSignalStatus.PENDING:
+        raise HTTPException(status_code=409, detail=f"External signal {trade_id} is {record.status}, not PENDING")
+    try:
+        settings = get_settings()
+        settings.get_account_profile(account)  # fail closed on an unknown alias before handing this back
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"proposal": record.to_trade_proposal_dict(account=account, agent_id=agent_id)}
+
+
+@app.post("/v1/external-signals/{trade_id}/dismiss")
+async def dismiss_external_signal(trade_id: str, db: Session = Depends(get_db)):
+    """Marks an external signal reviewed-and-declined. No upstream call, no order-related side effect."""
+    record = ExternalSignalService(db).get_by_trade_id(trade_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"External signal {trade_id} not found")
+    updated = ExternalSignalService(db).mark_status(trade_id, ExternalSignalStatus.DISMISSED)
+    return updated.to_dict()
 
 
 if __name__ == "__main__":

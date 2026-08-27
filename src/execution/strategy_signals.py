@@ -11,7 +11,7 @@ side effects of its own.
 """
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -73,8 +73,13 @@ class StrategySignalService:
         signal is already PENDING today — the scanner runs every
         strategy_scan_interval_sec, and without this a single day's setup
         would otherwise spawn one duplicate row per scan interval.
+
+        Uses UTC for "today", matching trading_date's default_factory below
+        — comparing against the local-time date here would let this drift
+        out of sync near midnight (and on any host not set to UTC), letting
+        a duplicate row through.
         """
-        today = date.today().isoformat()
+        today = datetime.utcnow().date().isoformat()
         stmt = select(StrategySignalRecord).where(
             StrategySignalRecord.strategy_id == strategy_id,
             StrategySignalRecord.symbol == symbol,

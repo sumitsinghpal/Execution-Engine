@@ -128,6 +128,20 @@ class Settings(BaseSettings):
     def strategy_watchlist(self, value: list[str]) -> None:
         self.strategy_watchlist_raw = ",".join(value)
 
+    # EDGE-TF connector (src/execution/edge_tf_connector.py): polls EDGE-TF's
+    # own execution gateway (api/execution_app.py in the EDGE-TF repo, a
+    # separate process/repo) for trades it has already approved, and records
+    # them as external signals for human review — same "no automatic order"
+    # guarantee as the internal strategy scanner above. Disabled by default;
+    # both the URL and token must be set for it to do anything, matching how
+    # Schwab credentials are opt-in rather than assumed. The token must match
+    # EDGE_EXECUTION_TOKEN on the EDGE-TF side.
+    edge_tf_connector_enabled: bool = False
+    edge_tf_gateway_url: Optional[str] = None
+    edge_tf_gateway_token: Optional[str] = None
+    edge_tf_poll_interval_sec: int = 60
+    edge_tf_executor_id: str = "execution-engine"
+
     # API Security
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False
