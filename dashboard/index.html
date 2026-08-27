@@ -288,6 +288,31 @@
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
   .skeleton { color: var(--ink-faint); font-size: 13px; }
+
+  /* Chart card */
+  .chart-card { margin-top: 18px; }
+  .chart-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .chart-controls input {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--ink); font-size: 13.5px; padding: 8px 11px; font-family: var(--font-mono);
+    width: 110px; text-transform: uppercase;
+  }
+  .chart-controls .btn { width: auto; margin-top: 0; padding: 9px 16px; font-size: 13px; }
+  .tv-wrap { height: 480px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); }
+
+  /* Live updates card */
+  .live-updates-card { margin-top: 18px; }
+  .lu-meta { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); margin-bottom: 14px; }
+  .lu-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 14px; margin-bottom: 18px; }
+  .lu-stat-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; margin-bottom: 4px; }
+  .lu-stat-value { font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
+  .lu-stat-value.up { color: var(--buy); } .lu-stat-value.down { color: var(--sell); }
+  .lu-section-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; margin: 18px 0 8px; }
+  .lu-pair-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .lu-pair-row:last-child { border-bottom: none; }
+  .lu-pair-name { font-family: var(--font-mono); color: var(--ink-muted); }
+  .lu-pair-metrics { display: flex; gap: 12px; font-family: var(--font-mono); color: var(--ink-faint); }
+  .lu-pair-metrics b { color: var(--ink); }
 </style>
 </head>
 <body>
@@ -305,6 +330,15 @@
       </div>
       <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
     </div>
+  </div>
+
+  <div class="card chart-card">
+    <h2>Chart <span class="hint">TradingView — independent of the order ticket's symbol</span></h2>
+    <div class="chart-controls">
+      <input id="chartSymbol" maxlength="6" spellcheck="false">
+      <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
+    </div>
+    <div class="tv-wrap" id="tvChartContainer"></div>
   </div>
 
   <div class="grid">
@@ -426,6 +460,13 @@
     <button class="btn btn-ghost" id="scanAllBtn" style="margin-top:0">Scan all now</button>
     <div class="strategy-columns" id="strategyColumns"></div>
   </div>
+
+  <div class="card live-updates-card">
+    <h2>Live updates <span class="hint" id="liveUpdatesHint">refreshes every 3h</span></h2>
+    <div class="lu-meta" id="liveUpdatesMeta">Loading…</div>
+    <div id="liveUpdatesBody"></div>
+    <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Refresh now</button>
+  </div>
 </div>
 
 <div class="overlay" id="approvalOverlay">
@@ -464,6 +505,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="https://s3.tradingview.com/tv.js"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -936,6 +978,155 @@
     toast(`Loaded ${signal.symbol} · ${signal.strategy_name} into the order ticket`);
   }
 
+  // ---- Chart (TradingView — independent widget, not fed by this API) ----
+  function loadChart(symbol) {
+    const container = $('tvChartContainer');
+    container.innerHTML = '';
+    if (typeof TradingView === 'undefined' || !TradingView.widget) {
+      container.innerHTML = '<div class="empty-note" style="padding:16px">Could not load the TradingView widget (blocked, or offline).</div>';
+      return;
+    }
+    const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    new TradingView.widget({
+      autosize: true,
+      symbol,
+      interval: 'D',
+      timezone: 'Etc/UTC',
+      theme: dark ? 'dark' : 'light',
+      style: '1',
+      locale: 'en',
+      enable_publishing: false,
+      withdateranges: true,
+      container_id: 'tvChartContainer',
+    });
+  }
+
+  $('chartLoadBtn').addEventListener('click', () => {
+    const sym = $('chartSymbol').value.trim().toUpperCase();
+    if (!sym) { toast('Enter a symbol'); return; }
+    store.set('edge.chartSymbol', sym);
+    loadChart(sym);
+  });
+  $('chartSymbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('chartLoadBtn').click(); });
+
+  function initChart() {
+    const initial = store.get('edge.chartSymbol', $('fSymbol').value.trim().toUpperCase() || 'QQQ');
+    $('chartSymbol').value = initial;
+    loadChart(initial);
+  }
+
+  // ---- Live updates: 3-year backtest (POST /v1/backtest/run, defaults =
+  // the same 3 strategies/watchlist the autonomous trader uses) plus
+  // recent autonomous-trader activity, cached in localStorage and
+  // refreshed on a 3-hour cadence — "3 hours" is the refresh interval,
+  // not a 3-hour backtest window (the strategies trade on daily bars, so
+  // a 3-hour lookback wouldn't mean anything to them). A stale cache is
+  // shown immediately on load while a fresh one computes in the
+  // background, so reopening the dashboard is never blocked on a
+  // network-bound backtest.
+  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v1';
+  const LIVE_UPDATES_INTERVAL_MS = 3 * 60 * 60 * 1000;
+  let liveUpdatesTimer = null;
+
+  function readLiveUpdatesCache() {
+    try { const raw = localStorage.getItem(LIVE_UPDATES_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
+  }
+  function writeLiveUpdatesCache(data) {
+    try { localStorage.setItem(LIVE_UPDATES_KEY, JSON.stringify(data)); } catch {}
+  }
+
+  async function computeLiveUpdates() {
+    const end = new Date();
+    const start = new Date(end); start.setFullYear(start.getFullYear() - 3);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+
+    const [backtest, positionsRes] = await Promise.all([
+      api('/v1/backtest/run', { method: 'POST', body: JSON.stringify({ start_date: fmt(start), end_date: fmt(end) }) }),
+      api('/v1/autonomous/positions?limit=6').catch(() => ({ positions: [] })),
+    ]);
+
+    return { backtest, positions: positionsRes.positions || [], computedAt: new Date().toISOString() };
+  }
+
+  function renderLiveUpdates(data) {
+    const s = (data.backtest && data.backtest.summary) || {};
+    $('liveUpdatesMeta').textContent =
+      `Last computed ${timeAgo(data.computedAt)} · 3yr backtest (QQQ/SPY/IWM × Golden Cross/Turtle/RSI2) + live autonomous activity`;
+
+    const pairRows = ((data.backtest && data.backtest.results) || [])
+      .slice()
+      .sort((a, z) => z.total_return_pct - a.total_return_pct)
+      .map(r => `
+        <div class="lu-pair-row">
+          <span class="lu-pair-name">${r.symbol} · ${r.strategy_id}</span>
+          <span class="lu-pair-metrics">
+            <span>${r.total_trades} trades</span>
+            <span>win <b>${pct(r.win_rate)}</b></span>
+            <span>pf <b class="${r.profit_factor != null && r.profit_factor >= 1 ? 'up' : 'down'}">${r.profit_factor == null ? '—' : Number(r.profit_factor).toFixed(2)}</b></span>
+          </span>
+        </div>`)
+      .join('') || '<div class="empty-note">No backtest pairs returned.</div>';
+
+    const activityRows = data.positions.length
+      ? data.positions.map(p => `
+        <div class="feed-row">
+          <div class="feed-left">
+            <span class="side-chip buy">${p.status}</span>
+            <div class="feed-meta">
+              <div class="feed-symbol">${p.symbol} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">${p.strategy_id}</span></div>
+              <div class="feed-sub">entry ${money(p.entry_price)} · ${timeAgo(p.opened_at)}</div>
+            </div>
+          </div>
+        </div>`).join('')
+      : '<div class="empty-note">No autonomous trades yet — enable autonomous_trading_enabled to see activity here.</div>';
+
+    $('liveUpdatesBody').innerHTML = `
+      <div class="lu-stats">
+        <div><div class="lu-stat-label">Trades</div><div class="lu-stat-value num">${s.total_trades ?? '—'}</div></div>
+        <div><div class="lu-stat-label">Win rate</div><div class="lu-stat-value num">${s.win_rate != null ? pct(s.win_rate) : '—'}</div></div>
+        <div><div class="lu-stat-label">Total P/L</div><div class="lu-stat-value num ${s.total_pnl_usd >= 0 ? 'up' : 'down'}">${s.total_pnl_usd != null ? money(s.total_pnl_usd) : '—'}</div></div>
+        <div><div class="lu-stat-label">Pairs run</div><div class="lu-stat-value num">${s.pairs_run ?? '—'}</div></div>
+      </div>
+      <div class="lu-section-title">By symbol × strategy</div>
+      ${pairRows}
+      <div class="lu-section-title">Recent autonomous activity</div>
+      ${activityRows}
+    `;
+  }
+
+  async function refreshLiveUpdates(force) {
+    const cached = readLiveUpdatesCache();
+    const isStale = !cached || (Date.now() - new Date(cached.computedAt).getTime()) >= LIVE_UPDATES_INTERVAL_MS;
+
+    if (cached && !force) renderLiveUpdates(cached); // show something immediately, even if stale
+    if (!force && cached && !isStale) { scheduleNextLiveUpdate(); return; }
+
+    if (!cached || force) {
+      $('liveUpdatesMeta').textContent = 'Running a 3-year backtest against real market data — this can take up to a minute…';
+      $('liveUpdatesBody').innerHTML = '<div class="empty-note">Loading…</div>';
+    }
+
+    try {
+      const data = await computeLiveUpdates();
+      writeLiveUpdatesCache(data);
+      renderLiveUpdates(data);
+    } catch (e) {
+      $('liveUpdatesMeta').textContent = 'Could not refresh — ' + e.message;
+      if (!cached) $('liveUpdatesBody').innerHTML = '<div class="empty-note">Could not load live updates.</div>';
+    }
+    scheduleNextLiveUpdate();
+  }
+
+  function scheduleNextLiveUpdate() {
+    clearTimeout(liveUpdatesTimer);
+    const cached = readLiveUpdatesCache();
+    const elapsed = cached ? Date.now() - new Date(cached.computedAt).getTime() : LIVE_UPDATES_INTERVAL_MS;
+    const delay = Math.max(60000, LIVE_UPDATES_INTERVAL_MS - elapsed);
+    liveUpdatesTimer = setTimeout(() => refreshLiveUpdates(false), delay);
+  }
+
+  $('refreshLiveUpdatesBtn').addEventListener('click', () => refreshLiveUpdates(true));
+
   // ---- Refresh loop ----
   function refreshAll() {
     refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
@@ -943,6 +1134,8 @@
   }
   refreshAll();
   loadStrategies();
+  initChart();
+  refreshLiveUpdates(false);
   setInterval(refreshAll, 15000);
 })();
 </script>

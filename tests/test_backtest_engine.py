@@ -1,11 +1,13 @@
 """
-Tests for src/backtest/engine.py — pure simulation logic, no network (see
-tests/test_backtest_data_source.py note below for why the yfinance-backed
-data_source.py itself has no automated test). Uses a small fake
-StrategyDefinition with a controllable evaluate() so entries fire on a
-known bar rather than needing 200+ days of real crossover data.
+Tests for src/backtest/engine.py — pure simulation logic, no network
+(src/backtest/data_source.py's yfinance wrapper has no automated test —
+verified manually instead, same reasoning as the Schwab adapter not being
+tested against a live broker). Uses a small fake StrategyDefinition with a
+controllable evaluate() so entries fire on a known bar rather than needing
+200+ days of real crossover data.
 """
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -132,6 +134,31 @@ class TestRunBacktest:
         result = run_backtest(bars, "TEST", _fake_strategy(trigger_at_index=2, repeat=True), starting_capital=100_000, **_RISK_KWARGS)
 
         assert result.total_trades == 1  # not 3, despite the fake strategy firing on every bar from index 2 onward
+
+    def test_profit_factor_is_none_not_infinite_when_there_are_no_losses(self):
+        """
+        A real bug this test would have caught: profit_factor used to be
+        float("inf") for an all-wins result — Python's stdlib json.dumps
+        (what FastAPI's default JSONResponse uses) raises ValueError on
+        inf/nan, so POST /v1/backtest/run 500'd the moment a real backtest
+        pair happened to have zero losing trades.
+        """
+        bars = [
+            _bar("d0", 100), _bar("d1", 100),
+            _bar("d2", 100), _bar("d3", 100, high=103, low=99.5),  # win
+        ]
+        strategy = _fake_strategy(trigger_at_index=0)
+        strategy.evaluate = lambda bars: (
+            SignalDetail(entry_price=bars[-1].close, stop_loss_price=0, take_profit_price=0, rationale="fake")
+            if bars[-1].timestamp == "d2" else None
+        )
+
+        result = run_backtest(bars, "TEST", strategy, starting_capital=100_000, **_RISK_KWARGS)
+
+        assert result.wins == 1
+        assert result.losses == 0
+        assert result.profit_factor is None
+        json.dumps(result.to_dict())  # must not raise — this is the exact boundary the real bug crossed
 
     def test_zero_sized_quantity_skips_the_trade_entirely(self):
         bars = [_bar("d0", 100), _bar("d1", 100), _bar("d2", 5000)]  # $1000 notional can't afford even 1 share at $5000

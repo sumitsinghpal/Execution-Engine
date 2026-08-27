@@ -191,7 +191,11 @@ def _summarize(symbol: str, strategy_id: str, trades: list[BacktestTrade], start
 
     total = len(trades)
     win_rate = wins / total if total else 0.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (None if gross_profit == 0 else float("inf"))
+    # None (not float("inf")) whenever there are no losses to divide by —
+    # a perfect win streak is a real, if small-sample, outcome, but
+    # "infinity" isn't valid JSON (stdlib json.dumps raises on it), and
+    # this dict crosses that boundary via POST /v1/backtest/run.
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
     total_return_pct = (equity - starting_capital) / starting_capital * 100 if starting_capital else 0.0
 
     return BacktestResult(
