@@ -3,6 +3,7 @@ FastAPI application and route handlers.
 External contract for EDGE-TF integration.
 """
 
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
@@ -24,6 +25,8 @@ from src.execution.executor import Executor, OrderRecord
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
 from src.execution.position_reconciliation import PositionReconciliationService
 from src.execution.reconciliation import ReconciliationService
+from src.execution.strategy_scanner import run_scanner_loop, scan_once
+from src.execution.strategy_signals import SignalStatus, StrategySignalService
 from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.logging_config import configure_logging, get_logger
 from src.models.orders import (
@@ -36,6 +39,8 @@ from src.models.orders import (
     HealthStatus,
 )
 from src.risk.pretrade import MarketHoursValidator
+from src.strategy import engine as strategy_engine
+from src.strategy.catalog import STRATEGIES
 
 logger = get_logger(__name__)
 
@@ -79,12 +84,30 @@ def verify_admin_key(x_admin_key: Optional[str] = Header(None), settings: Settin
     return True
 
 
+_scanner_stop_event: Optional[asyncio.Event] = None
+_scanner_task: Optional[asyncio.Task] = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup."""
     configure_logging(get_settings().log_level, get_settings().log_format)
     init_db()
+
+    global _scanner_stop_event, _scanner_task
+    _scanner_stop_event = asyncio.Event()
+    _scanner_task = asyncio.create_task(run_scanner_loop(SessionLocal, get_settings, _scanner_stop_event))
+
     logger.info("startup_complete")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the background strategy scanner cleanly."""
+    if _scanner_stop_event is not None:
+        _scanner_stop_event.set()
+    if _scanner_task is not None:
+        await asyncio.wait_for(_scanner_task, timeout=10)
 
 
 @app.get("/v1/health")
@@ -274,6 +297,9 @@ async def list_orders(
                 "estimated_notional_usd": o.estimated_notional_usd,
                 "filled_quantity": o.filled_quantity,
                 "broker_status": o.broker_status,
+                "strategy_id": o.strategy_id,
+                "strategy_stop_loss_price": o.strategy_stop_loss_price,
+                "strategy_take_profit_price": o.strategy_take_profit_price,
                 "created_at": o.created_at,
                 "updated_at": o.updated_at,
             }
@@ -627,6 +653,101 @@ async def get_symbol_exposure(
     except Exception as e:
         logger.error("symbol_exposure_query_error", account=account, symbol=symbol, error=str(e))
         raise HTTPException(status_code=500, detail=f"Symbol exposure query failed: {e}")
+
+
+@app.post("/v1/strategies/scan-all")
+async def scan_all_strategies_now(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Triggers one full pass of the background scanner immediately (every
+    strategy × every symbol in settings.strategy_watchlist) instead of
+    waiting for the next strategy_scan_interval_sec tick. Same effect as
+    an autonomous pass — records any fired signals, places no orders.
+    """
+    try:
+        new_count = await scan_once(db, settings)
+        return {"new_signals": new_count, "watchlist": settings.strategy_watchlist}
+    except Exception as e:
+        logger.error("strategy_scan_all_error", error=str(e))
+        raise HTTPException(status_code=502, detail=f"Scan-all failed: {e}")
+
+
+@app.get("/v1/strategies")
+async def list_strategies():
+    """
+    The fixed catalog of famous technical strategies (src/strategy/catalog.py),
+    grouped implicitly by `category` (INTRADAY / MULTI_DAY / OTHER) — each
+    with the stop-loss/take-profit convention commonly associated with it.
+    Read-only, no side effects.
+    """
+    return {"strategies": [s.to_dict() for s in STRATEGIES.values()]}
+
+
+@app.post("/v1/strategies/{strategy_id}/scan")
+async def scan_strategy(
+    strategy_id: str,
+    symbol: str = Query(..., pattern=r"^[A-Z]{1,5}$"),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    On-demand version of what the background scanner does continuously:
+    fetch price history and check this one strategy's entry rule for this
+    one symbol right now. If it fires, the signal is recorded exactly like
+    an autonomous hit (visible in GET /v1/strategies/signals) — this does
+    NOT preview or place an order.
+    """
+    if strategy_id not in STRATEGIES:
+        raise HTTPException(status_code=404, detail=f"Unknown strategy_id: {strategy_id}")
+    try:
+        broker = build_broker_adapter(settings)
+        detail = await strategy_engine.scan(broker, symbol, strategy_id)
+    except Exception as e:
+        logger.error("strategy_scan_error", strategy_id=strategy_id, symbol=symbol, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Scan failed: {e}")
+
+    if detail is None:
+        return {"signal": None, "message": "No entry condition met right now."}
+
+    record = StrategySignalService(db).record_if_new(strategy_id, symbol, detail)
+    return {"signal": (record or _pending_duplicate_signal(db, strategy_id, symbol)).to_dict()}
+
+
+def _pending_duplicate_signal(db: Session, strategy_id: str, symbol: str):
+    """record_if_new() returns None when today's signal already exists — fetch it so the response is never empty."""
+    existing = [
+        r
+        for r in StrategySignalService(db).list_signals(status=SignalStatus.PENDING, limit=200)
+        if r.strategy_id == strategy_id and r.symbol == symbol
+    ]
+    return existing[0] if existing else None
+
+
+@app.get("/v1/strategies/signals")
+async def list_strategy_signals(
+    status: Optional[str] = Query(default=SignalStatus.PENDING),
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    Signals the strategy scanner (autonomous, background) or an on-demand
+    scan has fired — the human-review queue. Defaults to PENDING; pass
+    status=DISMISSED or omit status entirely for the full history.
+    """
+    records = StrategySignalService(db).list_signals(status=status or None, limit=limit)
+    return {"signals": [r.to_dict() for r in records]}
+
+
+@app.post("/v1/strategies/signals/{signal_id}/dismiss")
+async def dismiss_strategy_signal(signal_id: int, db: Session = Depends(get_db)):
+    """Marks a signal reviewed-and-declined. No order-related side effect — purely bookkeeping."""
+    try:
+        record = StrategySignalService(db).dismiss(signal_id)
+        return record.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 if __name__ == "__main__":

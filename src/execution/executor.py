@@ -60,6 +60,11 @@ class OrderRecord(SQLModel, table=True):
     # for the day without re-deriving prices from scratch. Stored as a
     # string, matching average_fill_price above, to avoid float drift.
     estimated_notional_usd: Optional[str] = None
+    # Advisory strategy metadata (see TradeProposal.strategy_* fields) —
+    # not enforced by the broker, just carried through for audit/display.
+    strategy_id: Optional[str] = None
+    strategy_stop_loss_price: Optional[str] = None
+    strategy_take_profit_price: Optional[str] = None
 
 
 class Executor:
@@ -180,6 +185,9 @@ class Executor:
             risk_approved=verdict.approved,
             preview_expires_at=expires_at,
             estimated_notional_usd=str(estimated_cost),
+            strategy_id=proposal.strategy_id,
+            strategy_stop_loss_price=str(proposal.strategy_stop_loss_price) if proposal.strategy_stop_loss_price is not None else None,
+            strategy_take_profit_price=str(proposal.strategy_take_profit_price) if proposal.strategy_take_profit_price is not None else None,
         )
         self.session.add(order_record)
         self.session.commit()

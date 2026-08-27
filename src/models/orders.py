@@ -75,10 +75,19 @@ class TradeProposal(BaseModel):
     order_type: OrderType = Field(..., description="Order type (MARKET, LIMIT, STOP, STOP_LIMIT)")
     limit_price: Optional[Decimal] = Field(default=None, description="Limit price (required for LIMIT orders)")
     stop_price: Optional[Decimal] = Field(default=None, description="Stop price (for STOP/STOP_LIMIT)")
-    
+
+    # Advisory risk-management figures from src/strategy — informational
+    # only. Neither is enforced as a broker-side bracket/OCO order (this
+    # system doesn't build those); they ride along for display and the
+    # audit trail so a signal-sourced order's intended plan is visible
+    # wherever the order itself is visible.
+    strategy_id: Optional[str] = Field(default=None, description="Strategy that generated this proposal, if any")
+    strategy_stop_loss_price: Optional[Decimal] = Field(default=None, description="Advisory stop-loss level")
+    strategy_take_profit_price: Optional[Decimal] = Field(default=None, description="Advisory take-profit level")
+
     model_config = ConfigDict(extra="forbid")  # Reject unknown fields
-    
-    @field_serializer("limit_price", "stop_price", when_used="json")
+
+    @field_serializer("limit_price", "stop_price", "strategy_stop_loss_price", "strategy_take_profit_price", when_used="json")
     def serialize_decimal(self, value: Optional[Decimal]) -> Optional[str]:
         """Convert Decimal to string for JSON serialization."""
         return str(value) if value is not None else None

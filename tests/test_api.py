@@ -504,6 +504,94 @@ class TestReadOnlyAccountEndpoints:
         assert all(o["agent_id"] == "list-orders-probe-agent" for o in orders)
 
 
+class TestStrategyEndpoints:
+    """
+    Test the strategy catalog, on-demand scan, and signal review endpoints.
+    None of these preview or execute an order — see
+    TestStrategySignalIntoOrderTicket below for how a signal actually
+    becomes a (still human-approved) order.
+    """
+
+    def test_list_strategies_returns_the_full_catalog_grouped_by_category(self, client):
+        resp = client.get("/v1/strategies")
+        assert resp.status_code == 200
+        strategies = resp.json()["strategies"]
+        assert len(strategies) == 8
+
+        categories = {s["category"] for s in strategies}
+        assert categories == {"INTRADAY", "MULTI_DAY", "OTHER"}
+        assert all({"id", "name", "risk_reward_label", "stop_rule", "target_rule"} <= s.keys() for s in strategies)
+
+    def test_scan_unknown_strategy_is_404(self, client):
+        resp = client.post("/v1/strategies/not-a-real-strategy/scan", params={"symbol": "QQQ"})
+        assert resp.status_code == 404
+
+    def test_scan_on_demand_never_places_or_previews_an_order(self, client):
+        """Whether or not a signal fires, this must never create anything in the order history."""
+        before = client.get("/v1/orders").json()["orders"]
+        client.post("/v1/strategies/orb/scan", params={"symbol": "QQQ"})
+        after = client.get("/v1/orders").json()["orders"]
+
+        assert len(after) == len(before)
+
+    def test_scan_all_returns_watchlist_and_a_count(self, client):
+        resp = client.post("/v1/strategies/scan-all")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "new_signals" in data
+        assert isinstance(data["watchlist"], list)
+
+    def test_signals_endpoint_defaults_to_pending(self, client):
+        resp = client.get("/v1/strategies/signals")
+        assert resp.status_code == 200
+        assert all(s["status"] == "PENDING" for s in resp.json()["signals"])
+
+    def test_dismiss_unknown_signal_is_404(self, client):
+        resp = client.post("/v1/strategies/signals/999999999/dismiss")
+        assert resp.status_code == 404
+
+    def test_dismiss_marks_a_signal_dismissed(self, client):
+        client.post("/v1/strategies/scan-all")
+        pending = client.get("/v1/strategies/signals").json()["signals"]
+        if not pending:
+            pytest.skip("no signal fired in this run to dismiss (synthetic data is randomized)")
+
+        signal_id = pending[0]["id"]
+        resp = client.post(f"/v1/strategies/signals/{signal_id}/dismiss")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "DISMISSED"
+
+
+class TestStrategyMetadataOnTradeProposal:
+    """A signal-sourced order carries its strategy plan through preview, purely as audit metadata."""
+
+    def test_preview_persists_and_returns_strategy_metadata(self, client, sample_trade_proposal):
+        proposal_dict = sample_trade_proposal.model_dump(mode="json")
+        proposal_dict["decision_id"] = f"{sample_trade_proposal.decision_id}-strategy-meta"
+        proposal_dict["strategy_id"] = "golden_cross"
+        proposal_dict["strategy_stop_loss_price"] = "260.00"
+        proposal_dict["strategy_take_profit_price"] = "290.00"
+
+        resp = client.post("/v1/orders/preview", json=proposal_dict)
+        assert resp.status_code == 200
+
+        orders = client.get("/v1/orders", params={"limit": 5}).json()["orders"]
+        match = next(o for o in orders if o["decision_id"] == proposal_dict["decision_id"])
+        assert match["strategy_id"] == "golden_cross"
+        assert match["strategy_stop_loss_price"] == "260.00"
+        assert match["strategy_take_profit_price"] == "290.00"
+
+    def test_strategy_metadata_is_optional(self, client, sample_trade_proposal):
+        """A plain, non-strategy order (every other test in this file) must keep working unchanged."""
+        proposal_dict = sample_trade_proposal.model_dump(mode="json")
+        proposal_dict["decision_id"] = f"{sample_trade_proposal.decision_id}-no-strategy"
+
+        resp = client.post("/v1/orders/preview", json=proposal_dict)
+
+        assert resp.status_code == 200
+
+
 class TestMarketStatusEndpoint:
     """Test GET /v1/market-status."""
 

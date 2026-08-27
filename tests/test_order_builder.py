@@ -19,7 +19,7 @@ class TestOrderBuilder:
         assert spec["quantity"] == 10
         assert spec["instruction"] == "BUY"
         assert spec["orderType"] == "LIMIT"
-        assert spec["limitPrice"] == "270.50"
+        assert spec["limitPrice"] == str(sample_trade_proposal.limit_price)  # live synthetic quote — see conftest.py
         assert "stopPrice" not in spec
     
     def test_build_market_order_spec(self, sample_market_order):

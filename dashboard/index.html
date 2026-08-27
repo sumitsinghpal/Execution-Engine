@@ -229,6 +229,52 @@
   .toggle.on { background: var(--buy); }
   .toggle.on::after { transform: translateX(20px); }
 
+  /* Signals feed */
+  .signal-row { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .signal-row:last-child { border-bottom: none; }
+  .signal-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .signal-symbol { font-weight: 700; font-size: 14px; }
+  .signal-strategy { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 2px; }
+  .signal-prices { display: flex; gap: 14px; margin-top: 8px; font-family: var(--font-mono); font-size: 12px; }
+  .signal-prices span b { display: block; color: var(--ink); font-size: 13px; }
+  .signal-prices .sl b { color: var(--sell); } .signal-prices .tp b { color: var(--buy); }
+  .signal-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .signal-actions .btn { margin-top: 0; padding: 8px 0; font-size: 12.5px; }
+  .rr-badge {
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; padding: 3px 8px;
+    border-radius: 999px; background: var(--accent-soft); color: var(--accent); flex: none;
+  }
+
+  /* Strategy plan banner (order ticket, when loaded from a signal) */
+  .plan-banner {
+    display: flex; gap: 14px; align-items: center; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 10px 13px; margin-bottom: 6px; font-family: var(--font-mono); font-size: 12px;
+  }
+  .plan-banner b { color: var(--ink); }
+  .plan-banner .sl b { color: var(--sell); } .plan-banner .tp b { color: var(--buy); }
+  .plan-banner .close-plan { margin-left: auto; background: none; border: none; color: var(--ink-faint); cursor: pointer; font-size: 15px; padding: 0 2px; }
+
+  /* Strategy catalog */
+  .strategies-card { margin-top: 18px; }
+  .strategy-columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+  @media (max-width: 780px) { .strategy-columns { grid-template-columns: 1fr; } }
+  .strategy-column-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
+  .strategy-card {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+    padding: 13px 14px; margin-bottom: 10px;
+  }
+  .strategy-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .strategy-name { font-weight: 700; font-size: 13.5px; }
+  .strategy-famous { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+  .strategy-desc { font-size: 12px; color: var(--ink-muted); margin-top: 7px; line-height: 1.45; }
+  .strategy-rules { font-size: 11px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 7px; }
+  .strategy-scan-btn {
+    margin-top: 10px; width: 100%; border: 1px solid var(--border-strong); background: var(--raised); color: var(--ink);
+    border-radius: 7px; padding: 7px 0; font-size: 12px; font-weight: 700; cursor: pointer; font-family: var(--font-display);
+  }
+  .strategy-scan-btn:hover { background: var(--surface); }
+  .strategy-scan-btn:disabled { opacity: .5; cursor: not-allowed; }
+
   /* Modal */
   .overlay { position: fixed; inset: 0; background: rgba(5,6,9,.6); backdrop-filter: blur(2px); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
   .overlay.show { display: flex; }
@@ -313,7 +359,13 @@
       </div>
 
       <div class="card">
+        <h2>Signals <span class="hint" id="signalsHint">auto-detected, pending review</span></h2>
+        <div id="signalsList"><div class="empty-note">Loading…</div></div>
+      </div>
+
+      <div class="card">
         <h2>New order</h2>
+        <div id="planBanner"></div>
         <div class="seg">
           <button type="button" class="active buy" id="sideBuy">Buy</button>
           <button type="button" id="sideSell">Sell</button>
@@ -364,6 +416,15 @@
       </div>
 
     </div>
+  </div>
+
+  <div class="card strategies-card">
+    <h2>
+      Strategy catalog
+      <span class="hint">scans check the symbol in the order ticket</span>
+    </h2>
+    <button class="btn btn-ghost" id="scanAllBtn" style="margin-top:0">Scan all now</button>
+    <div class="strategy-columns" id="strategyColumns"></div>
   </div>
 </div>
 
@@ -628,6 +689,20 @@
   });
 
   let lastPreview = null;
+  let activePlan = null; // { strategy_id, strategy_name, stop_loss_price, take_profit_price } when the ticket was loaded from a signal
+
+  function renderPlanBanner() {
+    const el = $('planBanner');
+    if (!activePlan) { el.innerHTML = ''; return; }
+    el.innerHTML = `
+      <div class="plan-banner">
+        <span>${activePlan.strategy_name}</span>
+        <span class="sl">Stop <b class="num">${money(activePlan.stop_loss_price)}</b></span>
+        <span class="tp">Target <b class="num">${money(activePlan.take_profit_price)}</b></span>
+        <button class="close-plan" id="clearPlanBtn" title="Clear strategy plan">✕</button>
+      </div>`;
+    $('clearPlanBtn').addEventListener('click', () => { activePlan = null; renderPlanBanner(); });
+  }
 
   $('previewBtn').addEventListener('click', async () => {
     const btn = $('previewBtn');
@@ -647,6 +722,11 @@
       const lp = $('fLimit').value;
       if (!lp) { toast('Enter a limit price'); btn.disabled = false; btn.textContent = 'Preview order'; return; }
       proposal.limit_price = lp;
+    }
+    if (activePlan) {
+      proposal.strategy_id = activePlan.strategy_id;
+      proposal.strategy_stop_loss_price = String(activePlan.stop_loss_price);
+      proposal.strategy_take_profit_price = String(activePlan.take_profit_price);
     }
 
     try {
@@ -712,6 +792,7 @@
       toast(`Executed · ${receipt.execution_id}`);
       $('approvalOverlay').classList.remove('show');
       $('verdictBox').innerHTML = '';
+      activePlan = null; renderPlanBanner();
       refreshFeed(); refreshPositions(); refreshBalance();
     } catch (e) {
       toast('Execution failed: ' + e.message);
@@ -720,12 +801,148 @@
     }
   });
 
+  // ---- Strategy catalog ----
+  const CATEGORY_LABELS = { INTRADAY: 'Intraday', MULTI_DAY: 'Multi-day', OTHER: 'Others' };
+  const CATEGORY_ORDER = ['INTRADAY', 'MULTI_DAY', 'OTHER'];
+
+  async function loadStrategies() {
+    const el = $('strategyColumns');
+    try {
+      const r = await api('/v1/strategies');
+      const byCategory = {};
+      for (const s of r.strategies) (byCategory[s.category] ||= []).push(s);
+
+      el.innerHTML = CATEGORY_ORDER.map(cat => `
+        <div>
+          <div class="strategy-column-title">${CATEGORY_LABELS[cat]}</div>
+          ${(byCategory[cat] || []).map(s => `
+            <div class="strategy-card">
+              <div class="strategy-card-top">
+                <div>
+                  <div class="strategy-name">${s.name}</div>
+                  <div class="strategy-famous">${s.famous_for}</div>
+                </div>
+                <span class="rr-badge">${s.risk_reward_label}</span>
+              </div>
+              <div class="strategy-desc">${s.description}</div>
+              <div class="strategy-rules">Stop: ${s.stop_rule}<br>Target: ${s.target_rule}</div>
+              <button class="strategy-scan-btn" data-strategy-id="${s.id}">Scan ${$('fSymbol').value.trim().toUpperCase() || 'symbol'}</button>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+      el.querySelectorAll('.strategy-scan-btn').forEach(btn => {
+        btn.addEventListener('click', () => scanStrategy(btn.dataset.strategyId, btn));
+      });
+    } catch (e) {
+      el.innerHTML = '<div class="empty-note">Could not load the strategy catalog.</div>';
+    }
+  }
+
+  async function scanStrategy(strategyId, btn) {
+    const symbol = $('fSymbol').value.trim().toUpperCase();
+    if (!symbol) { toast('Enter a symbol in the order ticket first'); return; }
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Scanning…';
+    try {
+      const r = await api(`/v1/strategies/${strategyId}/scan?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' });
+      toast(r.signal ? `Signal fired: ${symbol}` : `No entry condition met for ${symbol}`);
+      if (r.signal) refreshSignals();
+    } catch (e) {
+      toast('Scan failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = original;
+    }
+  }
+
+  $('scanAllBtn').addEventListener('click', async () => {
+    const btn = $('scanAllBtn');
+    btn.disabled = true; btn.textContent = 'Scanning…';
+    try {
+      const r = await api('/v1/strategies/scan-all', { method: 'POST' });
+      toast(`Scan complete · ${r.new_signals} new signal${r.new_signals === 1 ? '' : 's'}`);
+      refreshSignals();
+    } catch (e) {
+      toast('Scan failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Scan all now';
+    }
+  });
+
+  // ---- Signals feed (the autonomous half — see strategy_scanner.py) ----
+  async function refreshSignals() {
+    const el = $('signalsList');
+    try {
+      const r = await api('/v1/strategies/signals?status=PENDING&limit=20');
+      const signals = r.signals || [];
+      $('signalsHint').textContent = signals.length ? `${signals.length} pending` : 'auto-detected, pending review';
+      if (!signals.length) {
+        el.innerHTML = '<div class="empty-note">No pending signals. The background scanner checks the watchlist every interval — or hit "Scan all now" below.</div>';
+        return;
+      }
+      el.innerHTML = signals.map(s => `
+        <div class="signal-row">
+          <div class="signal-top">
+            <div>
+              <div class="signal-symbol">${s.symbol}</div>
+              <div class="signal-strategy">${s.strategy_name}</div>
+            </div>
+            <span class="rr-badge">${CATEGORY_LABELS[s.category] || s.category}</span>
+          </div>
+          <div class="signal-prices">
+            <span>Entry <b class="num">${money(s.entry_price)}</b></span>
+            <span class="sl">Stop <b class="num">${money(s.stop_loss_price)}</b></span>
+            <span class="tp">Target <b class="num">${money(s.take_profit_price)}</b></span>
+          </div>
+          <div class="signal-actions">
+            <button class="btn btn-primary" data-review="${s.id}">Review</button>
+            <button class="btn btn-ghost" data-dismiss="${s.id}">Dismiss</button>
+          </div>
+        </div>
+      `).join('');
+
+      el.querySelectorAll('[data-review]').forEach(btn => {
+        const signal = signals.find(s => String(s.id) === btn.dataset.review);
+        btn.addEventListener('click', () => loadSignalIntoTicket(signal));
+      });
+      el.querySelectorAll('[data-dismiss]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          await api(`/v1/strategies/signals/${btn.dataset.dismiss}/dismiss`, { method: 'POST' });
+          refreshSignals();
+        });
+      });
+    } catch (e) {
+      el.innerHTML = '<div class="empty-note">Could not load signals.</div>';
+    }
+  }
+
+  function loadSignalIntoTicket(signal) {
+    setSide('BUY'); // every strategy in this catalog is long-only
+    $('fSymbol').value = signal.symbol;
+    $('fType').value = 'LIMIT';
+    $('limitPriceField').style.display = '';
+    $('fLimit').value = Number(signal.entry_price).toFixed(2);
+    activePlan = {
+      strategy_id: signal.strategy_id,
+      strategy_name: signal.strategy_name,
+      stop_loss_price: Number(signal.stop_loss_price).toFixed(2),
+      take_profit_price: Number(signal.take_profit_price).toFixed(2),
+    };
+    renderPlanBanner();
+    $('verdictBox').innerHTML = '';
+    document.getElementById('fSymbol').closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    toast(`Loaded ${signal.symbol} · ${signal.strategy_name} into the order ticket`);
+  }
+
   // ---- Refresh loop ----
   function refreshAll() {
     refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
-    refreshPositions(); refreshFeed(); refreshKillSwitch();
+    refreshPositions(); refreshFeed(); refreshKillSwitch(); refreshSignals();
   }
   refreshAll();
+  loadStrategies();
   setInterval(refreshAll, 15000);
 })();
 </script>

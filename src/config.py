@@ -100,6 +100,24 @@ class Settings(BaseSettings):
     # src/execution/symbol_coordination.py.
     max_combined_symbol_notional_usd: Optional[Decimal] = None
 
+    # Autonomous strategy scanning (src/execution/strategy_scanner.py): a
+    # background loop periodically evaluates every strategy in
+    # src/strategy/catalog.py against every symbol below, using live price
+    # history (real Schwab data if configured, synthetic otherwise). A
+    # fired signal is only ever recorded for human review — nothing here
+    # places or previews an order automatically.
+    strategy_scan_enabled: bool = True
+    strategy_scan_interval_sec: int = 60
+    strategy_watchlist_raw: str = Field(default="QQQ,SPY,IWM", validation_alias="STRATEGY_WATCHLIST")
+
+    @property
+    def strategy_watchlist(self) -> list[str]:
+        return self._split_csv(self.strategy_watchlist_raw)
+
+    @strategy_watchlist.setter
+    def strategy_watchlist(self, value: list[str]) -> None:
+        self.strategy_watchlist_raw = ",".join(value)
+
     # API Security
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False

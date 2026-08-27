@@ -119,6 +119,25 @@ async def test_paper_adapter_market_order_preview_does_not_estimate_zero() -> No
     assert preview["estimatedTotalInvestment"] > 0
 
 
+@pytest.mark.asyncio
+async def test_paper_adapter_estimated_investment_is_rounded_to_cents() -> None:
+    """
+    A limit price with 3+ decimal places (as a strategy-sourced entry price
+    can have) must not leave a binary-float artifact like 5189.120000000001
+    in estimatedTotalInvestment — that fails OrderPreview.estimated_cost's
+    Decimal(decimal_places=2) validation outright downstream.
+    """
+    adapter = PaperBrokerAdapter()
+    profile = AccountProfile(broker=BrokerName.PAPER)
+    order = {"orderId": "decision-3", "quantity": 10, "symbol": "QQQ", "limitPrice": "518.912"}
+
+    preview = await adapter.preview_order(profile, order)
+
+    from decimal import Decimal
+    Decimal(str(preview["estimatedTotalInvestment"])).quantize(Decimal("0.01"))  # must not raise
+    assert preview["estimatedTotalInvestment"] == 5189.12
+
+
 class _FlakyThenOKTransport:
     """Fails with a 500 a fixed number of times, then succeeds — simulates a transient outage that clears."""
 

@@ -71,3 +71,16 @@ class BrokerAdapter(ABC):
         (ISO-8601, timezone-aware) so callers can enforce a staleness limit
         — never fabricate a fresh timestamp on a cached/delayed value.
         """
+
+    @abstractmethod
+    async def get_price_history(self, symbol: str, bar_interval: str, lookback_days: int) -> list[dict[str, Any]]:
+        """
+        Return OHLCV bars for a symbol, oldest first, each a dict with
+        "timestamp" (ISO-8601), "open", "high", "low", "close", "volume".
+        bar_interval is "5min" (intraday, today's session only —
+        lookback_days is ignored) or "daily". Feeds src/strategy's
+        indicator calculations; returns as many bars as the source
+        actually has, which may be fewer than requested (callers that need
+        a minimum history length must check the returned length
+        themselves rather than assume it).
+        """

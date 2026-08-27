@@ -121,6 +121,50 @@ class SchwabBrokerAdapter(BrokerAdapter):
             "mode": "LIVE",
         }
 
+    async def get_price_history(self, symbol: str, bar_interval: str, lookback_days: int) -> list[dict[str, Any]]:
+        """
+        Real historical OHLCV candles from Schwab's price-history endpoint
+        — feeds src/strategy's indicator calculations with genuine market
+        data rather than a synthetic series once Schwab is configured.
+        """
+        if bar_interval == "5min":
+            params = {"symbol": symbol, "periodType": "day", "period": "1", "frequencyType": "minute", "frequency": "5"}
+        else:
+            # Schwab's yearly period buckets are coarse (1/2/3/5/10/15/20);
+            # round up so a strategy asking for e.g. 260 days of daily bars
+            # (Golden Cross needs 200+) still gets enough history.
+            years = max(1, -(-lookback_days // 365))
+            params = {
+                "symbol": symbol,
+                "periodType": "year",
+                "period": str(years),
+                "frequencyType": "daily",
+                "frequency": "1",
+            }
+
+        # Unlike get_quote() (path-based, /{symbol}/quotes), Schwab's price
+        # history endpoint takes the symbol as a query parameter.
+        response = await self._request(
+            "GET", "/pricehistory", base_url=self.MARKET_DATA_BASE_URL, params=params
+        )
+        candles = response.get("candles", []) if isinstance(response, dict) else []
+
+        bars = [
+            {
+                "timestamp": datetime.fromtimestamp(c["datetime"] / 1000, tz=UTC).isoformat(),
+                "open": c.get("open"),
+                "high": c.get("high"),
+                "low": c.get("low"),
+                "close": c.get("close"),
+                "volume": c.get("volume", 0),
+            }
+            for c in candles
+            if "datetime" in c
+        ]
+        if bar_interval != "5min" and len(bars) > lookback_days:
+            bars = bars[-lookback_days:]
+        return bars
+
     async def _resolve_account_hash(self, profile: AccountProfile) -> str:
         """
         A pre-resolved account_hash on the profile always wins. Otherwise,
