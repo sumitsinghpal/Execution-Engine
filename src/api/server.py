@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from sqlmodel import select
 
 from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError
+from src.brokers.factory import build_broker_adapter
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
@@ -87,12 +88,23 @@ async def startup_event():
 
 
 @app.get("/v1/health")
-async def health_check(db: Session = Depends(get_db)) -> HealthStatus:
+async def health_check(
+    db: Session = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+) -> HealthStatus:
     """
     Health check endpoint.
     Returns service and dependency status.
+
+    broker_connectivity is a real check, not a label: it builds whichever
+    broker adapter the current settings actually select (PaperBrokerAdapter
+    or a real SchwabBrokerAdapter — see src/brokers/factory.py) and calls
+    list_accounts() on it. For Schwab this is the fastest genuine proof
+    that the configured OAuth credentials work end-to-end — token refresh
+    succeeds and the account is visible — the natural smoke test for
+    "I just added real API keys, did it work". PaperBrokerAdapter's
+    list_accounts() is a static value and can't fail.
     """
-    
+
     # Check database
     db_status = "ok"
     try:
@@ -100,12 +112,18 @@ async def health_check(db: Session = Depends(get_db)) -> HealthStatus:
     except Exception as e:
         db_status = "error"
         logger.error("database_health_check_failed", error=str(e))
-    
-    # Check broker connectivity (would make real call in production)
-    broker_status = "untested"  # In mock mode
-    
+
+    # Check broker connectivity
+    broker_status = "ok"
+    try:
+        broker = build_broker_adapter(settings)
+        await broker.list_accounts()
+    except Exception as e:
+        broker_status = "error"
+        logger.error("broker_health_check_failed", error=str(e))
+
     return HealthStatus(
-        status="healthy" if db_status == "ok" else "degraded",
+        status="healthy" if db_status == "ok" and broker_status == "ok" else "degraded",
         timestamp=datetime.utcnow(),
         database=db_status,
         broker_connectivity=broker_status,
@@ -421,6 +439,7 @@ async def get_market_status():
 async def reconcile_positions(
     account: str = "primary",
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
 ):
     """
     Reconcile this system's believed positions (summed from filled order
@@ -435,7 +454,7 @@ async def reconcile_positions(
     admin-gated /v1/kill-switch/off).
     """
     try:
-        service = PositionReconciliationService(session=db)
+        service = PositionReconciliationService(session=db, broker=build_broker_adapter(settings))
         report = await service.reconcile_or_halt(account, halted_by="reconciliation_check")
         return report.to_dict()
     except Exception as e:
@@ -447,6 +466,7 @@ async def reconcile_positions(
 async def check_drawdown(
     account: str = "primary",
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
 ):
     """
     Compare this account's current equity against its captured start-of-day
@@ -460,7 +480,7 @@ async def check_drawdown(
     /v1/reconciliation/positions is intended to run before it starts.
     """
     try:
-        guard = DrawdownGuard(session=db)
+        guard = DrawdownGuard(session=db, broker=build_broker_adapter(settings))
         report = await guard.check_and_halt(account, halted_by="drawdown_check_endpoint")
         return report.to_dict()
     except ValueError as e:

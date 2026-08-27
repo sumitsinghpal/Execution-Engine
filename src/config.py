@@ -6,7 +6,7 @@ All configuration comes from environment variables; no hardcoded secrets.
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings
 
 from src.accounts.profiles import AccountProfile, BrokerName
@@ -43,7 +43,18 @@ class Settings(BaseSettings):
     schwab_app_secret: Optional[str] = None
     schwab_refresh_token: Optional[str] = None
     schwab_redirect_uri: Optional[str] = None
-    
+
+    # The plain Schwab account number to trade against — never a hash,
+    # which is looked up automatically (see
+    # SchwabBrokerAdapter._resolve_account_hash). Setting this auto-
+    # registers `schwab_account_alias` into account_profiles below as a
+    # SCHWAB-broker profile, so it becomes usable as a `account` value
+    # without hand-editing this file. It still is NOT usable until an
+    # operator also adds it to ACCOUNT_ALLOWLIST — registering the alias
+    # and allowing it to trade are deliberately separate steps.
+    schwab_account_number: Optional[str] = None
+    schwab_account_alias: str = "schwab_live"
+
     # Kill switch
     kill_switch_enabled: bool = False
     
@@ -104,6 +115,27 @@ class Settings(BaseSettings):
     schwab_preview_expiry_min: int = 5
     schwab_retry_max_attempts: int = 3
     schwab_retry_backoff_sec: float = 1.0
+
+    @model_validator(mode="after")
+    def _register_schwab_account_alias(self) -> "Settings":
+        """
+        If a Schwab account number is configured but the alias it should
+        live under hasn't been explicitly defined in account_profiles
+        already, register it now as an unresolved SCHWAB profile (no
+        account_hash — resolved lazily and automatically on first live
+        broker call, see SchwabBrokerAdapter). Runs once at Settings
+        construction; an explicit entry already present for that alias
+        (e.g. a caller pre-populating account_profiles directly) is left
+        untouched rather than overwritten.
+        """
+        if self.schwab_account_number and self.schwab_account_alias not in self.account_profiles:
+            self.account_profiles = {
+                **self.account_profiles,
+                self.schwab_account_alias: AccountProfile(
+                    broker=BrokerName.SCHWAB, credential_profile="schwab_main"
+                ),
+            }
+        return self
 
     def get_account_profile(self, alias: str) -> AccountProfile:
         """Resolve a safe account alias or fail closed."""

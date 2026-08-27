@@ -255,6 +255,68 @@ async def test_schwab_live_submission_is_hard_blocked(
         await schwab_adapter.submit_order(schwab_profile, {"orderId": "decision-1"})
 
 
+class TestSchwabAccountHashAutoResolution:
+    """
+    An operator only configures a plain account number (SCHWAB_ACCOUNT_NUMBER);
+    the adapter resolves it into the hash Schwab's Trader API actually
+    requires, lazily and once, so nothing has to look that hash up by hand.
+    """
+
+    @pytest.fixture
+    def unresolved_profile(self) -> AccountProfile:
+        """A profile with no pre-resolved account_hash — the auto-resolve path is what this exercises."""
+        return AccountProfile(broker=BrokerName.SCHWAB, credential_profile="schwab_main", live_enabled=False)
+
+    def _adapter(self, account_number: str = "1234") -> SchwabBrokerAdapter:
+        transport = httpx.MockTransport(schwab_transport)
+        oauth = SchwabOAuthClient(
+            app_key="test-app-key",
+            app_secret="test-app-secret",
+            redirect_uri="https://localhost/callback",
+            refresh_token="test-refresh-token",
+            transport=transport,
+        )
+        return SchwabBrokerAdapter(oauth, transport=transport, account_number=account_number)
+
+    @pytest.mark.asyncio
+    async def test_get_balances_resolves_hash_from_configured_account_number(self, unresolved_profile) -> None:
+        adapter = self._adapter()
+        balances = await adapter.get_balances(unresolved_profile)
+        assert balances["cashAvailableForTrading"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_resolved_hash_is_cached_after_first_use(self, unresolved_profile) -> None:
+        """A second call must not re-hit the /accounts endpoint to re-resolve the same hash."""
+        adapter = self._adapter()
+        await adapter.get_balances(unresolved_profile)
+        assert adapter._resolved_account_hash == "account-hash"
+
+        call_count = {"accounts": 0}
+
+        def counting_transport(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/trader/v1/accounts":
+                call_count["accounts"] += 1
+            return schwab_transport(request)
+
+        adapter.transport = httpx.MockTransport(counting_transport)
+        await adapter.get_positions(unresolved_profile)
+
+        assert call_count["accounts"] == 0, "a cached resolved hash must not re-query /accounts"
+
+    @pytest.mark.asyncio
+    async def test_profiles_own_account_hash_always_wins_over_resolution(self, schwab_profile) -> None:
+        """A profile that already has account_hash set must never trigger a resolve call at all."""
+        adapter = self._adapter(account_number="some-other-number-that-would-not-match")
+        balances = await adapter.get_balances(schwab_profile)
+        assert balances["cashAvailableForTrading"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_no_account_hash_and_no_account_number_fails_closed(self, unresolved_profile) -> None:
+        adapter = self._adapter(account_number=None)
+        with pytest.raises(BrokerError, match="resolved account hash"):
+            await adapter.get_balances(unresolved_profile)
+
+
 def test_schwab_oauth_authorization_url_is_explicit() -> None:
     """The initial authorization-code bootstrap has an inspectable redirect URL."""
     oauth = SchwabOAuthClient("app-key", "secret", "https://localhost/callback")

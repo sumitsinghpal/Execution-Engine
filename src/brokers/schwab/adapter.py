@@ -37,12 +37,21 @@ class SchwabBrokerAdapter(BrokerAdapter):
         timeout_sec: float = 30.0,
         retry_max_attempts: int = 3,
         retry_backoff_sec: float = 1.0,
+        account_number: Optional[str] = None,
     ) -> None:
         self.oauth = oauth
         self.transport = transport
         self.timeout_sec = timeout_sec
         self.retry_max_attempts = max(retry_max_attempts, 1)
         self.retry_backoff_sec = retry_backoff_sec
+        # The raw Schwab account number to auto-resolve into a hash on first
+        # use, for a profile that was registered (e.g. via
+        # Settings.schwab_account_number) without a pre-resolved
+        # account_hash. Not the account_hash itself — Schwab account hashes
+        # are looked up, never configured directly, so operators only ever
+        # need to supply the plain account number they already know.
+        self.account_number = account_number
+        self._resolved_account_hash: Optional[str] = None
 
     async def list_accounts(self) -> list[dict[str, Any]]:
         response = await self._request("GET", "/accounts")
@@ -59,7 +68,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
         raise BrokerError("No accessible Schwab account matches the configured account number")
 
     async def preview_order(self, profile: AccountProfile, order_spec: dict[str, Any]) -> dict[str, Any]:
-        account_hash = self._account_hash(profile)
+        account_hash = await self._resolve_account_hash(profile)
         return await self._request("POST", f"/accounts/{account_hash}/previewOrder", json=order_spec)
 
     async def submit_order(self, profile: AccountProfile, order_spec: dict[str, Any]) -> dict[str, Any]:
@@ -68,14 +77,17 @@ class SchwabBrokerAdapter(BrokerAdapter):
         )
 
     async def get_order_status(self, profile: AccountProfile, order_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/accounts/{self._account_hash(profile)}/orders/{order_id}")
+        account_hash = await self._resolve_account_hash(profile)
+        return await self._request("GET", f"/accounts/{account_hash}/orders/{order_id}")
 
     async def get_positions(self, profile: AccountProfile) -> list[dict[str, Any]]:
-        account = await self._request("GET", f"/accounts/{self._account_hash(profile)}", params={"fields": "positions"})
+        account_hash = await self._resolve_account_hash(profile)
+        account = await self._request("GET", f"/accounts/{account_hash}", params={"fields": "positions"})
         return account.get("securitiesAccount", account).get("positions", [])
 
     async def get_balances(self, profile: AccountProfile) -> dict[str, Any]:
-        account = await self._request("GET", f"/accounts/{self._account_hash(profile)}")
+        account_hash = await self._resolve_account_hash(profile)
+        account = await self._request("GET", f"/accounts/{account_hash}")
         balances = account.get("securitiesAccount", account).get("currentBalances", {})
         # Normalize a broker-neutral "net_liquidation_value" key alongside
         # Schwab's own field names, so DrawdownGuard doesn't need to know
@@ -109,11 +121,28 @@ class SchwabBrokerAdapter(BrokerAdapter):
             "mode": "LIVE",
         }
 
-    @staticmethod
-    def _account_hash(profile: AccountProfile) -> str:
-        if not profile.account_hash:
-            raise BrokerError("Schwab account profile requires a resolved account hash")
-        return profile.account_hash
+    async def _resolve_account_hash(self, profile: AccountProfile) -> str:
+        """
+        A pre-resolved account_hash on the profile always wins. Otherwise,
+        if this adapter was constructed with a plain account_number (see
+        Settings.schwab_account_number), resolve it via the Schwab accounts
+        endpoint on first use and cache the result for the lifetime of this
+        adapter instance — so an operator only ever has to configure the
+        account number they already know, never a hash they'd have to look
+        up by hand.
+        """
+        if profile.account_hash:
+            return profile.account_hash
+        if self._resolved_account_hash:
+            return self._resolved_account_hash
+        if not self.account_number:
+            raise BrokerError(
+                "Schwab account profile requires a resolved account hash — configure either "
+                "AccountProfile.account_hash directly, or SCHWAB_ACCOUNT_NUMBER so it can be "
+                "resolved automatically"
+            )
+        self._resolved_account_hash = await self.resolve_account_hash(self.account_number)
+        return self._resolved_account_hash
 
     async def _request(
         self, method: str, path: str, base_url: Optional[str] = None, **kwargs: Any

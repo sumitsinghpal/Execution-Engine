@@ -392,13 +392,24 @@ class TestHealthEndpoint:
     def test_health_check(self, client):
         """Health check returns status."""
         response = client.get("/v1/health")
-        
+
         assert response.status_code == 200
         data = response.json()
         assert "status" in data
         assert "timestamp" in data
         assert "database" in data
         assert "broker_connectivity" in data
+
+    def test_health_check_broker_connectivity_is_a_real_check_not_a_stub(self, client):
+        """
+        broker_connectivity used to be a hardcoded "untested" label
+        regardless of configuration. In the test settings' default PAPER
+        mode it must now report a real "ok" — PaperBrokerAdapter.list_accounts()
+        was actually called and returned successfully.
+        """
+        response = client.get("/v1/health")
+
+        assert response.json()["broker_connectivity"] == "ok"
 
 
 class TestKillSwitchEndpoints:

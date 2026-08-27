@@ -9,12 +9,9 @@ from typing import Optional
 
 from sqlmodel import SQLModel, Session, select, Field
 
-from src.accounts.profiles import BrokerName
 from src.broker.order_builder import OrderBuilder
 from src.brokers.base import BrokerAdapter, BrokerAuthenticationError
-from src.brokers.paper import PaperBrokerAdapter
-from src.brokers.schwab.adapter import SchwabBrokerAdapter
-from src.brokers.schwab.auth import SchwabOAuthClient
+from src.brokers.factory import build_broker_adapter
 from src.config import get_settings
 from src.execution.approval import ApprovalManager
 from src.execution.idempotency import IdempotencyManager, Operation
@@ -426,35 +423,8 @@ class Executor:
         )
 
     def _build_broker_adapter(self, mock_broker: bool) -> BrokerAdapter:
-        """Choose the configured broker without allowing implicit live trading."""
-        if mock_broker or self.settings.execution_mode.upper() in {"PAPER", "SHADOW"}:
-            return PaperBrokerAdapter()
-
-        profiles = self.settings.account_profiles.values()
-        if all(profile.broker != BrokerName.SCHWAB for profile in profiles):
-            return PaperBrokerAdapter()
-
-        if not all(
-            [
-                self.settings.schwab_app_key,
-                self.settings.schwab_app_secret,
-                self.settings.schwab_redirect_uri,
-            ]
-        ):
-            raise ValueError("Schwab mode requires configured OAuth app key, app secret, and redirect URI")
-
-        oauth = SchwabOAuthClient(
-            app_key=self.settings.schwab_app_key,
-            app_secret=self.settings.schwab_app_secret,
-            redirect_uri=self.settings.schwab_redirect_uri,
-            refresh_token=self.settings.schwab_refresh_token,
-        )
-        return SchwabBrokerAdapter(
-            oauth,
-            timeout_sec=self.settings.schwab_api_timeout_sec,
-            retry_max_attempts=self.settings.schwab_retry_max_attempts,
-            retry_backoff_sec=self.settings.schwab_retry_backoff_sec,
-        )
+        """Choose the configured broker without allowing implicit live trading — see src/brokers/factory.py."""
+        return build_broker_adapter(self.settings, mock_broker=mock_broker)
     
     def _audit_log(self, action: str, decision_id: str, details: dict) -> None:
         """Write audit log entry."""

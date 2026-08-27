@@ -32,6 +32,19 @@ make test
 open http://localhost:8000/docs
 ```
 
+### Connecting to a real Schwab account (read-only + preview)
+
+The default `.env` runs entirely in PAPER mode — no network calls, synthetic
+quotes/balances. To connect to your real Schwab account for real quotes,
+balances, positions, and order **preview** (order submission stays
+hard-blocked in code regardless — see Security & Controls below):
+
+1. Register an app at [developer.schwab.com](https://developer.schwab.com) and put its key/secret/redirect URI into `.env` as `SCHWAB_APP_KEY` / `SCHWAB_APP_SECRET` / `SCHWAB_REDIRECT_URI`.
+2. Run `.venv/Scripts/python.exe scripts/schwab_oauth_bootstrap.py` and follow the prompts (one-time interactive browser login) to get `SCHWAB_REFRESH_TOKEN`.
+3. Set `SCHWAB_ACCOUNT_NUMBER` to your plain Schwab account number (never a "hash" — that's resolved automatically).
+4. Set `EXECUTION_MODE=SCHWAB` (anything other than `PAPER`/`SHADOW` works) and add `SCHWAB_ACCOUNT_ALIAS`'s value (default `schwab_live`) to `ACCOUNT_ALLOWLIST`.
+5. Restart the server and check `GET /v1/health` — `broker_connectivity: "ok"` means the credentials work end-to-end (it calls Schwab's `/accounts` for real). `POST /v1/orders/preview` with `"account": "schwab_live"` now runs a real Schwab preview.
+
 ### Docker Compose
 
 ```bash

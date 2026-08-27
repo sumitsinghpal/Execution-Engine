@@ -22,6 +22,7 @@ class SchwabOAuthClient:
         redirect_uri: str,
         refresh_token: Optional[str] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        timeout_sec: float = 30.0,
     ) -> None:
         if not app_key or not app_secret or not redirect_uri:
             raise BrokerError("Schwab OAuth requires app key, app secret, and redirect URI")
@@ -30,6 +31,7 @@ class SchwabOAuthClient:
         self.redirect_uri = redirect_uri
         self.refresh_token = refresh_token
         self.transport = transport
+        self.timeout_sec = timeout_sec
         self.access_token: Optional[str] = None
         self.access_token_expires_at: Optional[datetime] = None
 
@@ -58,7 +60,7 @@ class SchwabOAuthClient:
         return self.access_token or ""
 
     async def _request_token(self, payload: dict[str, str]) -> dict[str, Any]:
-        async with httpx.AsyncClient(transport=self.transport) as client:
+        async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout_sec) as client:
             response = await client.post(self.TOKEN_URL, auth=(self.app_key, self.app_secret), data=payload)
             if response.status_code in (400, 401, 403):
                 # Schwab refresh tokens are valid for 7 days and cannot be
