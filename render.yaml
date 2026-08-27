@@ -1,0 +1,49 @@
+# Render Blueprint for the Execution-Engine API.
+# Deploy: Render dashboard -> New -> Blueprint -> connect this repo -> Render
+# auto-detects this file. See README.md's "Deploying" section for the full
+# walkthrough, including what to do about the two limitations noted below.
+#
+# Known limitations of the free plan (documented, not hidden):
+#   - Free web services sleep after ~15 min idle and take ~30-50s to wake on
+#     the next request. The background loops this app starts at startup
+#     (strategy scanner, EDGE-TF connector, autonomous trader) stop running
+#     while asleep — "autonomous" only holds while the instance is awake.
+#     Upgrade the plan below (e.g. "starter") for an always-on instance if
+#     continuous background trading matters.
+#   - Free web services have no persistent disk: the default SQLite file
+#     resets on every deploy and restart. Add a paid disk (see the commented
+#     block below) or point DATABASE_URL at an external Postgres instead if
+#     order/position history needs to survive redeploys.
+services:
+  - type: web
+    name: edge-execution-engine
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -e .
+    startCommand: uvicorn src.api.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /v1/health
+    envVars:
+      - key: EXECUTION_MODE
+        value: PAPER
+      - key: DATABASE_URL
+        value: sqlite:///./execution_engine.db
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_FORMAT
+        value: json
+      - key: API_KEY_ADMIN
+        generateValue: true # random on first deploy; view it in the Render dashboard's Environment tab to operate the kill switch
+      # Add these yourself in the Render dashboard if/when connecting a real
+      # Schwab account — never commit real credentials to this file:
+      #   SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_REDIRECT_URI,
+      #   SCHWAB_REFRESH_TOKEN, SCHWAB_ACCOUNT_NUMBER
+      # and set EXECUTION_MODE=SCHWAB + add the account alias to
+      # ACCOUNT_ALLOWLIST once they're in place (see README.md).
+    # Uncomment for persistent SQLite storage across deploys/restarts —
+    # requires a paid plan (disks aren't available on the free tier):
+    # disk:
+    #   name: data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # ...and change DATABASE_URL above to sqlite:////var/data/execution_engine.db

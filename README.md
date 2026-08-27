@@ -621,6 +621,52 @@ MAX_POSITION_CONCENTRATION_PCT=10
 MARKET_HOURS_ONLY=true
 ```
 
+### Deploying: API on Render, dashboard on Vercel
+
+The API (`src/api/`) is a long-running Python process with background
+tasks (strategy scanner, EDGE-TF connector, autonomous trader) — that
+needs Render, not Vercel, which only runs short-lived serverless
+functions and can't host a persistent asyncio loop. The dashboard
+(`dashboard/index.html`) is a single static file with no build step —
+Vercel is the right fit for that half.
+
+**API → Render** (`render.yaml` in the repo root is a ready-to-use
+Blueprint):
+1. Render dashboard → **New** → **Blueprint** → connect this GitHub repo.
+   Render detects `render.yaml` automatically.
+2. Review the env vars it proposes, then **Apply**. `API_KEY_ADMIN` is
+   auto-generated — find it in the service's **Environment** tab
+   afterward; you'll need it to operate the kill switch.
+3. To connect a real Schwab account, add
+   `SCHWAB_APP_KEY`/`SCHWAB_APP_SECRET`/`SCHWAB_REDIRECT_URI`/
+   `SCHWAB_REFRESH_TOKEN`/`SCHWAB_ACCOUNT_NUMBER` in the Environment tab
+   (never commit them to `render.yaml`), set `EXECUTION_MODE=SCHWAB`, and
+   add the account alias to `ACCOUNT_ALLOWLIST` — same steps as the local
+   setup above, just entered in Render's UI instead of `.env`.
+
+Two real limitations of Render's **free** plan, spelled out in
+`render.yaml`'s own comments: it sleeps after ~15 min idle (the
+background loops only run while the instance is awake — "autonomous"
+only holds while it's up), and it has no persistent disk, so the default
+SQLite file resets on every deploy/restart. Both are one field away from
+fixed (an upgraded plan, and the commented-out `disk:` block) once it
+matters enough to pay for.
+
+**Dashboard → Vercel:** point a new Vercel project at this repo with
+**Root Directory** set to `dashboard/` — no build command needed, it's
+static. Once both are live, open the deployed dashboard and paste the
+Render service's URL into the connection field at the top (it defaults to
+`http://localhost:8000` for local dev) — the dashboard talks to whatever
+API URL you give it, nothing is hardcoded.
+
+**Security note on both, as deployed by default:** only the kill-switch
+endpoints require `API_KEY_ADMIN`. Order preview/execute, balances,
+positions, and the backtest endpoint are open to anyone with the URL.
+That's an acceptable posture for a paper-only demo behind an unguessable
+Render URL, but add real request auth (e.g. an API-key middleware in
+front of everything, not just the kill switch) before pointing this at a
+real Schwab account or handing the URL out widely.
+
 ---
 
 ## Known Limitations & Future Work
