@@ -1023,24 +1023,26 @@
     loadChart(initial);
   }
 
-  // ---- Live updates: 3-year backtest at a $100-per-trade notional
+  // ---- Live updates: 3-year backtest at a $1000-per-trade notional
   // (POST /v1/backtest/run, every DAILY-bar strategy in the catalog ×
   // QQQ/SPY/IWM) plus recent autonomous-trader activity, cached in
   // localStorage and refreshed on a 3-hour cadence — "3 hours" is the
   // refresh interval, not a 3-hour backtest window (these strategies
   // trade on daily bars, so a 3-hour lookback wouldn't mean anything to
-  // them). $100/trade is illustrative sizing for this card specifically —
-  // NOT what the live autonomous trader actually risks per trade (that's
-  // settings.autonomous_notional_per_trade_usd, $1000 by default; see
-  // src/config.py). A stale cache is shown immediately on load while a
-  // fresh one computes in the background, so reopening the dashboard is
-  // never blocked on a network-bound backtest. The two INTRADAY
-  // strategies (ORB, VWAP Reversion) trade 5-minute bars and are excluded
-  // — this backtest only ever fetches daily history, so backtesting them
-  // against it would silently produce meaningless numbers, not real ones.
-  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v2'; // bumped from v1: the cached shape gained intradayStrategyIds and the $100-notional/all-daily-strategies request — a v1 blob would silently mis-render every strategy card as "no trades fired"
+  // them). $1000/trade matches settings.autonomous_notional_per_trade_usd
+  // (src/config.py) — the live autonomous trader's own default sizing —
+  // so this card's numbers are directly comparable to what it actually
+  // does. (An earlier $100 notional made every pair report "too small":
+  // QQQ/SPY/IWM all trade well into the hundreds per share.) A stale
+  // cache is shown immediately on load while a fresh one computes in the
+  // background, so reopening the dashboard is never blocked on a
+  // network-bound backtest. The two INTRADAY strategies (ORB, VWAP
+  // Reversion) trade 5-minute bars and are excluded — this backtest only
+  // ever fetches daily history, so backtesting them against it would
+  // silently produce meaningless numbers, not real ones.
+  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v3'; // v3: notional bumped to $1000 (matches the live autonomous trader's own sizing) — $100 couldn't buy 1 share of QQQ/SPY/IWM, so every pair reported "too small" instead of real trades
   const LIVE_UPDATES_INTERVAL_MS = 3 * 60 * 60 * 1000;
-  const LIVE_UPDATES_NOTIONAL_USD = 100;
+  const LIVE_UPDATES_NOTIONAL_USD = 1000; // matches settings.autonomous_notional_per_trade_usd, the live autonomous trader's own default sizing
   let liveUpdatesTimer = null;
   let strategyAggCache = null; // { byStrategy: {id: {trades, wins, pnl}}, intradayIds: [id, ...] } — set once live-updates data is available
 
