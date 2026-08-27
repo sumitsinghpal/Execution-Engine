@@ -2,19 +2,34 @@
 Persisted, human-reviewable signals sourced from an external decision engine
 — the counterpart to src/execution/strategy_signals.py (which holds signals
 this system's own internal strategy catalog fired), for trades a *separate*
-brain has already approved on its own side. EDGE-TF is the first and only
-source wired up today (src/execution/edge_tf_connector.py polls its
-execution gateway); `source` exists so a second decision engine — e.g.
-EP-Edge-Earnings-Engine — can land signals in this same table later without
-a schema change.
+brain has already approved on its own side. Two sources are wired up today:
+
+  - "edge-tf": src/execution/edge_tf_connector.py polls EDGE-TF's own HTTP
+    execution gateway for fully-specified, already-approved instructions
+    (concrete quantity, order type, an upstream trade_id that supports an
+    atomic claim/report round trip before and after local execution).
+  - "ep-edge-earnings": src/execution/ep_edge_earnings_adapter.py accepts
+    pushed TradeCandidate objects (see POST /v1/external-signals/ingest in
+    server.py) from EP-Edge-Earnings-Engine, a library with no HTTP service
+    or claim/report lifecycle of its own — just a directional thesis
+    (ticker, direction, expected value), deliberately unsized. A human
+    supplies quantity when loading it into the order ticket, the same way
+    they already supply `account`.
+
+`source` keeps the two apart without a schema fork; every EDGE-TF-specific
+field below (instruction_id, intent_hash, approved_fingerprint,
+approval_expires_at, idempotency_key, quantity) is optional precisely
+because a non-gateway source has no equivalent — see each field's comment.
 
 Same safety shape as the internal strategy signals: landing here has no
 side effect beyond a database row. A human reviews it in the dashboard,
 loads it into the order ticket, and only from there does it run through the
 ordinary preview -> risk checks -> approve -> execute gate. The one thing
 specific to an *external* signal is what happens at execute time — see
-src/execution/edge_tf_connector.py's claim_upstream/report_upstream — this
-module only stores what was polled and tracks whether it's been acted on.
+src/execution/edge_tf_connector.py's claim_upstream/report_upstream (called
+only for source == "edge-tf"; ep-edge-earnings has nothing to claim or
+report to) — this module only stores what was received and tracks whether
+it's been acted on.
 """
 
 from __future__ import annotations
@@ -58,14 +73,14 @@ class ExternalSignalRecord(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
     # Provenance
-    source: str = Field(index=True)  # "edge-tf" today
-    external_trade_id: str = Field(index=True, unique=True)  # EDGE-TF's trade_id; becomes this system's decision_id if loaded
-    instruction_id: str  # binds the approved economics at poll time; a re-approval upstream yields a new one
+    source: str = Field(index=True)  # "edge-tf" | "ep-edge-earnings"
+    external_trade_id: str = Field(index=True, unique=True)  # upstream trade_id (edge-tf) or a synthesized stable id (ep-edge-earnings); becomes this system's decision_id if loaded
+    instruction_id: Optional[str] = None  # edge-tf only: binds the approved economics at poll time; a re-approval upstream yields a new one
 
-    # What EDGE-TF approved
+    # What the source is proposing
     symbol: str
     side: str  # "BUY" | "SELL"
-    quantity: float
+    quantity: Optional[float] = None  # None = not sized by the source (e.g. ep-edge-earnings); a human must supply one at load time
     order_type: str  # "LIMIT" | "MARKET"
     limit_price: Optional[float] = None
     estimated_notional: float = 0.0
@@ -76,11 +91,13 @@ class ExternalSignalRecord(SQLModel, table=True):
     strategy_module: str
     rationale: Optional[str] = None
 
-    # Needed to report back accurately and to know when a stale instruction should be re-polled
-    intent_hash: str
-    approved_fingerprint: str
-    approval_expires_at: datetime
-    idempotency_key: str
+    # edge-tf only: needed to report back accurately and to know when a
+    # stale instruction should be re-polled. None for any source without an
+    # upstream claim/report lifecycle.
+    intent_hash: Optional[str] = None
+    approved_fingerprint: Optional[str] = None
+    approval_expires_at: Optional[datetime] = None
+    idempotency_key: Optional[str] = None
 
     status: str = Field(default=ExternalSignalStatus.PENDING, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -107,7 +124,7 @@ class ExternalSignalRecord(SQLModel, table=True):
             "updated_at": self.updated_at,
         }
 
-    def to_trade_proposal_dict(self, *, account: str, agent_id: str = "default") -> dict[str, Any]:
+    def to_trade_proposal_dict(self, *, account: str, agent_id: str = "default", quantity: Optional[int] = None) -> dict[str, Any]:
         """
         Shapes this signal as a TradeProposal payload (src/models/orders.py)
         ready for POST /v1/orders/preview. `decision_id` is set to the
@@ -116,10 +133,26 @@ class ExternalSignalRecord(SQLModel, table=True):
         record again.
 
         Only whole-share quantities are supported today (TradeProposal.quantity
-        is int); a fractional upstream quantity is rounded to the nearest
-        whole share rather than rejected outright, since EDGE-TF's own
-        quantity is itself a planning estimate, not a broker-precise figure.
+        is int); a fractional source quantity is rounded to the nearest
+        whole share rather than rejected outright, since it's a planning
+        estimate, not a broker-precise figure.
+
+        `quantity` is required when this signal wasn't sized by its source
+        (self.quantity is None — e.g. ep-edge-earnings, which produces a
+        directional thesis, not an order) and ignored otherwise; raises
+        ValueError rather than silently picking an arbitrary size for real
+        money.
         """
+        if self.quantity is not None:
+            resolved_quantity = max(1, round(self.quantity))
+        elif quantity is not None:
+            resolved_quantity = max(1, quantity)
+        else:
+            raise ValueError(
+                f"External signal {self.external_trade_id} ({self.source}) wasn't sized by its source; "
+                "pass quantity explicitly"
+            )
+
         proposal: dict[str, Any] = {
             "decision_id": self.external_trade_id,
             "agent_id": agent_id,
@@ -127,7 +160,7 @@ class ExternalSignalRecord(SQLModel, table=True):
             "symbol": self.symbol,
             "asset_type": "EQUITY",
             "instruction": self.side,
-            "quantity": max(1, round(self.quantity)),
+            "quantity": resolved_quantity,
             "order_type": self.order_type,
             "strategy_id": f"{self.source}:{self.strategy_module}",
         }
@@ -154,13 +187,14 @@ class ExternalSignalService:
         if existing is not None:
             return None
 
+        expires_at = instruction.get("approval_expires_at")
         record = ExternalSignalRecord(
             source=source,
             external_trade_id=trade_id,
-            instruction_id=instruction["instruction_id"],
+            instruction_id=instruction.get("instruction_id"),
             symbol=instruction["symbol"],
             side=instruction["side"],
-            quantity=instruction["quantity"],
+            quantity=instruction.get("quantity"),
             order_type=instruction.get("order_type", "LIMIT"),
             limit_price=instruction.get("limit_price"),
             estimated_notional=instruction.get("estimated_notional", 0.0),
@@ -168,10 +202,10 @@ class ExternalSignalService:
             thesis_id=instruction["thesis_id"],
             strategy_module=instruction["strategy_module"],
             rationale=instruction.get("rationale"),
-            intent_hash=instruction["intent_hash"],
-            approved_fingerprint=instruction["approved_fingerprint"],
-            approval_expires_at=_parse_datetime(instruction["approval_expires_at"]),
-            idempotency_key=instruction["idempotency_key"],
+            intent_hash=instruction.get("intent_hash"),
+            approved_fingerprint=instruction.get("approved_fingerprint"),
+            approval_expires_at=_parse_datetime(expires_at) if expires_at is not None else None,
+            idempotency_key=instruction.get("idempotency_key"),
         )
         self.session.add(record)
         self.session.commit()

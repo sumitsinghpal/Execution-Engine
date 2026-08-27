@@ -22,7 +22,12 @@ from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
 from src.execution.algo_slices import AlgoSliceRecord
 from src.execution.drawdown_guard import DrawdownGuard
-from src.execution.edge_tf_connector import claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
+from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
+from src.execution.ep_edge_earnings_adapter import (
+    ExternalSignalIngestRequest as EarningsIngestRequest,
+    SOURCE as EpEdgeSource,
+    record_batch as ep_edge_record_batch,
+)
 from src.execution.executor import Executor, OrderRecord
 from src.execution.external_signals import ExternalSignalStatus, ExternalSignalService
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
@@ -240,24 +245,30 @@ async def execute_order(
 
     Approval gates, kill switch, and risk checks are enforced server-side.
 
-    If decision_id matches a signal this system polled from EDGE-TF's
-    execution gateway (src/execution/edge_tf_connector.py), the trade is
-    atomically claimed there first — refused if something else already
-    claimed or it expired, in which case this aborts before touching the
-    broker — and the outcome is reported back upstream afterward, success
-    or failure, so EDGE-TF's own audit ledger stays accurate.
+    If decision_id matches a signal this system received from an external
+    decision engine (src/execution/external_signals.py), local status
+    bookkeeping tracks it either way. Only an "edge-tf" sourced signal has
+    an upstream gateway to talk to: the trade is atomically claimed there
+    first — refused if something else already claimed or it expired, in
+    which case this aborts before touching the broker — and the outcome is
+    reported back afterward, success or failure, so EDGE-TF's own audit
+    ledger stays accurate. A source like "ep-edge-earnings" has no such
+    gateway (see src/execution/ep_edge_earnings_adapter.py) and just gets
+    marked CLAIMED/EXECUTED/FAILED locally with no round trip.
     """
 
     external_signal = ExternalSignalService(db).get_by_trade_id(request.decision_id)
+    signal_has_gateway = external_signal is not None and external_signal.source == EDGE_TF_SOURCE
     if external_signal is not None and external_signal.status == ExternalSignalStatus.PENDING:
-        try:
-            await claim_upstream(external_signal, settings, executor_id=settings.edge_tf_executor_id)
-        except EdgeTFGatewayError as e:
-            logger.error("edge_tf_claim_failed", decision_id=request.decision_id, error=str(e))
-            raise HTTPException(
-                status_code=409,
-                detail=f"EDGE-TF refused to hand off this trade for execution: {e}",
-            )
+        if signal_has_gateway:
+            try:
+                await claim_upstream(external_signal, settings, executor_id=settings.edge_tf_executor_id)
+            except EdgeTFGatewayError as e:
+                logger.error("edge_tf_claim_failed", decision_id=request.decision_id, error=str(e))
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"EDGE-TF refused to hand off this trade for execution: {e}",
+                )
         ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.CLAIMED)
 
     try:
@@ -280,8 +291,9 @@ async def execute_order(
         )
 
         if external_signal is not None:
-            order_status = await executor.get_order_status(request.decision_id)
-            await report_upstream(external_signal, settings, order_status)
+            if signal_has_gateway:
+                order_status = await executor.get_order_status(request.decision_id)
+                await report_upstream(external_signal, settings, order_status)
             ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.EXECUTED)
 
         return receipt
@@ -861,6 +873,10 @@ async def load_external_signal(
     trade_id: str,
     account: str = Query(..., description="Account alias to execute this trade against"),
     agent_id: str = Query(default="default"),
+    quantity: Optional[int] = Query(
+        default=None,
+        description="Required for a signal its source didn't size itself (e.g. ep-edge-earnings); ignored otherwise.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
@@ -879,7 +895,31 @@ async def load_external_signal(
         settings.get_account_profile(account)  # fail closed on an unknown alias before handing this back
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"proposal": record.to_trade_proposal_dict(account=account, agent_id=agent_id)}
+    try:
+        proposal = record.to_trade_proposal_dict(account=account, agent_id=agent_id, quantity=quantity)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"proposal": proposal}
+
+
+@app.post("/v1/external-signals/ingest")
+async def ingest_external_signals(
+    request: EarningsIngestRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Push-based counterpart to /v1/external-signals/poll: for a source with
+    no HTTP gateway of its own to poll (today: ep-edge-earnings, a library
+    with no service and no claim/report lifecycle — see
+    src/execution/ep_edge_earnings_adapter.py), whoever runs its workflow
+    POSTs the resulting candidates here instead. Same effect either way:
+    records signals for human review in GET /v1/external-signals, places no
+    orders.
+    """
+    if request.source == EpEdgeSource:
+        new_count = ep_edge_record_batch(db, request.candidates)
+        return {"new_signals": new_count, "source": request.source}
+    raise HTTPException(status_code=400, detail=f"Unknown or unsupported ingestion source: {request.source}")
 
 
 @app.post("/v1/external-signals/{trade_id}/dismiss")
