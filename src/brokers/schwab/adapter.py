@@ -7,6 +7,7 @@ order submission is blocked until a separately reviewed release enables it.
 import asyncio
 from datetime import UTC, datetime
 from typing import Any, Optional
+from urllib.parse import quote as url_quote
 
 import httpx
 
@@ -97,8 +98,11 @@ class SchwabBrokerAdapter(BrokerAdapter):
         return balances
 
     async def get_quote(self, symbol: str) -> dict[str, Any]:
+        # OCC option symbols contain literal spaces (e.g. "NVDA  280121C00120000"),
+        # which aren't valid raw in a URL path — percent-encode the whole
+        # segment (plain equity tickers pass through unchanged).
         response = await self._request(
-            "GET", f"/{symbol}/quotes", base_url=self.MARKET_DATA_BASE_URL
+            "GET", f"/{url_quote(symbol, safe='')}/quotes", base_url=self.MARKET_DATA_BASE_URL
         )
         # Schwab nests the quote under the symbol key; unwrap defensively
         # since sandbox/live payload shapes have been known to drift.

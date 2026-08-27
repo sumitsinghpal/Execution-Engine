@@ -13,6 +13,8 @@ from typing import Optional, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, field_serializer
 
+from src.models.occ_symbol import OCC_SYMBOL_LENGTH, parse_occ_symbol
+
 
 class AssetType(str, Enum):
     """Allowed asset types."""
@@ -73,7 +75,14 @@ class TradeProposal(BaseModel):
         ),
     )
     account: str = Field(..., description="Target account identifier")
-    symbol: str = Field(..., pattern="^[A-Z]{1,5}$", description="Trading symbol (uppercase, max 5 chars)")
+    symbol: str = Field(
+        ...,
+        max_length=OCC_SYMBOL_LENGTH,
+        description=(
+            "Equity/ETF ticker (uppercase, max 5 chars) when asset_type is EQUITY/ETF/BOND, or a full "
+            "21-character OCC option symbol (e.g. 'NVDA  280121C00120000') when asset_type is OPTION."
+        ),
+    )
     asset_type: AssetType = Field(..., description="Type of asset being traded")
     instruction: Instruction = Field(..., description="BUY or SELL")
     quantity: int = Field(..., gt=0, description="Quantity to trade (positive integer)")
@@ -108,6 +117,32 @@ class TradeProposal(BaseModel):
         if not v.isupper():
             raise ValueError("Symbol must be uppercase")
         return v
+
+    @model_validator(mode="after")
+    def validate_symbol_matches_asset_type(self) -> "TradeProposal":
+        """
+        An OPTION's symbol is a full 21-char OCC contract symbol, checked
+        by actually parsing it (root/expiration/right/strike must all be
+        well-formed) rather than a shape-only regex — a malformed OCC
+        symbol is exactly the kind of input that must fail loudly here,
+        not reach the broker as a mangled order. Every other asset type
+        keeps the plain-ticker shape this system has always required.
+        """
+        if self.asset_type == AssetType.OPTION:
+            try:
+                parse_occ_symbol(self.symbol)
+            except ValueError as exc:
+                raise ValueError(f"Invalid OCC option symbol for OPTION asset_type: {exc}") from exc
+        elif not re.fullmatch(r"[A-Z]{1,5}", self.symbol):
+            raise ValueError(f"symbol must be 1-5 uppercase letters for asset_type={self.asset_type.value}")
+        return self
+
+    @property
+    def underlying_symbol(self) -> str:
+        """The equity ticker this proposal is ultimately about — itself for equities, the OCC root for options. Used for allowlist/denylist checks."""
+        if self.asset_type == AssetType.OPTION:
+            return parse_occ_symbol(self.symbol).underlying
+        return self.symbol
 
     @field_validator("agent_id")
     @classmethod

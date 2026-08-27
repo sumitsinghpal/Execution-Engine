@@ -138,6 +138,76 @@ async def test_paper_adapter_estimated_investment_is_rounded_to_cents() -> None:
     assert preview["estimatedTotalInvestment"] == 5189.12
 
 
+@pytest.mark.asyncio
+async def test_paper_adapter_option_preview_applies_the_100x_contract_multiplier() -> None:
+    """2 contracts at a $3.50 premium is $700 of real risk, not $7 — the same multiplier RiskChecker applies."""
+    adapter = PaperBrokerAdapter()
+    profile = AccountProfile(broker=BrokerName.PAPER)
+    order = {
+        "orderId": "decision-option-1",
+        "quantity": 2,
+        "symbol": "QQQ   261011C00400000",
+        "assetType": "OPTION",
+        "limitPrice": "3.50",
+    }
+
+    preview = await adapter.preview_order(profile, order)
+
+    assert preview["estimatedTotalInvestment"] == 700.0
+
+
+class TestPaperAdapterOptionQuotes:
+    """PaperBrokerAdapter.get_quote() for an OCC option symbol — a distinct, plausible synthetic premium, not an equity-scale price."""
+
+    @staticmethod
+    def _occ(underlying="QQQ", days_out=45, right="C", strike="400"):
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        from src.models.occ_symbol import format_occ_symbol
+
+        return format_occ_symbol(underlying, date.today() + timedelta(days=days_out), right, Decimal(strike))
+
+    @pytest.mark.asyncio
+    async def test_option_quote_is_premium_scale_not_equity_scale(self):
+        adapter = PaperBrokerAdapter()
+        quote = await adapter.get_quote(self._occ())
+
+        # Equity synthetic prices are ~$20-$500; a single option premium
+        # should be nowhere near that (this repo's toy pricer caps out far
+        # lower), so a value in the equity range would mean the OCC symbol
+        # was hashed as if it were a plain ticker instead of parsed.
+        assert 0 < quote["last"] < 200
+
+    @pytest.mark.asyncio
+    async def test_option_quote_has_a_wider_relative_spread_than_equities(self):
+        adapter = PaperBrokerAdapter()
+        equity_quote = await adapter.get_quote("QQQ")
+        option_quote = await adapter.get_quote(self._occ())
+
+        equity_spread_pct = (equity_quote["ask"] - equity_quote["bid"]) / equity_quote["last"]
+        option_spread_pct = (option_quote["ask"] - option_quote["bid"]) / option_quote["last"]
+        assert option_spread_pct > equity_spread_pct
+
+    @pytest.mark.asyncio
+    async def test_deeper_in_the_money_call_costs_more(self):
+        adapter = PaperBrokerAdapter()
+        # A very low strike call is deep ITM against whatever QQQ's
+        # synthetic price is (~$20-$500 range); a very high strike call on
+        # the same underlying/expiration is deep OTM.
+        itm = await adapter.get_quote(self._occ(strike="1"))
+        otm = await adapter.get_quote(self._occ(strike="5000"))
+
+        assert itm["last"] > otm["last"]
+
+    @pytest.mark.asyncio
+    async def test_quote_is_deterministic_for_the_same_contract(self):
+        adapter = PaperBrokerAdapter()
+        first = await adapter.get_quote(self._occ())
+        second = await adapter.get_quote(self._occ())
+        assert first["last"] == second["last"]
+
+
 class _FlakyThenOKTransport:
     """Fails with a 500 a fixed number of times, then succeeds — simulates a transient outage that clears."""
 

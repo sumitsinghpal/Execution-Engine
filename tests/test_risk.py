@@ -1,11 +1,12 @@
 """Tests for risk management."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from src.agents.profiles import AgentRiskProfile
+from src.models.occ_symbol import format_occ_symbol
 from src.models.orders import TradeProposal, AssetType, Instruction, OrderType
 from src.risk.limits import RiskChecker
 
@@ -248,3 +249,99 @@ class TestPerAgentRiskOverrides:
         verdict = checker.evaluate(proposal, kill_switch_on=False, quote=sample_quote)
 
         assert verdict.approved
+
+
+class TestOptionRiskChecks:
+    """RiskChecker's option-specific behavior: underlying-based allowlist, the expiration window, and the 100x contract multiplier."""
+
+    @staticmethod
+    def _occ_proposal(underlying="QQQ", days_out=45, limit_price="2.50", quantity=2):
+        symbol = format_occ_symbol(underlying, date.today() + timedelta(days=days_out), "C", Decimal("400"))
+        return TradeProposal(
+            decision_id=f"edge-option-risk-{underlying}-{days_out}",
+            account="primary",
+            symbol=symbol,
+            asset_type=AssetType.OPTION,
+            instruction=Instruction.SELL,
+            quantity=quantity,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal(limit_price),
+        )
+
+    @staticmethod
+    def _quote_for(proposal):
+        return {
+            "symbol": proposal.symbol,
+            "bid": proposal.limit_price,
+            "ask": proposal.limit_price,
+            "last": proposal.limit_price,
+            "quote_time": datetime.now(UTC).isoformat(),
+            "mode": "PAPER",
+        }
+
+    def test_option_on_an_allowed_underlying_passes_symbol_checks(self):
+        proposal = self._occ_proposal(underlying="QQQ")  # QQQ is in the default fleet-wide allowlist
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert verdict.checks["symbol_allowed"]
+        assert verdict.checks["symbol_not_denied"]
+
+    def test_option_on_a_non_allowed_underlying_is_rejected(self):
+        proposal = self._occ_proposal(underlying="NVDA")  # not in the default fleet-wide allowlist
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert not verdict.approved
+        assert not verdict.checks["symbol_allowed"]
+
+    def test_option_expiring_too_soon_is_rejected(self):
+        proposal = self._occ_proposal(days_out=0)  # expires today; default min is 1 day
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert not verdict.approved
+        assert verdict.checks["expiration_allowed"] is False
+
+    def test_option_expiring_too_far_out_is_rejected(self):
+        proposal = self._occ_proposal(days_out=1000)  # beyond the default 730-day max
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert not verdict.approved
+        assert verdict.checks["expiration_allowed"] is False
+
+    def test_option_within_the_expiration_window_passes(self):
+        proposal = self._occ_proposal(days_out=45)
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert verdict.checks["expiration_allowed"] is True
+
+    def test_equity_orders_have_no_expiration_check_at_all(self, sample_trade_proposal, sample_quote):
+        checker = RiskChecker()
+        verdict = checker.evaluate(sample_trade_proposal, kill_switch_on=False, quote=sample_quote)
+        assert "expiration_allowed" not in verdict.checks
+
+    def test_option_notional_uses_the_100x_contract_multiplier(self):
+        """2 contracts at $2.50 premium is really $500 notional (2 * 100 * $2.50), not $5."""
+        proposal = self._occ_proposal(limit_price="2.50", quantity=2)
+        checker = RiskChecker()
+        checker.settings.max_order_notional_usd = Decimal("400")  # below $500, above $5
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert not verdict.approved
+        assert not verdict.checks["notional_limit"]
+        assert verdict.notional_usd == Decimal("500.00")
+
+    def test_option_notional_multiplier_does_not_apply_to_equities(self, sample_trade_proposal, sample_quote):
+        checker = RiskChecker()
+        verdict = checker.evaluate(sample_trade_proposal, kill_switch_on=False, quote=sample_quote)
+        expected = sample_trade_proposal.limit_price * sample_trade_proposal.quantity
+        assert verdict.notional_usd == expected

@@ -8,6 +8,7 @@ from typing import Any
 
 from src.accounts.profiles import AccountProfile
 from src.brokers.base import BrokerAdapter
+from src.models.occ_symbol import is_occ_symbol_shape, parse_occ_symbol
 
 
 class PaperBrokerAdapter(BrokerAdapter):
@@ -61,7 +62,46 @@ class PaperBrokerAdapter(BrokerAdapter):
         noise = (rng.random() - 0.5) * 0.01
         return max(base * (1 + cycle + noise), 0.01)
 
+    @staticmethod
+    def _synthetic_option_premium(underlying_price: float, strike: float, right: str, days_to_expiration: int) -> float:
+        """
+        A deliberately simple, clearly-labeled toy option pricer — NOT
+        Black-Scholes, not a real market model. It exists only so this
+        system's risk checks (limit-price deviation, notional) have a
+        plausible, internally-consistent premium to evaluate against for
+        an OCC symbol in paper mode: in-the-money costs more than
+        out-of-the-money, and more time to expiration costs more too.
+        """
+        if right == "C":
+            intrinsic = max(underlying_price - strike, 0.0)
+        else:
+            intrinsic = max(strike - underlying_price, 0.0)
+        time_value = underlying_price * 0.02 * math.sqrt(max(days_to_expiration, 0) / 365)
+        return round(max(intrinsic + time_value, 0.01), 2)
+
     async def get_quote(self, symbol: str) -> dict[str, Any]:
+        if is_occ_symbol_shape(symbol):
+            try:
+                parts = parse_occ_symbol(symbol)
+            except ValueError:
+                parts = None
+            if parts is not None:
+                idx = int(datetime.now(UTC).timestamp() // self._interval_seconds("daily"))
+                underlying_price = self._bucket_close(parts.underlying, "daily", idx)
+                days_to_expiration = (parts.expiration - datetime.now(UTC).date()).days
+                mid = self._synthetic_option_premium(
+                    underlying_price, float(parts.strike), parts.right, days_to_expiration
+                )
+                spread = round(max(mid * 0.03, 0.01), 4)  # options trade with a much wider relative spread than equities
+                return {
+                    "symbol": symbol,
+                    "bid": round(max(mid - spread, 0.01), 4),
+                    "ask": round(mid + spread, 4),
+                    "last": round(mid, 4),
+                    "quote_time": datetime.now(UTC).isoformat(),
+                    "mode": "PAPER",
+                }
+
         # "Now" is priced off today's daily bucket — the same value
         # get_price_history(symbol, "daily", ...) reports for today's bar,
         # since most strategies (6 of 8) evaluate daily bars and their
@@ -135,6 +175,12 @@ class PaperBrokerAdapter(BrokerAdapter):
             # silently reporting a $0 estimated investment.
             quote = await self.get_quote(order_spec.get("symbol", ""))
             limit_price = quote["last"]
+        # An option contract represents 100 shares of the underlying — the
+        # real dollar amount at stake is premium x 100 x contracts, same
+        # multiplier RiskChecker applies. Without this, the "estimated
+        # cost" shown to whoever is reviewing the order would understate
+        # an option trade's actual size 100-fold.
+        multiplier = 100 if order_spec.get("assetType") == "OPTION" else 1
         return {
             "orderId": f"paper-preview-{order_spec['orderId']}",
             "estimatedCommission": 0.0,
@@ -143,7 +189,7 @@ class PaperBrokerAdapter(BrokerAdapter):
             # limit price with 3+ decimals, as strategy-sourced entries can have)
             # carries binary-float artifacts like 5189.120000000001 that fail that
             # validation outright instead of silently losing precision.
-            "estimatedTotalInvestment": round(quantity * limit_price, 2),
+            "estimatedTotalInvestment": round(quantity * limit_price * multiplier, 2),
             "status": "OK",
             "symbol": order_spec.get("symbol"),
             "quantity": quantity,

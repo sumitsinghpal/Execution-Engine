@@ -1,10 +1,12 @@
 """Tests for data models and validation."""
 
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
+from src.models.occ_symbol import format_occ_symbol
 from src.models.orders import (
     AssetType,
     Instruction,
@@ -153,3 +155,76 @@ class TestOrderTypeValidation:
         )
         assert proposal.stop_price == Decimal("720.00")
         assert proposal.limit_price == Decimal("721.50")
+
+
+class TestOptionTradeProposal:
+    """TradeProposal for asset_type=OPTION uses a full 21-char OCC symbol instead of a plain ticker."""
+
+    def _occ(self, underlying="NVDA", days_out=45, right="C", strike="120"):
+        expiration = date.today() + timedelta(days=days_out)
+        return format_occ_symbol(underlying, expiration, right, Decimal(strike))
+
+    def test_valid_option_proposal(self):
+        proposal = TradeProposal(
+            decision_id="edge-option-001",
+            account="primary",
+            symbol=self._occ(),
+            asset_type=AssetType.OPTION,
+            instruction=Instruction.SELL,
+            quantity=2,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("2.50"),
+        )
+        assert proposal.asset_type == AssetType.OPTION
+        assert len(proposal.symbol) == 21
+
+    def test_underlying_symbol_extracts_the_occ_root(self):
+        proposal = TradeProposal(
+            decision_id="edge-option-002",
+            account="primary",
+            symbol=self._occ(underlying="SPY"),
+            asset_type=AssetType.OPTION,
+            instruction=Instruction.SELL,
+            quantity=1,
+            order_type=OrderType.MARKET,
+        )
+        assert proposal.underlying_symbol == "SPY"
+
+    def test_equity_proposal_underlying_symbol_is_itself(self, sample_trade_proposal):
+        assert sample_trade_proposal.underlying_symbol == sample_trade_proposal.symbol
+
+    def test_option_asset_type_rejects_a_plain_ticker(self):
+        with pytest.raises(ValidationError, match="Invalid OCC option symbol"):
+            TradeProposal(
+                decision_id="edge-option-003",
+                account="primary",
+                symbol="QQQ",
+                asset_type=AssetType.OPTION,
+                instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_equity_asset_type_rejects_an_occ_symbol(self):
+        with pytest.raises(ValidationError):
+            TradeProposal(
+                decision_id="edge-option-004",
+                account="primary",
+                symbol=self._occ(),
+                asset_type=AssetType.ETF,
+                instruction=Instruction.BUY,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_malformed_occ_symbol_is_rejected(self):
+        with pytest.raises(ValidationError):
+            TradeProposal(
+                decision_id="edge-option-005",
+                account="primary",
+                symbol="NOTAVALIDOCCSYMBOLXX",  # 20 chars, wrong length
+                asset_type=AssetType.OPTION,
+                instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )

@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     max_quote_age_seconds: int = 10
     max_limit_price_deviation_pct: Decimal = Decimal("0.03")
 
+    # Options expiration allowlist: an OPTION order whose contract expires
+    # sooner than this is rejected as likely an accidental/mispriced
+    # 0-days-to-expiration trade, and one expiring further out than this
+    # (longer than a typical LEAP) is rejected as outside what this system
+    # has been reviewed to trade. Completes the "expiration allowlist"
+    # item on the original safety checklist — unreachable before options
+    # could route at all.
+    min_option_expiration_days: int = 1
+    max_option_expiration_days: int = 730
+
     # Daily loss/drawdown shutdown: once an account's net liquidation value
     # falls this far below its captured start-of-day baseline, trading
     # auto-halts via the kill switch until a human clears it. See

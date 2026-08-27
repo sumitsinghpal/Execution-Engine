@@ -4,13 +4,19 @@ All checks must pass; reject-by-default philosophy.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from src.config import get_settings
 from src.logging_config import get_logger
-from src.models.orders import Instruction, OrderType, TradeProposal
+from src.models.occ_symbol import parse_occ_symbol
+from src.models.orders import AssetType, Instruction, OrderType, TradeProposal
+
+# An option contract represents 100 shares of the underlying — its
+# notional value (and so the risk this system is actually taking) is the
+# premium times 100 times the number of contracts, not the premium alone.
+_OPTION_CONTRACT_MULTIPLIER = Decimal(100)
 
 logger = get_logger(__name__)
 
@@ -63,25 +69,39 @@ class RiskChecker:
         if not checks["account_allowed"]:
             rejections.append(f"Account '{proposal.account}' not in allowlist")
 
-        # 3. Symbol allowlist — an agent's own allowlist (if configured)
-        # can only narrow the fleet-wide one, never loosen it: the
-        # effective list is the intersection, not a full override.
+        # 3. Symbol allowlist — checked against the UNDERLYING (for an
+        # option, the OCC root; for anything else, just the symbol
+        # itself), since the allowlist is expressed in plain tickers and a
+        # 21-char OCC symbol would never match it directly. An agent's own
+        # allowlist (if configured) can only narrow the fleet-wide one,
+        # never loosen it: the effective list is the intersection, not a
+        # full override.
+        underlying = proposal.underlying_symbol
         effective_symbol_allowlist = self.settings.symbol_allowlist
         if agent_profile.symbol_allowlist is not None:
             effective_symbol_allowlist = [
                 s for s in effective_symbol_allowlist if s in set(agent_profile.symbol_allowlist)
             ]
-        checks["symbol_allowed"] = proposal.symbol in effective_symbol_allowlist
+        checks["symbol_allowed"] = underlying in effective_symbol_allowlist
         if not checks["symbol_allowed"]:
-            rejections.append(f"Symbol '{proposal.symbol}' not in allowlist for agent '{proposal.agent_id}'")
+            rejections.append(f"Underlying '{underlying}' not in allowlist for agent '{proposal.agent_id}'")
 
-        # 4. Symbol denylist — an agent's own denylist (if configured) adds
-        # to the fleet-wide one (union), so a per-agent config can never
-        # accidentally lift a global block.
+        # 4. Symbol denylist — same underlying-based check. An agent's own
+        # denylist (if configured) adds to the fleet-wide one (union), so a
+        # per-agent config can never accidentally lift a global block.
         effective_symbol_denylist = set(self.settings.symbol_denylist) | set(agent_profile.symbol_denylist or [])
-        checks["symbol_not_denied"] = proposal.symbol not in effective_symbol_denylist
+        checks["symbol_not_denied"] = underlying not in effective_symbol_denylist
         if not checks["symbol_not_denied"]:
-            rejections.append(f"Symbol '{proposal.symbol}' is denied")
+            rejections.append(f"Underlying '{underlying}' is denied")
+
+        # 4b. Option expiration allowlist — a contract expiring sooner or
+        # later than this window is rejected outright, the same
+        # "reject by default" treatment as the symbol allowlist above.
+        if proposal.asset_type == AssetType.OPTION:
+            expiration_ok, expiration_reject_reason = self._check_option_expiration_window(proposal)
+            checks["expiration_allowed"] = expiration_ok
+            if expiration_reject_reason:
+                rejections.append(expiration_reject_reason)
 
         # 5. Quote freshness — a stale or missing quote invalidates any
         # price-derived check below, so this runs before them and they
@@ -197,6 +217,29 @@ class RiskChecker:
             )
         return True, None
 
+    def _check_option_expiration_window(self, proposal: TradeProposal) -> tuple[bool, Optional[str]]:
+        try:
+            expiration = parse_occ_symbol(proposal.symbol).expiration
+        except ValueError as exc:
+            # validate_symbol_matches_asset_type on TradeProposal already
+            # rejects a malformed OCC symbol before it gets this far in
+            # normal use — this is a defensive fail-closed fallback, not
+            # the primary line of defense.
+            return False, f"Could not parse expiration from option symbol '{proposal.symbol}': {exc}"
+
+        days_out = (expiration - date.today()).days
+        if days_out < self.settings.min_option_expiration_days:
+            return False, (
+                f"Option expires in {days_out} day(s), below the minimum "
+                f"{self.settings.min_option_expiration_days} — likely an accidental near-dated/0DTE trade"
+            )
+        if days_out > self.settings.max_option_expiration_days:
+            return False, (
+                f"Option expires in {days_out} day(s), beyond the maximum "
+                f"{self.settings.max_option_expiration_days} this system is configured to trade"
+            )
+        return True, None
+
     @staticmethod
     def _calculate_notional(
         proposal: TradeProposal, quote: Optional[dict[str, Any]], quote_fresh: bool
@@ -207,15 +250,21 @@ class RiskChecker:
         MARKET/STOP orders. Returns None — not a silent $0 — when neither
         is available, since a $0 notional previously made the notional-limit
         check vacuously true for every MARKET order regardless of size.
+
+        An option contract represents 100 shares of the underlying — the
+        real dollar risk is premium x 100 x contracts, not premium x
+        contracts, which would understate it 100-fold.
         """
+        multiplier = _OPTION_CONTRACT_MULTIPLIER if proposal.asset_type == AssetType.OPTION else Decimal(1)
+
         if proposal.limit_price:
-            return proposal.limit_price * Decimal(proposal.quantity)
+            return proposal.limit_price * Decimal(proposal.quantity) * multiplier
 
         if quote_fresh and quote is not None:
             reference_price = quote.get("last") or quote.get("bid") or quote.get("ask")
             if reference_price:
                 try:
-                    return Decimal(str(reference_price)) * Decimal(proposal.quantity)
+                    return Decimal(str(reference_price)) * Decimal(proposal.quantity) * multiplier
                 except InvalidOperation:
                     return None
 
