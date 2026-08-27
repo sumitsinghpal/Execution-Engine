@@ -169,6 +169,13 @@ class TestRunBacktest:
         )
 
         assert result.total_trades == 0
+        # This is the real, reproduced bug this field exists for: QQQ/SPY/
+        # IWM trade at $300-770/share, and a $100 notional silently
+        # produced "0 trades" for every strategy on every symbol — reading
+        # as "the strategies don't work" when the real story is "the
+        # budget doesn't reach even 1 share here." Distinguishing the two
+        # is the whole point of this field.
+        assert result.signals_too_small_for_notional == 1
 
     def test_no_signal_ever_fires_yields_an_empty_flat_result(self):
         bars = [_bar("d0", 100), _bar("d1", 100), _bar("d2", 100)]

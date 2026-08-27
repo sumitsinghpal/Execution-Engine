@@ -72,6 +72,13 @@ class BacktestResult:
     profit_factor: Optional[float]
     max_drawdown_pct: float
     total_return_pct: float
+    # Signals that fired but were skipped because notional_per_trade_usd
+    # doesn't cover even 1 share at that entry price (e.g. $100 against a
+    # $700 QQQ) — distinct from the strategy simply never firing. Without
+    # this, a too-small notional against an expensive symbol reads as "the
+    # strategy doesn't work here" when the real story is "the budget
+    # doesn't reach this symbol at all."
+    signals_too_small_for_notional: int = 0
     trades: list[BacktestTrade] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +94,7 @@ class BacktestResult:
             "profit_factor": self.profit_factor,
             "max_drawdown_pct": self.max_drawdown_pct,
             "total_return_pct": self.total_return_pct,
+            "signals_too_small_for_notional": self.signals_too_small_for_notional,
             "trades": [t.to_dict() for t in self.trades],
         }
 
@@ -112,6 +120,7 @@ def run_backtest(
     """
     open_trade: Optional[BacktestTrade] = None
     trades: list[BacktestTrade] = []
+    signals_too_small_for_notional = 0
 
     for i, bar in enumerate(bars):
         if open_trade is not None:
@@ -139,7 +148,8 @@ def run_backtest(
         )
         quantity = size_position(notional_per_trade_usd, detail.entry_price)
         if quantity < 1:
-            continue  # too little capital allocated per trade for even one share — skip, matches live behavior
+            signals_too_small_for_notional += 1  # too little capital allocated for even one share — matches live behavior, but tracked so it's not confused with "the strategy never fires"
+            continue
 
         open_trade = BacktestTrade(
             symbol=symbol,
@@ -163,10 +173,12 @@ def run_backtest(
         open_trade.r_multiple = (last_close - open_trade.entry_price) / risk_distance if risk_distance else None
         trades.append(open_trade)
 
-    return _summarize(symbol, strategy.id, trades, starting_capital)
+    return _summarize(symbol, strategy.id, trades, starting_capital, signals_too_small_for_notional)
 
 
-def _summarize(symbol: str, strategy_id: str, trades: list[BacktestTrade], starting_capital: float) -> BacktestResult:
+def _summarize(
+    symbol: str, strategy_id: str, trades: list[BacktestTrade], starting_capital: float, signals_too_small_for_notional: int = 0
+) -> BacktestResult:
     equity = starting_capital
     peak = starting_capital
     max_drawdown_pct = 0.0
@@ -210,6 +222,7 @@ def _summarize(symbol: str, strategy_id: str, trades: list[BacktestTrade], start
         profit_factor=profit_factor,
         max_drawdown_pct=max_drawdown_pct,
         total_return_pct=total_return_pct,
+        signals_too_small_for_notional=signals_too_small_for_notional,
         trades=trades,
     )
 

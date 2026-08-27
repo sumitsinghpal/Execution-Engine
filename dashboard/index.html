@@ -268,6 +268,12 @@
   .strategy-famous { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
   .strategy-desc { font-size: 12px; color: var(--ink-muted); margin-top: 7px; line-height: 1.45; }
   .strategy-rules { font-size: 11px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 7px; }
+  .strategy-result-line {
+    font-size: 11.5px; font-family: var(--font-mono); color: var(--ink-muted);
+    margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--border);
+  }
+  .strategy-result-line.muted { color: var(--ink-faint); font-style: italic; }
+  .strategy-result-line .up { color: var(--buy); } .strategy-result-line .down { color: var(--sell); }
   .strategy-scan-btn {
     margin-top: 10px; width: 100%; border: 1px solid var(--border-strong); background: var(--raised); color: var(--ink);
     border-radius: 7px; padding: 7px 0; font-size: 12px; font-weight: 700; cursor: pointer; font-family: var(--font-display);
@@ -858,7 +864,7 @@
         <div>
           <div class="strategy-column-title">${CATEGORY_LABELS[cat]}</div>
           ${(byCategory[cat] || []).map(s => `
-            <div class="strategy-card">
+            <div class="strategy-card" data-strategy-id="${s.id}" data-bar-interval="${s.bar_interval}">
               <div class="strategy-card-top">
                 <div>
                   <div class="strategy-name">${s.name}</div>
@@ -868,6 +874,7 @@
               </div>
               <div class="strategy-desc">${s.description}</div>
               <div class="strategy-rules">Stop: ${s.stop_rule}<br>Target: ${s.target_rule}</div>
+              <div class="strategy-result-line" data-result-for="${s.id}">Backtest: loading…</div>
               <button class="strategy-scan-btn" data-strategy-id="${s.id}">Scan ${$('fSymbol').value.trim().toUpperCase() || 'symbol'}</button>
             </div>
           `).join('')}
@@ -877,6 +884,7 @@
       el.querySelectorAll('.strategy-scan-btn').forEach(btn => {
         btn.addEventListener('click', () => scanStrategy(btn.dataset.strategyId, btn));
       });
+      renderStrategyResultLines();
     } catch (e) {
       el.innerHTML = '<div class="empty-note">Could not load the strategy catalog.</div>';
     }
@@ -1015,18 +1023,26 @@
     loadChart(initial);
   }
 
-  // ---- Live updates: 3-year backtest (POST /v1/backtest/run, defaults =
-  // the same 3 strategies/watchlist the autonomous trader uses) plus
-  // recent autonomous-trader activity, cached in localStorage and
-  // refreshed on a 3-hour cadence — "3 hours" is the refresh interval,
-  // not a 3-hour backtest window (the strategies trade on daily bars, so
-  // a 3-hour lookback wouldn't mean anything to them). A stale cache is
-  // shown immediately on load while a fresh one computes in the
-  // background, so reopening the dashboard is never blocked on a
-  // network-bound backtest.
-  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v1';
+  // ---- Live updates: 3-year backtest at a $100-per-trade notional
+  // (POST /v1/backtest/run, every DAILY-bar strategy in the catalog ×
+  // QQQ/SPY/IWM) plus recent autonomous-trader activity, cached in
+  // localStorage and refreshed on a 3-hour cadence — "3 hours" is the
+  // refresh interval, not a 3-hour backtest window (these strategies
+  // trade on daily bars, so a 3-hour lookback wouldn't mean anything to
+  // them). $100/trade is illustrative sizing for this card specifically —
+  // NOT what the live autonomous trader actually risks per trade (that's
+  // settings.autonomous_notional_per_trade_usd, $1000 by default; see
+  // src/config.py). A stale cache is shown immediately on load while a
+  // fresh one computes in the background, so reopening the dashboard is
+  // never blocked on a network-bound backtest. The two INTRADAY
+  // strategies (ORB, VWAP Reversion) trade 5-minute bars and are excluded
+  // — this backtest only ever fetches daily history, so backtesting them
+  // against it would silently produce meaningless numbers, not real ones.
+  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v2'; // bumped from v1: the cached shape gained intradayStrategyIds and the $100-notional/all-daily-strategies request — a v1 blob would silently mis-render every strategy card as "no trades fired"
   const LIVE_UPDATES_INTERVAL_MS = 3 * 60 * 60 * 1000;
+  const LIVE_UPDATES_NOTIONAL_USD = 100;
   let liveUpdatesTimer = null;
+  let strategyAggCache = null; // { byStrategy: {id: {trades, wins, pnl}}, intradayIds: [id, ...] } — set once live-updates data is available
 
   function readLiveUpdatesCache() {
     try { const raw = localStorage.getItem(LIVE_UPDATES_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
@@ -1040,18 +1056,81 @@
     const start = new Date(end); start.setFullYear(start.getFullYear() - 3);
     const fmt = (d) => d.toISOString().slice(0, 10);
 
+    const stratRes = await api('/v1/strategies');
+    const dailyStrategyIds = stratRes.strategies.filter(s => s.bar_interval === 'daily').map(s => s.id);
+    const intradayStrategyIds = stratRes.strategies.filter(s => s.bar_interval !== 'daily').map(s => s.id);
+
     const [backtest, positionsRes] = await Promise.all([
-      api('/v1/backtest/run', { method: 'POST', body: JSON.stringify({ start_date: fmt(start), end_date: fmt(end) }) }),
+      api('/v1/backtest/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          symbols: ['QQQ', 'SPY', 'IWM'],
+          strategy_ids: dailyStrategyIds,
+          start_date: fmt(start),
+          end_date: fmt(end),
+          notional_per_trade_usd: LIVE_UPDATES_NOTIONAL_USD,
+        }),
+      }),
       api('/v1/autonomous/positions?limit=6').catch(() => ({ positions: [] })),
     ]);
 
-    return { backtest, positions: positionsRes.positions || [], computedAt: new Date().toISOString() };
+    return { backtest, intradayStrategyIds, positions: positionsRes.positions || [], computedAt: new Date().toISOString() };
+  }
+
+  function aggregateByStrategy(backtest) {
+    const byStrategy = {};
+    for (const r of (backtest && backtest.results) || []) {
+      const a = byStrategy[r.strategy_id] || { trades: 0, wins: 0, pnl: 0, tooSmall: 0 };
+      a.trades += r.total_trades;
+      a.wins += r.wins;
+      a.pnl += (r.ending_capital - r.starting_capital);
+      a.tooSmall += r.signals_too_small_for_notional || 0;
+      byStrategy[r.strategy_id] = a;
+    }
+    return byStrategy;
+  }
+
+  function renderStrategyResultLines() {
+    document.querySelectorAll('.strategy-card').forEach(card => {
+      const id = card.dataset.strategyId;
+      const line = card.querySelector('.strategy-result-line');
+      if (!line) return;
+
+      if (!strategyAggCache) return; // leave the "Backtest: loading…" placeholder from the initial render
+
+      if (strategyAggCache.intradayIds.includes(id)) {
+        line.textContent = 'Intraday strategy — not backtestable against daily history';
+        line.classList.add('muted');
+        return;
+      }
+
+      const a = strategyAggCache.byStrategy[id];
+      if (!a || (a.trades === 0 && a.tooSmall === 0)) {
+        line.textContent = `3yr backtest @ $${LIVE_UPDATES_NOTIONAL_USD}/trade: no entry signal fired on QQQ/SPY/IWM`;
+        return;
+      }
+      if (a.trades === 0 && a.tooSmall > 0) {
+        // The strategy fired — $100 just doesn't buy 1 share of these
+        // symbols (QQQ/SPY/IWM all trade well into the hundreds). Distinct
+        // from "never fires" so this doesn't read as a broken strategy.
+        line.textContent = `3yr backtest: ${a.tooSmall} signal${a.tooSmall === 1 ? '' : 's'} fired, but $${LIVE_UPDATES_NOTIONAL_USD} doesn't cover 1 share of QQQ/SPY/IWM`;
+        line.classList.add('muted');
+        return;
+      }
+      const winRate = Math.round((a.wins / a.trades) * 100);
+      const pnlClass = a.pnl >= 0 ? 'up' : 'down';
+      line.innerHTML =
+        `3yr backtest @ $${LIVE_UPDATES_NOTIONAL_USD}/trade: <b>${a.trades}</b> trades used · ${winRate}% win · ` +
+        `<b class="${pnlClass}">${a.pnl >= 0 ? '+' : '−'}${money(Math.abs(a.pnl))}</b> profit`;
+    });
   }
 
   function renderLiveUpdates(data) {
     const s = (data.backtest && data.backtest.summary) || {};
+    strategyAggCache = { byStrategy: aggregateByStrategy(data.backtest), intradayIds: data.intradayStrategyIds || [] };
+    renderStrategyResultLines();
     $('liveUpdatesMeta').textContent =
-      `Last computed ${timeAgo(data.computedAt)} · 3yr backtest (QQQ/SPY/IWM × Golden Cross/Turtle/RSI2) + live autonomous activity`;
+      `Last computed ${timeAgo(data.computedAt)} · 3yr backtest @ $${LIVE_UPDATES_NOTIONAL_USD}/trade (QQQ/SPY/IWM × every daily strategy) + live autonomous activity`;
 
     const pairRows = ((data.backtest && data.backtest.results) || [])
       .slice()
