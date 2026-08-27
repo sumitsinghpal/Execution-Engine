@@ -22,6 +22,8 @@ from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
 from src.execution.algo_slices import AlgoSliceRecord
 from src.execution.drawdown_guard import DrawdownGuard
+from src.backtest.api_models import BacktestRequest
+from src.backtest.runner import run_backtest_suite, summarize_suite
 from src.execution.autonomous_positions import AutonomousPositionService
 from src.execution.autonomous_trader import autonomous_cycle_once, run_autonomous_loop
 from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
@@ -945,6 +947,47 @@ async def dismiss_external_signal(trade_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"External signal {trade_id} not found")
     updated = ExternalSignalService(db).mark_status(trade_id, ExternalSignalStatus.DISMISSED)
     return updated.to_dict()
+
+
+@app.post("/v1/backtest/run")
+async def run_backtest_endpoint(request: BacktestRequest):
+    """
+    Backtests the exact live rules src/execution/autonomous_trader.py runs
+    (same strategy.evaluate() functions, same standardized
+    compute_standardized_exit()/size_position()) against real historical
+    daily bars (yfinance — see src/backtest/data_source.py), not the
+    synthetic PaperBrokerAdapter series used for live paper trading.
+
+    Read-only and has nothing to do with the order/risk/kill-switch
+    pipeline — it never previews, approves, or executes anything, it only
+    fetches market data and reports what the rules would have done with
+    it. Fetches real network data per (symbol, strategy_id) pair, so
+    symbols/date-range are capped (see src/backtest/api_models.py).
+    """
+    unknown_strategies = [s for s in request.strategy_ids if s not in STRATEGIES]
+    if unknown_strategies:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy_id(s): {unknown_strategies}")
+
+    try:
+        results, errors = await run_backtest_suite(
+            request.symbols,
+            request.strategy_ids,
+            request.start_date,
+            request.end_date,
+            risk_pct=request.risk_pct,
+            reward_risk_ratio=request.reward_risk_ratio,
+            notional_per_trade_usd=request.notional_per_trade_usd,
+            starting_capital=request.starting_capital,
+        )
+    except Exception as e:
+        logger.error("backtest_run_error", error=str(e))
+        raise HTTPException(status_code=502, detail=f"Backtest failed: {e}")
+
+    return {
+        "results": [r.to_dict() for r in results],
+        "errors": errors,
+        "summary": summarize_suite(results),
+    }
 
 
 @app.get("/v1/autonomous/status")
