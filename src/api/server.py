@@ -35,6 +35,7 @@ from src.execution.ep_edge_earnings_adapter import (
 from src.execution.executor import Executor, OrderRecord
 from src.execution.external_signals import ExternalSignalStatus, ExternalSignalService
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
+from src.execution.multi_leg import LegRef, execute_multi_leg_order, preview_multi_leg_order
 from src.execution.position_reconciliation import PositionReconciliationService
 from src.execution.reconciliation import ReconciliationService
 from src.execution.strategy_scanner import run_scanner_loop, scan_once
@@ -42,6 +43,7 @@ from src.execution.strategy_signals import SignalStatus, StrategySignalService
 from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.integrations.edge_tf_client import EdgeTFGatewayError
 from src.logging_config import configure_logging, get_logger
+from src.models.multi_leg_orders import MultiLegExecuteRequest, MultiLegPreviewRequest
 from src.models.orders import (
     TradeProposal,
     OrderPreview,
@@ -338,6 +340,90 @@ async def execute_order(
         if external_signal is not None:
             ExternalSignalService(db).mark_status(request.decision_id, ExternalSignalStatus.FAILED)
         raise HTTPException(status_code=500, detail="Execution failed")
+
+
+@app.post("/v1/orders/multi-leg/preview", dependencies=[Depends(verify_admin_key)])
+async def preview_multi_leg(
+    request: MultiLegPreviewRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Preview a 2-leg options combo (vertical spread, straddle, strangle, or
+    an unvalidated "custom" pair) as ONE logical trade. Each leg still
+    runs through the exact same Executor.preview_order risk checks
+    (allowlists, notional caps, kill switch, stale-quote protection) as
+    any other order — this just validates the combo's shape (see
+    src/execution/multi_leg.py's validate_combo_structure) and combines
+    the per-leg results into one net debit/credit and, for a vertical
+    spread specifically, a standard max-loss/max-profit figure.
+
+    Does not execute anything — see POST /v1/orders/multi-leg/execute,
+    which takes each leg's own (decision_id, preview_id) from this
+    response the same way a normal single-leg order requires from
+    POST /v1/orders/preview.
+    """
+    try:
+        legs = [leg.to_trade_proposal() for leg in request.legs]
+        executor = Executor(session=db)
+        combo_preview = await preview_multi_leg_order(executor, legs, combo_type=request.combo_type)
+        return combo_preview.to_dict()
+    except ValueError as e:
+        logger.error("multi_leg_preview_validation_error", error=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except BrokerAuthenticationError as e:
+        logger.critical("multi_leg_preview_broker_auth_failed", error=str(e))
+        raise HTTPException(status_code=503, detail=f"Broker authentication failed; trading halted pending re-authentication: {e}")
+    except BrokerAPIOutageError as e:
+        logger.critical("multi_leg_preview_broker_api_outage", error=str(e))
+        raise HTTPException(status_code=503, detail=f"Broker API unreachable, try again shortly: {e}")
+
+
+@app.post("/v1/orders/multi-leg/execute", dependencies=[Depends(verify_admin_key)])
+async def execute_multi_leg(
+    request: MultiLegExecuteRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Execute a previously-previewed combo — each leg by its own
+    (decision_id, preview_id), same as a normal single-leg
+    POST /v1/orders/execute. Legs execute sequentially; if a later leg
+    fails after an earlier one already went through, this agent's kill
+    switch is tripped immediately (a naked, unhedged leg is now open) —
+    see src/execution/multi_leg.py's module docstring for why. The
+    response's fully_executed/failed_leg_index tell you which case
+    happened; a combo returning fully_executed=false has already been
+    partially executed and needs manual review, not a blind retry.
+    """
+    order_by_decision_id: dict[str, OrderRecord] = {}
+    for leg_ref in request.legs:
+        order = db.exec(select(OrderRecord).where(OrderRecord.decision_id == leg_ref.decision_id)).first()
+        if order is None:
+            raise HTTPException(status_code=404, detail=f"No previewed order found for decision_id {leg_ref.decision_id!r}")
+        order_by_decision_id[leg_ref.decision_id] = order
+
+    legs = [
+        LegRef(
+            decision_id=leg_ref.decision_id, preview_id=leg_ref.preview_id,
+            agent_id=order_by_decision_id[leg_ref.decision_id].agent_id,
+            symbol=order_by_decision_id[leg_ref.decision_id].symbol,
+        )
+        for leg_ref in request.legs
+    ]
+
+    try:
+        executor = Executor(session=db)
+        result = await execute_multi_leg_order(
+            executor, combo_id=request.combo_id, legs=legs,
+            approved_by=request.approved_by, attestation=request.attestation,
+        )
+        logger.info(
+            "multi_leg_execute_complete", combo_id=request.combo_id,
+            fully_executed=result.fully_executed, legs_executed=len(result.executed_legs),
+        )
+        return result.to_dict()
+    except BrokerAuthenticationError as e:
+        logger.critical("multi_leg_execute_broker_auth_failed", combo_id=request.combo_id, error=str(e))
+        raise HTTPException(status_code=503, detail=f"Broker authentication failed; trading halted pending re-authentication: {e}")
 
 
 @app.get("/v1/orders", dependencies=[Depends(verify_admin_key)])

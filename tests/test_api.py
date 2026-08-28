@@ -197,6 +197,122 @@ class TestExecuteEndpoint:
         assert second.json()["execution_id"] == first.json()["execution_id"]
 
 
+class TestMultiLegEndpoints:
+    """
+    POST /v1/orders/multi-leg/preview and /execute — a 2-leg options combo
+    previewed and executed against the app's real broker (PaperBrokerAdapter,
+    which prices OPTION symbols with real synthetic option pricing — see
+    src/brokers/paper.py). Runs the full HTTP round trip specifically to
+    catch a JSON-serialization-boundary bug the way
+    tests/test_backtest_api.py caught the profit_factor=inf bug: a
+    pure-Python-level test of src/execution/multi_leg.py wouldn't cross
+    that boundary at all.
+    """
+
+    @staticmethod
+    def _occ(underlying="QQQ", days_out=45, right="C", strike="400"):
+        from src.models.occ_symbol import format_occ_symbol
+        return format_occ_symbol(underlying, (datetime.utcnow() + timedelta(days=days_out)).date(), right, Decimal(strike))
+
+    def _leg_payload(self, decision_id, symbol, instruction, quantity=1):
+        return {
+            "decision_id": decision_id, "agent_id": "default", "account": "primary",
+            "symbol": symbol, "instruction": instruction, "quantity": quantity, "order_type": "MARKET",
+        }
+
+    def test_preview_a_vertical_spread_returns_combined_risk_figures(self, client):
+        long_leg = self._occ(strike="400")
+        short_leg = self._occ(strike="410")
+
+        response = client.post(
+            "/v1/orders/multi-leg/preview",
+            json={
+                "combo_type": "vertical_spread",
+                "legs": [
+                    self._leg_payload("mlapi-vd-1", long_leg, "BUY"),
+                    self._leg_payload("mlapi-vd-2", short_leg, "SELL"),
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["combo_type"] == "vertical_spread"
+        assert data["risk_verdict"] == "APPROVED"
+        assert len(data["legs"]) == 2
+        assert isinstance(data["net_debit_or_credit_usd"], (int, float))
+        assert isinstance(data["max_loss_usd"], (int, float))
+        assert isinstance(data["max_profit_usd"], (int, float))
+        # Standard vertical spread identity: what you could lose plus what you could still gain covers the full $1000 strike width (100 x $10 x 1 contract).
+        assert data["max_loss_usd"] + data["max_profit_usd"] == pytest.approx(1000.0)
+
+    def test_preview_rejects_a_structurally_invalid_combo(self, client):
+        same_symbol = self._occ(strike="400")
+
+        response = client.post(
+            "/v1/orders/multi-leg/preview",
+            json={
+                "combo_type": "vertical_spread",
+                "legs": [
+                    self._leg_payload("mlapi-bad-1", same_symbol, "BUY"),
+                    self._leg_payload("mlapi-bad-2", same_symbol, "SELL"),
+                ],
+            },
+        )
+
+        assert response.status_code == 400
+
+    def test_preview_then_execute_a_straddle_end_to_end(self, client):
+        call_leg = self._occ(strike="400", right="C")
+        put_leg = self._occ(strike="400", right="P")
+
+        preview_response = client.post(
+            "/v1/orders/multi-leg/preview",
+            json={
+                "combo_type": "straddle",
+                "legs": [
+                    self._leg_payload("mlapi-st-1", call_leg, "BUY"),
+                    self._leg_payload("mlapi-st-2", put_leg, "BUY"),
+                ],
+            },
+        )
+        assert preview_response.status_code == 200
+        preview = preview_response.json()
+        assert preview["risk_verdict"] == "APPROVED"
+
+        execute_response = client.post(
+            "/v1/orders/multi-leg/execute",
+            json={
+                "combo_id": preview["combo_id"],
+                "legs": [{"decision_id": leg["decision_id"], "preview_id": leg["preview_id"]} for leg in preview["legs"]],
+                "approved_by": "test_operator",
+                "attestation": "Approved straddle for integration test",
+            },
+        )
+
+        assert execute_response.status_code == 200
+        result = execute_response.json()
+        assert result["fully_executed"] is True
+        assert len(result["executed_legs"]) == 2
+        assert result["failed_leg_index"] is None
+
+    def test_execute_with_an_unknown_decision_id_returns_404(self, client):
+        response = client.post(
+            "/v1/orders/multi-leg/execute",
+            json={
+                "combo_id": "combo-does-not-exist",
+                "legs": [
+                    {"decision_id": "never-previewed-1", "preview_id": "preview-fake-1"},
+                    {"decision_id": "never-previewed-2", "preview_id": "preview-fake-2"},
+                ],
+                "approved_by": "test_operator",
+                "attestation": "should not reach execution",
+            },
+        )
+
+        assert response.status_code == 404
+
+
 class TestKillSwitchActuallyBlocksOrders:
     """
     The kill switch admin endpoints and the actual order-blocking check used
