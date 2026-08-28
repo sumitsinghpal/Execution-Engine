@@ -57,7 +57,10 @@ def _fake_strategy(trigger_at_index: int, repeat: bool = False) -> StrategyDefin
     )
 
 
-_RISK_KWARGS = dict(risk_pct=Decimal("0.01"), reward_risk_ratio=Decimal("2"), notional_per_trade_usd=Decimal("1000"))
+_RISK_KWARGS = dict(
+    risk_pct=Decimal("0.01"), reward_risk_ratio=Decimal("2"), notional_per_trade_usd=Decimal("1000"),
+    slippage_bps=Decimal("0"), commission_per_order_usd=Decimal("0"),  # exact-fill arithmetic below assumes zero of both; see TestSlippageAndCommission for those specifically
+)
 
 
 class TestRunBacktest:
@@ -238,3 +241,92 @@ class TestSummaryMetrics:
 
         # Drawdown from peak 100_020 to 100_010 = 10 / 100_020 * 100
         assert result.max_drawdown_pct == pytest.approx(10 / 100_020 * 100, rel=1e-3)
+
+
+class TestSlippageAndCommission:
+    def test_slippage_worsens_both_entry_and_exit_fills(self):
+        bars = [
+            _bar("d0", 100), _bar("d1", 100),
+            _bar("d2", 100),  # entry signal at close=100
+            _bar("d3", 100, high=103, low=99.5),  # target (102, pre-slippage) hit
+        ]
+        result = run_backtest(
+            bars, "TEST", _fake_strategy(trigger_at_index=2), starting_capital=100_000,
+            risk_pct=Decimal("0.01"), reward_risk_ratio=Decimal("2"), notional_per_trade_usd=Decimal("1000"),
+            slippage_bps=Decimal("100"), commission_per_order_usd=Decimal("0"),  # 1% — exaggerated on purpose so the effect is unmistakable
+        )
+
+        trade = result.trades[0]
+        # Entry: BUY fills worse (higher) — 100 * 1.01 = 101
+        assert trade.entry_price == pytest.approx(101.0)
+        # Exit: SELL fills worse (lower) — 102 * 0.99 = 100.98
+        assert trade.exit_price == pytest.approx(100.98)
+
+    def test_commission_is_charged_on_a_real_exit_but_not_an_open_at_end_mark(self):
+        bars_with_exit = [
+            _bar("d0", 100), _bar("d1", 100),
+            _bar("d2", 100),
+            _bar("d3", 100, high=103, low=99.5),  # target hit — a real exit
+        ]
+        result_with_exit = run_backtest(
+            bars_with_exit, "TEST", _fake_strategy(trigger_at_index=2), starting_capital=100_000,
+            risk_pct=Decimal("0.01"), reward_risk_ratio=Decimal("2"), notional_per_trade_usd=Decimal("1000"),
+            slippage_bps=Decimal("0"), commission_per_order_usd=Decimal("5"),
+        )
+        # (102-100)*10 - 5 = 15, not the commission-free 20
+        assert result_with_exit.trades[0].pnl_usd == pytest.approx(15.0)
+
+        bars_open_at_end = [
+            _bar("d0", 100), _bar("d1", 100),
+            _bar("d2", 100),  # entry
+            _bar("d3", 100.5, high=100.8, low=99.5),  # never resolves — OPEN_AT_END
+        ]
+        result_open = run_backtest(
+            bars_open_at_end, "TEST", _fake_strategy(trigger_at_index=2), starting_capital=100_000,
+            risk_pct=Decimal("0.01"), reward_risk_ratio=Decimal("2"), notional_per_trade_usd=Decimal("1000"),
+            slippage_bps=Decimal("0"), commission_per_order_usd=Decimal("5"),
+        )
+        # (100.5-100)*10 = 5, no commission deducted — nothing was actually bought or sold at exit
+        assert result_open.trades[0].pnl_usd == pytest.approx(5.0)
+
+
+class TestBenchmarkReturn:
+    def test_benchmark_is_buy_and_hold_of_the_same_symbol_over_the_same_window(self):
+        bars = [_bar("d0", 100), _bar("d1", 105), _bar("d2", 110)]
+        strategy = _fake_strategy(trigger_at_index=999)  # never fires — isolates the benchmark calc
+
+        result = run_backtest(bars, "TEST", strategy, starting_capital=100_000, **_RISK_KWARGS)
+
+        assert result.benchmark_return_pct == pytest.approx(10.0)  # (110-100)/100 * 100
+
+    def test_empty_bars_returns_a_flat_zero_benchmark_not_a_crash(self):
+        strategy = _fake_strategy(trigger_at_index=0)
+        result = run_backtest([], "TEST", strategy, starting_capital=100_000, **_RISK_KWARGS)
+        assert result.benchmark_return_pct == 0.0
+        assert result.total_trades == 0
+
+
+class TestEquityCurve:
+    def test_equity_curve_starts_at_starting_capital_and_has_one_point_per_closed_trade(self):
+        bars = [
+            _bar("d0", 100), _bar("d1", 100),
+            _bar("d2", 100), _bar("d3", 100, high=103, low=99.5),  # win, closes d3
+            _bar("d4", 100), _bar("d5", 100, high=100.5, low=98.0),  # loss, closes d5
+        ]
+        strategy = _fake_strategy(trigger_at_index=0)
+
+        def fires_on(bars):
+            if bars[-1].timestamp in ("d2", "d4"):
+                return SignalDetail(entry_price=bars[-1].close, stop_loss_price=0, take_profit_price=0, rationale="fake")
+            return None
+
+        strategy.evaluate = fires_on
+        result = run_backtest(bars, "TEST", strategy, starting_capital=100_000, **_RISK_KWARGS)
+
+        assert len(result.equity_curve) == 3  # starting point + 2 closed trades
+        assert result.equity_curve[0].date == "d0"
+        assert result.equity_curve[0].equity == pytest.approx(100_000)
+        assert result.equity_curve[1].date == "d3"
+        assert result.equity_curve[1].equity == pytest.approx(100_020)  # +20 win
+        assert result.equity_curve[2].date == "d5"
+        assert result.equity_curve[2].equity == pytest.approx(100_010)  # -10 loss

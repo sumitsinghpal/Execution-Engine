@@ -27,6 +27,8 @@ async def run_backtest_for_symbol(
     reward_risk_ratio: Decimal,
     notional_per_trade_usd: Decimal,
     starting_capital: float = 100_000.0,
+    slippage_bps: Decimal = Decimal("5"),
+    commission_per_order_usd: Decimal = Decimal("0"),
 ) -> BacktestResult:
     strategy = get_strategy(strategy_id)  # raises UnknownStrategyError
 
@@ -50,6 +52,8 @@ async def run_backtest_for_symbol(
         reward_risk_ratio=reward_risk_ratio,
         notional_per_trade_usd=notional_per_trade_usd,
         starting_capital=starting_capital,
+        slippage_bps=slippage_bps,
+        commission_per_order_usd=commission_per_order_usd,
     )
 
 
@@ -63,6 +67,8 @@ async def run_backtest_suite(
     reward_risk_ratio: Decimal,
     notional_per_trade_usd: Decimal,
     starting_capital: float = 100_000.0,
+    slippage_bps: Decimal = Decimal("5"),
+    commission_per_order_usd: Decimal = Decimal("0"),
 ) -> tuple[list[BacktestResult], list[dict]]:
     """
     Runs every (symbol, strategy_id) pair, fetching each symbol's history
@@ -114,19 +120,75 @@ async def run_backtest_suite(
                     bars, symbol, strategy,
                     risk_pct=risk_pct, reward_risk_ratio=reward_risk_ratio,
                     notional_per_trade_usd=notional_per_trade_usd, starting_capital=starting_capital,
+                    slippage_bps=slippage_bps, commission_per_order_usd=commission_per_order_usd,
                 )
             )
 
     return results, errors
 
 
-def summarize_suite(results: list[BacktestResult]) -> dict:
+def combine_equity_curves(results: list[BacktestResult], starting_capital: float = 100_000.0) -> dict:
+    """
+    Merges every (symbol, strategy) pair's closed trades into ONE
+    chronological equity curve sharing a single starting_capital — what
+    running the whole suite together, out of one account, would actually
+    have looked like. Each BacktestResult's own equity_curve is computed
+    against ITS OWN independent starting_capital (see BacktestResult's
+    field docs) and isn't summable as-is — the per-pair curves are 6
+    separate $100k accounts, not $600k of combined exposure. This instead
+    walks the underlying trades (sorted by exit_date, so entries and exits
+    from every pair interleave in the order they actually closed) and
+    accumulates their real pnl_usd against one shared base.
+
+    A crude "portfolio" in the sense that every trade still gets its own
+    full notional_per_trade_usd regardless of how many other positions are
+    open elsewhere in the combined curve (no cross-strategy capital
+    rationing) — but it's the first honest combined view: one capital
+    base, one combined drawdown, one number for "did running everything
+    together actually make money."
+    """
+    all_trades = [t for r in results for t in r.trades if t.exit_date is not None]
+    all_trades.sort(key=lambda t: t.exit_date)
+
+    first_dates = [r.equity_curve[0].date for r in results if r.equity_curve]
+    first_date = min(first_dates) if first_dates else None
+
+    equity = starting_capital
+    peak = starting_capital
+    max_drawdown_pct = 0.0
+    curve = [{"date": first_date, "equity": equity}] if first_date else []
+
+    for t in all_trades:
+        equity += t.pnl_usd or 0.0
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown_pct = max(max_drawdown_pct, (peak - equity) / peak * 100)
+        curve.append({"date": t.exit_date, "equity": equity})
+
+    total_return_pct = (equity - starting_capital) / starting_capital * 100 if starting_capital else 0.0
+
+    return {
+        "starting_capital": starting_capital,
+        "ending_capital": equity,
+        "total_return_pct": total_return_pct,
+        "max_drawdown_pct": max_drawdown_pct,
+        "equity_curve": curve,
+    }
+
+
+def summarize_suite(results: list[BacktestResult], *, combined_starting_capital: float = 100_000.0) -> dict:
     """Combined stats across every (symbol, strategy) pair in a suite — the headline numbers for a backtest report."""
     total_trades = sum(r.total_trades for r in results)
     wins = sum(r.wins for r in results)
     losses = sum(r.losses for r in results)
     total_pnl = sum(r.ending_capital - r.starting_capital for r in results)
     signals_too_small = sum(r.signals_too_small_for_notional for r in results)
+    # One benchmark_return_pct per symbol (every strategy on the same
+    # symbol over the same window has the identical buy-and-hold figure —
+    # averaging the raw per-pair list would over-weight whichever symbol
+    # happened to have the most strategies fire on it).
+    benchmarks_by_symbol = {r.symbol: r.benchmark_return_pct for r in results}
+    avg_benchmark_return_pct = (sum(benchmarks_by_symbol.values()) / len(benchmarks_by_symbol)) if benchmarks_by_symbol else 0.0
     return {
         "pairs_run": len(results),
         "total_trades": total_trades,
@@ -134,6 +196,7 @@ def summarize_suite(results: list[BacktestResult]) -> dict:
         "losses": losses,
         "win_rate": (wins / total_trades) if total_trades else 0.0,
         "total_pnl_usd": total_pnl,
+        "avg_benchmark_return_pct": avg_benchmark_return_pct,
         # Signals that fired but notional_per_trade_usd didn't cover even
         # 1 share — a high count here (relative to total_trades) means the
         # notional is mismatched to these symbols' prices, not that the
@@ -141,7 +204,17 @@ def summarize_suite(results: list[BacktestResult]) -> dict:
         "signals_too_small_for_notional": signals_too_small,
         "best_pair": max(results, key=lambda r: r.total_return_pct).to_dict() if results else None,
         "worst_pair": min(results, key=lambda r: r.total_return_pct).to_dict() if results else None,
+        # One combined account across every pair in the suite — see
+        # combine_equity_curves() for why this isn't just summing the
+        # per-pair curves.
+        "combined_portfolio": combine_equity_curves(results, starting_capital=combined_starting_capital),
     }
 
 
-__all__ = ["MIN_BARS_REQUIRED", "run_backtest_for_symbol", "run_backtest_suite", "summarize_suite"]
+__all__ = [
+    "MIN_BARS_REQUIRED",
+    "combine_equity_curves",
+    "run_backtest_for_symbol",
+    "run_backtest_suite",
+    "summarize_suite",
+]

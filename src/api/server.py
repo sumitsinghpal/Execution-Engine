@@ -978,6 +978,8 @@ async def run_backtest_endpoint(request: BacktestRequest):
             reward_risk_ratio=request.reward_risk_ratio,
             notional_per_trade_usd=request.notional_per_trade_usd,
             starting_capital=request.starting_capital,
+            slippage_bps=request.slippage_bps,
+            commission_per_order_usd=request.commission_per_order_usd,
         )
     except Exception as e:
         logger.error("backtest_run_error", error=str(e))
@@ -986,7 +988,7 @@ async def run_backtest_endpoint(request: BacktestRequest):
     return {
         "results": [r.to_dict() for r in results],
         "errors": errors,
-        "summary": summarize_suite(results),
+        "summary": summarize_suite(results, combined_starting_capital=request.starting_capital),
     }
 
 

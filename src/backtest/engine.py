@@ -14,6 +14,15 @@ first, so an ambiguous day is scored as a loss rather than a win. Real
 intraday order would determine which actually happened first; daily bars
 alone can't say, and assuming the loss is the standard conservative
 backtesting convention.
+
+Also models two real costs a naive backtest usually omits, both
+configurable: slippage (the fill is worse than the exact stop/target price
+by slippage_bps, in the adverse direction — never applied to an
+OPEN_AT_END mark, since that's not a real fill) and a flat commission per
+order (charged once at entry, again at a real STOP/TARGET exit — never for
+an OPEN_AT_END mark, since no exit order was actually placed). Defaults
+(5bps slippage, $0 commission) assume a liquid ETF on a commission-free
+broker — Schwab included — not a compliance claim for every symbol.
 """
 
 from __future__ import annotations
@@ -60,6 +69,15 @@ class BacktestTrade:
 
 
 @dataclass
+class EquityPoint:
+    date: str
+    equity: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"date": self.date, "equity": self.equity}
+
+
+@dataclass
 class BacktestResult:
     symbol: str
     strategy_id: str
@@ -72,6 +90,18 @@ class BacktestResult:
     profit_factor: Optional[float]
     max_drawdown_pct: float
     total_return_pct: float
+    # Buy-and-hold return of the same symbol over the exact same bar range
+    # — computed for free from bars already fetched for this pair, no
+    # extra network call. The reference every real backtest report shows:
+    # a positive total_return_pct that trails buy-and-hold isn't obviously
+    # a win.
+    benchmark_return_pct: float = 0.0
+    # One point per closed trade (starting_capital at the first bar, then
+    # cumulative realized equity at each exit) — a real, honest equity
+    # curve for a trade-based strategy rather than an interpolated daily
+    # series that would imply precision this system doesn't have between
+    # trades.
+    equity_curve: list[EquityPoint] = field(default_factory=list)
     # Signals that fired but were skipped because notional_per_trade_usd
     # doesn't cover even 1 share at that entry price (e.g. $100 against a
     # $700 QQQ) — distinct from the strategy simply never firing. Without
@@ -94,6 +124,8 @@ class BacktestResult:
             "profit_factor": self.profit_factor,
             "max_drawdown_pct": self.max_drawdown_pct,
             "total_return_pct": self.total_return_pct,
+            "benchmark_return_pct": self.benchmark_return_pct,
+            "equity_curve": [p.to_dict() for p in self.equity_curve],
             "signals_too_small_for_notional": self.signals_too_small_for_notional,
             "trades": [t.to_dict() for t in self.trades],
         }
@@ -108,6 +140,8 @@ def run_backtest(
     reward_risk_ratio: Decimal,
     notional_per_trade_usd: Decimal,
     starting_capital: float = 100_000.0,
+    slippage_bps: Decimal = Decimal("5"),
+    commission_per_order_usd: Decimal = Decimal("0"),
 ) -> BacktestResult:
     """
     Walks the bar series forward once. `strategy.evaluate()` is called on
@@ -118,6 +152,12 @@ def run_backtest(
     autonomous_trader.scan_for_entries()); a signal firing while already
     in a trade is ignored until the current one closes.
     """
+    if not bars:
+        return _summarize(symbol, strategy.id, [], starting_capital, 0, 0.0)
+
+    slippage_frac = float(slippage_bps) / 10_000
+    commission = float(commission_per_order_usd)
+
     open_trade: Optional[BacktestTrade] = None
     trades: list[BacktestTrade] = []
     signals_too_small_for_notional = 0
@@ -127,13 +167,15 @@ def run_backtest(
             hit_stop = bar.low <= open_trade.stop_loss_price
             hit_target = bar.high >= open_trade.take_profit_price
             if hit_stop or hit_target:
-                exit_price = open_trade.stop_loss_price if hit_stop else open_trade.take_profit_price
+                raw_exit_price = open_trade.stop_loss_price if hit_stop else open_trade.take_profit_price
                 exit_reason = "STOP" if hit_stop else "TARGET"  # stop checked first — see module docstring
+                # Long-only exit is a SELL — slippage makes the fill worse, i.e. lower.
+                exit_price = raw_exit_price * (1 - slippage_frac)
                 risk_distance = open_trade.entry_price - open_trade.stop_loss_price
                 open_trade.exit_date = bar.timestamp
                 open_trade.exit_price = exit_price
                 open_trade.exit_reason = exit_reason
-                open_trade.pnl_usd = (exit_price - open_trade.entry_price) * open_trade.quantity
+                open_trade.pnl_usd = (exit_price - open_trade.entry_price) * open_trade.quantity - commission
                 open_trade.r_multiple = (exit_price - open_trade.entry_price) / risk_distance if risk_distance else None
                 trades.append(open_trade)
                 open_trade = None
@@ -151,11 +193,13 @@ def run_backtest(
             signals_too_small_for_notional += 1  # too little capital allocated for even one share — matches live behavior, but tracked so it's not confused with "the strategy never fires"
             continue
 
+        # Long-only entry is a BUY — slippage makes the fill worse, i.e. higher.
+        entry_price = detail.entry_price * (1 + slippage_frac)
         open_trade = BacktestTrade(
             symbol=symbol,
             strategy_id=strategy.id,
             entry_date=bar.timestamp,
-            entry_price=detail.entry_price,
+            entry_price=entry_price,
             stop_loss_price=exit_levels.stop_loss_price,
             take_profit_price=exit_levels.take_profit_price,
             quantity=quantity,
@@ -163,7 +207,9 @@ def run_backtest(
 
     if open_trade is not None:
         # Still open when the data ran out — mark-to-market at the last
-        # close so it's visible, rather than silently dropped from results.
+        # close so it's visible, rather than silently dropped from
+        # results. No slippage/commission here: nothing was actually
+        # bought or sold, this is a valuation, not a fill.
         last_close = bars[-1].close
         risk_distance = open_trade.entry_price - open_trade.stop_loss_price
         open_trade.exit_date = bars[-1].timestamp
@@ -173,11 +219,19 @@ def run_backtest(
         open_trade.r_multiple = (last_close - open_trade.entry_price) / risk_distance if risk_distance else None
         trades.append(open_trade)
 
-    return _summarize(symbol, strategy.id, trades, starting_capital, signals_too_small_for_notional)
+    benchmark_return_pct = (bars[-1].close - bars[0].close) / bars[0].close * 100 if bars[0].close else 0.0
+
+    return _summarize(symbol, strategy.id, trades, starting_capital, signals_too_small_for_notional, benchmark_return_pct, bars[0].timestamp)
 
 
 def _summarize(
-    symbol: str, strategy_id: str, trades: list[BacktestTrade], starting_capital: float, signals_too_small_for_notional: int = 0
+    symbol: str,
+    strategy_id: str,
+    trades: list[BacktestTrade],
+    starting_capital: float,
+    signals_too_small_for_notional: int = 0,
+    benchmark_return_pct: float = 0.0,
+    first_bar_date: Optional[str] = None,
 ) -> BacktestResult:
     equity = starting_capital
     peak = starting_capital
@@ -186,6 +240,7 @@ def _summarize(
     gross_loss = 0.0
     wins = 0
     losses = 0
+    equity_curve: list[EquityPoint] = [EquityPoint(date=first_bar_date, equity=starting_capital)] if first_bar_date else []
 
     for trade in trades:
         pnl = trade.pnl_usd or 0.0
@@ -200,6 +255,7 @@ def _summarize(
         elif pnl < 0:
             losses += 1
             gross_loss += -pnl
+        equity_curve.append(EquityPoint(date=trade.exit_date, equity=equity))
 
     total = len(trades)
     win_rate = wins / total if total else 0.0
@@ -222,9 +278,11 @@ def _summarize(
         profit_factor=profit_factor,
         max_drawdown_pct=max_drawdown_pct,
         total_return_pct=total_return_pct,
+        benchmark_return_pct=benchmark_return_pct,
+        equity_curve=equity_curve,
         signals_too_small_for_notional=signals_too_small_for_notional,
         trades=trades,
     )
 
 
-__all__ = ["BacktestResult", "BacktestTrade", "run_backtest"]
+__all__ = ["BacktestResult", "BacktestTrade", "EquityPoint", "run_backtest"]

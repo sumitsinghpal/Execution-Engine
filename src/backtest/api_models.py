@@ -21,6 +21,12 @@ class BacktestRequest(BaseModel):
     reward_risk_ratio: Decimal = Decimal("2")
     notional_per_trade_usd: Decimal = Decimal("1000")
     starting_capital: float = 100_000.0
+    # 5bps default: a liquid ETF fill a few cents worse than the exact
+    # stop/target price, not a compliance-grade slippage model.
+    slippage_bps: Decimal = Decimal("5")
+    # $0 default: Schwab (and most brokers now) charge no commission on
+    # stock/ETF trades. Set this if modeling a broker that does.
+    commission_per_order_usd: Decimal = Decimal("0")
 
     model_config = {"extra": "forbid"}
 
