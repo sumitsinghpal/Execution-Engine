@@ -100,7 +100,7 @@
     color: var(--ink); font-family: var(--font-mono); font-size: 12px; padding: 7px 10px;
     flex: 1 1 140px; min-width: 0; max-width: 240px;
   }
-  select.account-select {
+  select.account-select, select.currency-select {
     background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
     color: var(--ink); font-family: var(--font-mono); font-size: 12.5px; padding: 7px 10px;
     flex: 0 1 auto; min-width: 0;
@@ -108,6 +108,34 @@
   @media (max-width: 560px) {
     .topbar-right { justify-content: flex-start; }
   }
+
+  button.settings-btn {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--ink-muted); font-size: 15px; width: 34px; height: 34px; flex: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  button.settings-btn:hover { color: var(--ink); background: var(--raised); }
+  .settings-panel { display: none; }
+  .settings-panel.show { display: flex; }
+  .settings-panel {
+    align-items: center; gap: 8px; flex-wrap: wrap; width: 100%;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px; margin-top: 8px;
+  }
+  .settings-panel .settings-field { display: flex; flex-direction: column; gap: 4px; }
+  .settings-panel .settings-field label { font-size: 10.5px; font-weight: 600; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+
+  /* Mode banner — practice vs. real money, shown right under the topbar */
+  .mode-banner {
+    display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-radius: var(--radius-md);
+    font-size: 13px; font-weight: 600; margin-bottom: 18px; border: 1px solid transparent;
+  }
+  .mode-banner.practice { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .mode-banner.live { background: var(--sell-soft); color: var(--sell); border-color: color-mix(in srgb, var(--sell) 30%, transparent); }
+  .mode-banner .icon { font-size: 15px; flex: none; }
+  .mode-banner .sub { font-weight: 500; color: var(--ink-muted); }
+
+  .fx-note { font-size: 11px; color: var(--ink-faint); margin-top: 4px; }
 
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -341,20 +369,30 @@
   <div class="topbar">
     <div class="brand">
       <div class="mark">E</div>
-      <div class="name">EDGE Trading<small>Execution Engine console</small></div>
+      <div class="name">EDGE Trading<small>Your trading account, made simple</small></div>
     </div>
     <div class="topbar-right">
-      <div class="conn-row">
+      <select class="currency-select" id="currencySelect" title="Display currency — your orders always execute in US dollars"></select>
+      <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
+      <button class="pill" id="unlockPill" type="button" title="Unlock your account to place orders or change settings">🔒 <span id="unlockPillLabel">Unlock account</span></button>
+      <button class="settings-btn" id="settingsBtn" type="button" title="Connection settings">⚙</button>
+    </div>
+    <div class="settings-panel" id="settingsPanel">
+      <div class="settings-field">
+        <label for="baseUrl">Server address</label>
         <input class="base-url" id="baseUrl" spellcheck="false" title="Execution-Engine API base URL">
+      </div>
+      <div class="settings-field">
+        <label for="accountSelect">Account</label>
         <select class="account-select" id="accountSelect" title="Account alias"></select>
       </div>
-      <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
-      <button class="pill" id="unlockPill" type="button" title="Set the admin API key — required for everything except health/catalog/market-status">🔒 <span id="unlockPillLabel">Set API key</span></button>
     </div>
   </div>
 
+  <div class="mode-banner" id="modeBanner" style="display:none"></div>
+
   <div class="card chart-card">
-    <h2>Chart <span class="hint">TradingView — independent of the order ticket's symbol</span></h2>
+    <h2>Chart <span class="hint">Live price chart — separate from the order form below</span></h2>
     <div class="chart-controls">
       <input id="chartSymbol" maxlength="6" spellcheck="false">
       <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
@@ -366,15 +404,16 @@
     <div class="col">
 
       <div class="card">
-        <div class="hero-label">Net liquidation value</div>
+        <div class="hero-label">Account balance</div>
         <div class="hero-value num" id="balanceValue">—</div>
         <div class="hero-sub">
           <span id="balanceChg" class="chg num"></span>
           <span id="balanceMode" class="skeleton"></span>
         </div>
+        <div class="fx-note" id="fxNote" style="display:none"></div>
         <div class="hero-foot">
           <div>
-            <div class="stat-label">Drawdown today</div>
+            <div class="stat-label">Today's risk used</div>
             <div class="stat-value num" id="drawdownStat">—</div>
           </div>
           <div>
@@ -382,7 +421,7 @@
             <div class="stat-value" id="marketStat">—</div>
           </div>
           <div>
-            <div class="stat-label">Agents active</div>
+            <div class="stat-label">Strategies active</div>
             <div class="stat-value num" id="agentsStat">—</div>
           </div>
         </div>
@@ -403,18 +442,18 @@
     <div class="col">
 
       <div class="card">
-        <h2>Kill switch</h2>
+        <h2>Trading controls</h2>
         <div class="ks-row">
           <div class="ks-text">
-            <div class="t1" id="ksTitle">Trading active</div>
-            <div class="t2" id="ksSub">Fleet-wide switch is off</div>
+            <div class="t1" id="ksTitle">Trading is active</div>
+            <div class="t2" id="ksSub">New orders are allowed</div>
           </div>
-          <button class="toggle" id="ksToggle" aria-label="Toggle kill switch"></button>
+          <button class="toggle" id="ksToggle" aria-label="Pause or resume trading"></button>
         </div>
       </div>
 
       <div class="card">
-        <h2>Signals <span class="hint" id="signalsHint">auto-detected, pending review</span></h2>
+        <h2>Suggested trades <span class="hint" id="signalsHint">found automatically, waiting for your review</span></h2>
         <div id="signalsList"><div class="empty-note">Loading…</div></div>
       </div>
 
@@ -439,33 +478,30 @@
 
         <div class="field-row">
           <div class="field">
-            <label for="fType">Order type</label>
+            <label for="fType">When to fill</label>
             <select id="fType">
-              <option value="MARKET">Market</option>
-              <option value="LIMIT" selected>Limit</option>
+              <option value="MARKET">Now, at current price</option>
+              <option value="LIMIT" selected>Only at my price</option>
             </select>
           </div>
           <div class="field" id="limitPriceField">
-            <label for="fLimit">Limit price</label>
+            <label for="fLimit">Your price (USD)</label>
             <input id="fLimit" type="number" step="0.01" placeholder="270.50">
           </div>
         </div>
 
+        <input type="hidden" id="fAgent" value="default">
         <div class="field-row">
           <div class="field">
-            <label for="fAgent">Agent</label>
-            <input id="fAgent" value="default">
-          </div>
-          <div class="field">
-            <label for="fAssetType">Asset type</label>
+            <label for="fAssetType">Type of investment</label>
             <select id="fAssetType">
-              <option value="ETF" selected>ETF</option>
-              <option value="EQUITY">Equity</option>
+              <option value="ETF" selected>ETF (fund)</option>
+              <option value="EQUITY">Stock</option>
             </select>
           </div>
         </div>
 
-        <button class="btn btn-primary" id="previewBtn">Preview order</button>
+        <button class="btn btn-primary" id="previewBtn">Review order</button>
 
         <div id="verdictBox"></div>
       </div>
@@ -475,46 +511,46 @@
 
   <div class="card strategies-card">
     <h2>
-      Strategy catalog
-      <span class="hint">scans check the symbol in the order ticket</span>
+      Strategies you can follow
+      <span class="hint">checks the symbol in the order form above</span>
     </h2>
-    <button class="btn btn-ghost" id="scanAllBtn" style="margin-top:0">Scan all now</button>
+    <button class="btn btn-ghost" id="scanAllBtn" style="margin-top:0">Check all for new signals</button>
     <div class="strategy-columns" id="strategyColumns"></div>
   </div>
 
   <div class="card live-updates-card">
-    <h2>Live updates <span class="hint" id="liveUpdatesHint">refreshes every 3h</span></h2>
+    <h2>How these strategies have performed <span class="hint" id="liveUpdatesHint">updates every few hours</span></h2>
     <div class="lu-meta" id="liveUpdatesMeta">Loading…</div>
     <div id="liveUpdatesBody"></div>
-    <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Refresh now</button>
+    <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Update now</button>
   </div>
 </div>
 
 <div class="overlay" id="approvalOverlay">
   <div class="modal">
-    <h3>Confirm &amp; execute</h3>
-    <p>This places a real request against the execution engine's approval gate. Nothing reaches the broker without this.</p>
+    <h3>Confirm your order</h3>
+    <p id="approvalModeCopy">This order is not placed until you confirm it here — nothing happens without this step.</p>
     <div class="field">
-      <label for="mApprover">Approved by</label>
-      <input id="mApprover" placeholder="your name">
+      <label for="mApprover">Your name</label>
+      <input id="mApprover" placeholder="e.g. Alex Kim">
     </div>
     <div class="field">
-      <label for="mAttestation">Attestation</label>
+      <label for="mAttestation">Confirmation note</label>
       <input id="mAttestation" placeholder="I have reviewed and approve this order">
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="mCancel">Cancel</button>
-      <button class="btn btn-primary" id="mConfirm">Execute</button>
+      <button class="btn btn-primary" id="mConfirm">Place order</button>
     </div>
   </div>
 </div>
 
 <div class="overlay" id="adminOverlay">
   <div class="modal">
-    <h3 id="adminTitle">Admin key required</h3>
-    <p id="adminSub">Required for the kill switch and every account/order/strategy action.</p>
+    <h3 id="adminTitle">Enter your access code</h3>
+    <p id="adminSub">Needed to view your account and place or manage orders. You set this up when your account was created.</p>
     <div class="field">
-      <label for="mAdminKey">X-Admin-Key</label>
+      <label for="mAdminKey">Access code</label>
       <input id="mAdminKey" type="password" placeholder="••••••••">
     </div>
     <div class="modal-actions">
@@ -546,9 +582,98 @@
   accountSelect.value = store.get('edge.account', 'primary');
   accountSelect.addEventListener('change', () => { store.set('edge.account', accountSelect.value); refreshAll(); });
 
+  // Technical connection details (server address, account alias) are
+  // tucked behind a gear icon rather than shown up front — a customer
+  // using one deployment day-to-day never needs to touch these; they
+  // exist for whoever set this deployment up.
+  $('settingsBtn').addEventListener('click', () => $('settingsPanel').classList.toggle('show'));
+
   function base() { return baseUrlInput.value.trim().replace(/\/$/, ''); }
   function account() { return accountSelect.value; }
   function adminKey() { return store.get('edge.adminKey', ''); }
+
+  // ---- Currency display (global reach) ----
+  // Every dollar figure in this dashboard comes from the API in US
+  // dollars — that never changes, since that's the currency orders
+  // actually execute in. This layer only affects how those USD amounts
+  // are DISPLAYED, so a customer anywhere in the world sees numbers in a
+  // currency they recognize, via money()/bigMoney() below. Rates come
+  // from Frankfurter (European Central Bank reference rates, free, no
+  // key) and are cached for 12h — if the fetch ever fails (offline, the
+  // service is down), display quietly stays in USD rather than showing a
+  // broken or stale conversion.
+  const FX_API_URL = 'https://api.frankfurter.dev/v1/latest?from=USD';
+  const FX_CACHE_KEY = 'edge.fxRates.v1';
+  const FX_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+  const CURRENCIES = [
+    { code: 'USD', label: 'USD — US Dollar' },
+    { code: 'EUR', label: 'EUR — Euro' },
+    { code: 'GBP', label: 'GBP — British Pound' },
+    { code: 'INR', label: 'INR — Indian Rupee' },
+    { code: 'JPY', label: 'JPY — Japanese Yen' },
+    { code: 'CNY', label: 'CNY — Chinese Yuan' },
+    { code: 'AUD', label: 'AUD — Australian Dollar' },
+    { code: 'CAD', label: 'CAD — Canadian Dollar' },
+    { code: 'SGD', label: 'SGD — Singapore Dollar' },
+    { code: 'CHF', label: 'CHF — Swiss Franc' },
+    { code: 'AED', label: 'AED — UAE Dirham' },
+    { code: 'ZAR', label: 'ZAR — South African Rand' },
+    { code: 'BRL', label: 'BRL — Brazilian Real' },
+  ];
+  let fxRates = {}; // { EUR: 0.86, GBP: 0.74, ... } — USD -> that currency
+
+  const currencySelect = $('currencySelect');
+  CURRENCIES.forEach(c => {
+    const o = document.createElement('option'); o.value = c.code; o.textContent = c.label;
+    currencySelect.appendChild(o);
+  });
+  currencySelect.value = store.get('edge.currency', 'USD');
+  function currentCurrency() { return currencySelect.value || 'USD'; }
+  currencySelect.addEventListener('change', () => {
+    store.set('edge.currency', currencySelect.value);
+    rerenderAllMoneyDisplays();
+  });
+
+  async function loadFxRates() {
+    try {
+      const cached = JSON.parse(localStorage.getItem(FX_CACHE_KEY) || 'null');
+      if (cached && (Date.now() - cached.at) < FX_CACHE_TTL_MS) { fxRates = cached.rates; return; }
+    } catch {}
+    try {
+      const res = await fetch(FX_API_URL);
+      const data = await res.json();
+      fxRates = data.rates || {};
+      try { localStorage.setItem(FX_CACHE_KEY, JSON.stringify({ at: Date.now(), rates: fxRates })); } catch {}
+    } catch {
+      // Offline or the FX service is down — fall back to any stale cache
+      // rather than nothing, so a currency someone already selected
+      // doesn't suddenly revert to raw USD numbers with no explanation.
+      try {
+        const cached = JSON.parse(localStorage.getItem(FX_CACHE_KEY) || 'null');
+        if (cached) fxRates = cached.rates;
+      } catch {}
+    }
+    rerenderAllMoneyDisplays();
+  }
+
+  function convertUsd(usdAmount) {
+    const code = currentCurrency();
+    if (code === 'USD') return usdAmount;
+    const rate = fxRates[code];
+    return rate ? usdAmount * rate : usdAmount; // no rate yet/available — show USD rather than a wrong number
+  }
+
+  // Re-runs every section that displays a money figure, so switching
+  // currency updates the whole page immediately rather than only the
+  // next time each section happens to refresh on its own timer.
+  function rerenderAllMoneyDisplays() {
+    refreshBalance();
+    refreshPositions();
+    refreshFeed();
+    const cached = readLiveUpdatesCache();
+    if (cached) renderLiveUpdates(cached);
+    if (lastPreview) renderVerdict(lastPreview.preview);
+  }
 
   function toast(msg) {
     const t = $('toast'); t.textContent = msg; t.classList.add('show');
@@ -575,16 +700,32 @@
     return body;
   }
 
-  function money(v) {
-    const n = Number(v);
+  // Every amount coming from the API is USD — these two convert (see
+  // convertUsd above) and format for display only. Formatting itself
+  // (symbol placement, decimal places, grouping) comes from the
+  // browser's own Intl support for the chosen currency code, so e.g. JPY
+  // correctly shows no decimal places and INR gets its own grouping —
+  // not something this dashboard has to know the rules for itself.
+  function money(usdValue) {
+    const n = Number(usdValue);
     if (!isFinite(n)) return '—';
-    return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+    const code = currentCurrency();
+    try {
+      return convertUsd(n).toLocaleString(undefined, { style: 'currency', currency: code, maximumFractionDigits: 2 });
+    } catch {
+      return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+    }
   }
-  function bigMoney(v) {
-    // Whole dollars only — avoids an awkward mid-number wrap on the large hero balance figure.
-    const n = Number(v);
+  function bigMoney(usdValue) {
+    // Whole units only — avoids an awkward mid-number wrap on the large hero balance figure.
+    const n = Number(usdValue);
     if (!isFinite(n)) return '—';
-    return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+    const code = currentCurrency();
+    try {
+      return convertUsd(n).toLocaleString(undefined, { style: 'currency', currency: code, maximumFractionDigits: 0 });
+    } catch {
+      return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+    }
   }
   function pct(v) { const n = Number(v); return isFinite(n) ? (n * 100).toFixed(2) + '%' : '—'; }
   function timeAgo(iso) {
@@ -603,7 +744,7 @@
       const h = await api('/v1/health');
       const ok = h.status === 'healthy';
       pill.className = 'pill ' + (ok ? 'ok' : 'crit');
-      pill.innerHTML = `<span class="dot"></span><span>${ok ? 'Connected' : 'Degraded'} · ${h.broker_connectivity}</span>`;
+      pill.innerHTML = `<span class="dot"></span><span>${ok ? 'All systems working' : 'Having trouble connecting'}</span>`;
     } catch (e) {
       pill.className = 'pill crit';
       pill.innerHTML = `<span class="dot"></span><span>Offline</span>`;
@@ -611,15 +752,44 @@
   }
 
   // ---- Balance / drawdown ----
+  // Practice vs. real-money banner — this system is paper-trading only
+  // today, but the mode is read from the API's own response (never
+  // hardcoded) so the banner automatically switches the moment a real
+  // broker account is actually connected, with no dashboard change
+  // needed. Getting this wrong in either direction would be a real
+  // problem once real money is involved, so it's driven by what the
+  // server reports, not an assumption made here.
+  function updateModeBanner(mode) {
+    const el = $('modeBanner');
+    const isPaper = !mode || /paper|shadow/i.test(mode);
+    el.style.display = '';
+    if (isPaper) {
+      el.className = 'mode-banner practice';
+      el.innerHTML = `<span class="icon">🧪</span><span>Practice mode <span class="sub">— trades are simulated, no real money is at risk</span></span>`;
+    } else {
+      el.className = 'mode-banner live';
+      el.innerHTML = `<span class="icon">🔴</span><span>Live trading <span class="sub">— orders placed here use real money</span></span>`;
+    }
+  }
+
   async function refreshBalance() {
     try {
       const r = await api(`/v1/account/${encodeURIComponent(account())}/balances`);
       const nlv = r.balances.net_liquidation_value ?? r.balances.availableFunds ?? 0;
       $('balanceValue').textContent = bigMoney(nlv);
-      $('balanceMode').textContent = r.balances.mode ? `${r.balances.mode} mode` : '';
+      $('balanceMode').textContent = '';
+      updateModeBanner(r.balances.mode);
+      const fxNote = $('fxNote');
+      if (currentCurrency() !== 'USD') {
+        const usdText = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(nlv);
+        fxNote.style.display = '';
+        fxNote.textContent = `≈ converted from ${usdText} — your account is held in US dollars`;
+      } else {
+        fxNote.style.display = 'none';
+      }
     } catch (e) {
       $('balanceValue').textContent = '—';
-      $('balanceMode').textContent = 'unavailable';
+      $('balanceMode').textContent = 'Could not load';
     }
 
     try {
@@ -679,7 +849,7 @@
     try {
       const r = await api(`/v1/orders?account=${encodeURIComponent(account())}&limit=12`);
       const orders = r.orders || [];
-      if (!orders.length) { el.innerHTML = '<div class="empty-note">No orders yet — place one from the ticket.</div>'; return; }
+      if (!orders.length) { el.innerHTML = '<div class="empty-note">No orders yet — place one below.</div>'; return; }
       el.innerHTML = orders.map(o => {
         const side = (o.instruction || '').toUpperCase() === 'SELL' ? 'sell' : 'buy';
         const statusClass = 'st-' + (o.status || 'previewed').toLowerCase();
@@ -689,7 +859,7 @@
             <span class="side-chip ${side}">${side === 'buy' ? 'BUY' : 'SELL'}</span>
             <div class="feed-meta">
               <div class="feed-symbol">${o.symbol} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">×${o.quantity}</span></div>
-              <div class="feed-sub">${o.agent_id} · ${notional} · ${timeAgo(o.created_at)}</div>
+              <div class="feed-sub">${notional} · ${timeAgo(o.created_at)}</div>
             </div>
           </div>
           <span class="status-chip ${statusClass}">${o.status}</span>
@@ -706,27 +876,27 @@
       const s = await api('/v1/kill-switch/status');
       const toggle = $('ksToggle');
       toggle.classList.toggle('on', !s.enabled);
-      $('ksTitle').textContent = s.enabled ? 'Trading halted' : 'Trading active';
-      $('ksSub').textContent = s.enabled ? (s.reason || `Halted by ${s.set_by}`) : 'Fleet-wide switch is off';
+      $('ksTitle').textContent = s.enabled ? 'Trading is paused' : 'Trading is active';
+      $('ksSub').textContent = s.enabled ? (s.reason || `Paused by ${s.set_by}`) : 'New orders are allowed';
       toggle.dataset.enabled = String(s.enabled);
     } catch (e) {
-      $('ksTitle').textContent = 'Unknown';
-      $('ksSub').textContent = 'Could not reach kill switch status';
+      $('ksTitle').textContent = 'Status unknown';
+      $('ksSub').textContent = 'Could not check trading status';
     }
   }
 
   $('ksToggle').addEventListener('click', () => {
     const willEnable = $('ksToggle').dataset.enabled !== 'true';
-    openAdminModal(willEnable ? 'Halt all trading' : 'Resume trading', async (key) => {
+    openAdminModal(willEnable ? 'Pause all trading?' : 'Resume trading?', async (key) => {
       await api(`/v1/kill-switch/${willEnable ? 'on' : 'off'}`, { method: 'POST', headers: { 'x-admin-key': key } });
-      toast(willEnable ? 'Kill switch engaged' : 'Kill switch cleared');
+      toast(willEnable ? 'Trading paused' : 'Trading resumed');
       refreshKillSwitch();
-    });
+    }, willEnable ? 'No new orders will be placed until you resume trading.' : 'New orders will be allowed again.');
   });
 
   function openAdminModal(title, onConfirm, description) {
     $('adminTitle').textContent = title;
-    $('adminSub').textContent = description || 'Required for the kill switch and every account/order/strategy action.';
+    $('adminSub').textContent = description || 'Needed to view your account and place or manage orders.';
     $('mAdminKey').value = store.get('edge.adminKey', '');
     $('adminOverlay').classList.add('show');
     const confirmBtn = $('mAdminConfirm');
@@ -743,16 +913,17 @@
   }
   $('mAdminCancel').addEventListener('click', () => $('adminOverlay').classList.remove('show'));
 
-  // ---- Admin key (unlock) pill — every endpoint except health/catalog/market-status needs this now ----
+  // ---- Access code (unlock) pill — every endpoint except health/catalog/market-status needs this now ----
   function refreshUnlockPill() {
     const set = !!adminKey();
     $('unlockPill').classList.toggle('set', set);
-    $('unlockPillLabel').textContent = set ? 'API key set' : 'Set API key';
+    $('unlockPill').firstChild.textContent = set ? '🔓 ' : '🔒 ';
+    $('unlockPillLabel').textContent = set ? 'Account unlocked' : 'Unlock account';
   }
   $('unlockPill').addEventListener('click', () => {
-    openAdminModal('Set API key', async () => {
+    openAdminModal('Enter your access code', async () => {
       refreshUnlockPill();
-      toast('API key saved');
+      toast('Account unlocked');
       refreshAll(); loadStrategies(); refreshLiveUpdates(true);
     });
   });
@@ -804,7 +975,7 @@
     };
     if (proposal.order_type === 'LIMIT') {
       const lp = $('fLimit').value;
-      if (!lp) { toast('Enter a limit price'); btn.disabled = false; btn.textContent = 'Preview order'; return; }
+      if (!lp) { toast('Enter a limit price'); btn.disabled = false; btn.textContent = 'Review order'; return; }
       proposal.limit_price = lp;
     }
     if (activePlan) {
@@ -820,29 +991,49 @@
     } catch (e) {
       $('verdictBox').innerHTML = `<div class="verdict-box"><div class="verdict-head rejected"><span>Request failed</span></div><div class="verdict-body"><div class="rej-note" style="margin-left:0">${e.message}</div></div></div>`;
     } finally {
-      btn.disabled = false; btn.textContent = 'Preview order';
+      btn.disabled = false; btn.textContent = 'Review order';
     }
   });
+
+  // Plain-language labels for src/risk/limits.py's internal check names —
+  // customers never see snake_case internals. Falls back to a prettified
+  // version of the raw name for any check not in this map, so a new check
+  // added later still renders something readable rather than breaking.
+  const CHECK_LABELS = {
+    kill_switch_off: 'Trading is active',
+    account_allowed: 'Account is valid',
+    symbol_allowed: 'This investment is available',
+    symbol_not_denied: 'This investment is available',
+    expiration_allowed: 'Expiration date is valid',
+    quote_fresh: 'Price is up to date',
+    limit_price_reasonable: 'Your price looks reasonable',
+    notional_limit: 'Within your order size limit',
+    combined_symbol_exposure_ok: 'Within shared exposure limits',
+  };
+  function friendlyCheckName(name) {
+    return CHECK_LABELS[name] || name.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  }
 
   function renderVerdict(preview) {
     const approved = preview.risk_verdict === 'APPROVED';
     const checks = preview.risk_details.checks || {};
     const rejections = preview.risk_details.rejections || [];
     const rows = Object.entries(checks).map(([name, pass]) =>
-      `<div class="check-row ${pass ? 'pass' : 'fail'}"><span class="tick">${pass ? '✓' : '✕'}</span><span>${name.replace(/_/g, ' ')}</span></div>`
+      `<div class="check-row ${pass ? 'pass' : 'fail'}"><span class="tick">${pass ? '✓' : '✕'}</span><span>${friendlyCheckName(name)}</span></div>`
     ).join('');
     const rejNotes = rejections.map(r => `<div class="rej-note">${r}</div>`).join('');
 
     $('verdictBox').innerHTML = `
       <div class="verdict-box">
-        <div class="verdict-head ${approved ? 'approved' : 'rejected'}"><span>${approved ? 'Approved' : 'Rejected'}</span><span class="num">${money(preview.estimated_cost)}</span></div>
+        <div class="verdict-head ${approved ? 'approved' : 'rejected'}"><span>${approved ? "You're clear to place this order" : "This order can't be placed"}</span><span class="num">${money(preview.estimated_cost)}</span></div>
         <div class="verdict-body">
           ${rows}
           ${rejNotes}
-          <div class="cost-line"><span>Commission</span><b class="num">${money(preview.estimated_commission)}</b></div>
+          <div class="cost-line"><span>Fees</span><b class="num">${money(preview.estimated_commission)}</b></div>
+          <div class="fx-note">Charged in US dollars${currentCurrency() !== 'USD' ? ` — shown above in ${currentCurrency()} for reference` : ''}</div>
         </div>
       </div>
-      ${approved ? '<button class="btn btn-primary" id="executeBtn">Approve &amp; execute</button>' : ''}
+      ${approved ? '<button class="btn btn-primary" id="executeBtn">Continue to confirm</button>' : ''}
     `;
     if (approved) $('executeBtn').addEventListener('click', openApprovalModal);
   }
@@ -859,7 +1050,7 @@
     if (!approvedBy || !attestation) { toast('Fill in both fields'); return; }
     store.set('edge.approver', approvedBy);
 
-    const btn = $('mConfirm'); btn.disabled = true; btn.textContent = 'Executing…';
+    const btn = $('mConfirm'); btn.disabled = true; btn.textContent = 'Placing order…';
     try {
       const req = {
         decision_id: lastPreview.proposal.decision_id,
@@ -873,15 +1064,15 @@
         },
       };
       const receipt = await api('/v1/orders/execute', { method: 'POST', body: JSON.stringify(req) });
-      toast(`Executed · ${receipt.execution_id}`);
+      toast(`Order placed · ${receipt.execution_id}`);
       $('approvalOverlay').classList.remove('show');
       $('verdictBox').innerHTML = '';
       activePlan = null; renderPlanBanner();
       refreshFeed(); refreshPositions(); refreshBalance();
     } catch (e) {
-      toast('Execution failed: ' + e.message);
+      toast('Could not place order: ' + e.message);
     } finally {
-      btn.disabled = false; btn.textContent = 'Execute';
+      btn.disabled = false; btn.textContent = 'Place order';
     }
   });
 
@@ -910,8 +1101,8 @@
               </div>
               <div class="strategy-desc">${s.description}</div>
               <div class="strategy-rules">Stop: ${s.stop_rule}<br>Target: ${s.target_rule}</div>
-              <div class="strategy-result-line" data-result-for="${s.id}">Backtest: loading…</div>
-              <button class="strategy-scan-btn" data-strategy-id="${s.id}">Scan ${$('fSymbol').value.trim().toUpperCase() || 'symbol'}</button>
+              <div class="strategy-result-line" data-result-for="${s.id}">Loading results…</div>
+              <button class="strategy-scan-btn" data-strategy-id="${s.id}">Check ${$('fSymbol').value.trim().toUpperCase() || 'symbol'} now</button>
             </div>
           `).join('')}
         </div>
@@ -928,16 +1119,16 @@
 
   async function scanStrategy(strategyId, btn) {
     const symbol = $('fSymbol').value.trim().toUpperCase();
-    if (!symbol) { toast('Enter a symbol in the order ticket first'); return; }
+    if (!symbol) { toast('Enter a symbol in the order form first'); return; }
     btn.disabled = true;
     const original = btn.textContent;
-    btn.textContent = 'Scanning…';
+    btn.textContent = 'Checking…';
     try {
       const r = await api(`/v1/strategies/${strategyId}/scan?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' });
-      toast(r.signal ? `Signal fired: ${symbol}` : `No entry condition met for ${symbol}`);
+      toast(r.signal ? `New trade suggested for ${symbol}` : `No opportunity found for ${symbol} right now`);
       if (r.signal) refreshSignals();
     } catch (e) {
-      toast('Scan failed: ' + e.message);
+      toast('Could not check: ' + e.message);
     } finally {
       btn.disabled = false; btn.textContent = original;
     }
@@ -945,15 +1136,15 @@
 
   $('scanAllBtn').addEventListener('click', async () => {
     const btn = $('scanAllBtn');
-    btn.disabled = true; btn.textContent = 'Scanning…';
+    btn.disabled = true; btn.textContent = 'Checking…';
     try {
       const r = await api('/v1/strategies/scan-all', { method: 'POST' });
-      toast(`Scan complete · ${r.new_signals} new signal${r.new_signals === 1 ? '' : 's'}`);
+      toast(`Done · ${r.new_signals} new trade${r.new_signals === 1 ? '' : 's'} suggested`);
       refreshSignals();
     } catch (e) {
-      toast('Scan failed: ' + e.message);
+      toast('Could not check: ' + e.message);
     } finally {
-      btn.disabled = false; btn.textContent = 'Scan all now';
+      btn.disabled = false; btn.textContent = 'Check all for new signals';
     }
   });
 
@@ -963,9 +1154,9 @@
     try {
       const r = await api('/v1/strategies/signals?status=PENDING&limit=20');
       const signals = r.signals || [];
-      $('signalsHint').textContent = signals.length ? `${signals.length} pending` : 'auto-detected, pending review';
+      $('signalsHint').textContent = signals.length ? `${signals.length} waiting for you` : 'found automatically, waiting for your review';
       if (!signals.length) {
-        el.innerHTML = '<div class="empty-note">No pending signals. The background scanner checks the watchlist every interval — or hit "Scan all now" below.</div>';
+        el.innerHTML = '<div class="empty-note">Nothing to review right now — we\'re checking your strategies in the background, or hit "Check all for new signals" below.</div>';
         return;
       }
       el.innerHTML = signals.map(s => `
@@ -983,8 +1174,8 @@
             <span class="tp">Target <b class="num">${money(s.take_profit_price)}</b></span>
           </div>
           <div class="signal-actions">
-            <button class="btn btn-primary" data-review="${s.id}">Review</button>
-            <button class="btn btn-ghost" data-dismiss="${s.id}">Dismiss</button>
+            <button class="btn btn-primary" data-review="${s.id}">Use this trade</button>
+            <button class="btn btn-ghost" data-dismiss="${s.id}">Not now</button>
           </div>
         </div>
       `).join('');
@@ -1019,7 +1210,7 @@
     renderPlanBanner();
     $('verdictBox').innerHTML = '';
     document.getElementById('fSymbol').closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    toast(`Loaded ${signal.symbol} · ${signal.strategy_name} into the order ticket`);
+    toast(`${signal.symbol} · ${signal.strategy_name} added to your order form below`);
   }
 
   // ---- Chart (TradingView — independent widget, not fed by this API) ----
@@ -1137,28 +1328,28 @@
       if (!strategyAggCache) return; // leave the "Backtest: loading…" placeholder from the initial render
 
       if (strategyAggCache.intradayIds.includes(id)) {
-        line.textContent = 'Intraday strategy — not backtestable against daily history';
+        line.textContent = 'Trades too fast to test with 3 years of daily data';
         line.classList.add('muted');
         return;
       }
 
       const a = strategyAggCache.byStrategy[id];
       if (!a || (a.trades === 0 && a.tooSmall === 0)) {
-        line.textContent = `3yr backtest @ $${LIVE_UPDATES_NOTIONAL_USD}/trade: no entry signal fired on QQQ/SPY/IWM`;
+        line.textContent = `Last 3 years, ${money(LIVE_UPDATES_NOTIONAL_USD)}/trade: no opportunities found on QQQ, SPY, or IWM`;
         return;
       }
       if (a.trades === 0 && a.tooSmall > 0) {
         // The strategy fired — $100 just doesn't buy 1 share of these
         // symbols (QQQ/SPY/IWM all trade well into the hundreds). Distinct
         // from "never fires" so this doesn't read as a broken strategy.
-        line.textContent = `3yr backtest: ${a.tooSmall} signal${a.tooSmall === 1 ? '' : 's'} fired, but $${LIVE_UPDATES_NOTIONAL_USD} doesn't cover 1 share of QQQ/SPY/IWM`;
+        line.textContent = `Found ${a.tooSmall} opportunit${a.tooSmall === 1 ? 'y' : 'ies'}, but ${money(LIVE_UPDATES_NOTIONAL_USD)} isn't enough to buy even 1 share of QQQ, SPY, or IWM`;
         line.classList.add('muted');
         return;
       }
       const winRate = Math.round((a.wins / a.trades) * 100);
       const pnlClass = a.pnl >= 0 ? 'up' : 'down';
       line.innerHTML =
-        `3yr backtest @ $${LIVE_UPDATES_NOTIONAL_USD}/trade: <b>${a.trades}</b> trades used · ${winRate}% win · ` +
+        `Last 3 years, ${money(LIVE_UPDATES_NOTIONAL_USD)}/trade: <b>${a.trades}</b> trades · ${winRate}% win rate · ` +
         `<b class="${pnlClass}">${a.pnl >= 0 ? '+' : '−'}${money(Math.abs(a.pnl))}</b> profit`;
     });
   }
@@ -1209,8 +1400,8 @@
         <circle cx="${xFor(curve.length - 1).toFixed(1)}" cy="${yFor(last.equity).toFixed(1)}" r="3.5" style="fill:${strokeColor}"></circle>
       </svg>
       <div class="lu-chart-legend">
-        <span><i class="swatch" style="background:${strokeColor}"></i>Combined portfolio (one shared account)</span>
-        ${benchmarkEnd != null ? `<span><i class="swatch dashed"></i>Buy-and-hold benchmark (avg across symbols)</span>` : ''}
+        <span><i class="swatch" style="background:${strokeColor}"></i>Your strategies, combined</span>
+        ${benchmarkEnd != null ? `<span><i class="swatch dashed"></i>Just buying &amp; holding instead</span>` : ''}
       </div>`;
   }
 
@@ -1219,7 +1410,7 @@
     strategyAggCache = { byStrategy: aggregateByStrategy(data.backtest), intradayIds: data.intradayStrategyIds || [] };
     renderStrategyResultLines();
     $('liveUpdatesMeta').textContent =
-      `Last computed ${timeAgo(data.computedAt)} · 3yr backtest @ $${LIVE_UPDATES_NOTIONAL_USD}/trade (QQQ/SPY/IWM × every daily strategy) + live autonomous activity`;
+      `Updated ${timeAgo(data.computedAt)} · based on the last 3 years of real market data, trading ${money(LIVE_UPDATES_NOTIONAL_USD)} per position`;
 
     const pairRows = ((data.backtest && data.backtest.results) || [])
       .slice()
@@ -1232,12 +1423,12 @@
           <span class="lu-pair-metrics">
             <span>${r.total_trades} trades</span>
             <span>win <b>${pct(r.win_rate)}</b></span>
-            <span>pf <b class="${r.profit_factor != null && r.profit_factor >= 1 ? 'up' : 'down'}">${r.profit_factor == null ? '—' : Number(r.profit_factor).toFixed(2)}</b></span>
-            <span title="Buy-and-hold ${r.symbol} over the same window">vs hold <b class="${beatBenchmark ? 'up' : 'down'}">${r.total_return_pct >= 0 ? '+' : ''}${r.total_return_pct.toFixed(1)}% / ${r.benchmark_return_pct >= 0 ? '+' : ''}${r.benchmark_return_pct.toFixed(1)}%</b></span>
+            <span title="Profit factor — gross profit divided by gross loss">quality <b class="${r.profit_factor != null && r.profit_factor >= 1 ? 'up' : 'down'}">${r.profit_factor == null ? '—' : Number(r.profit_factor).toFixed(2)}</b></span>
+            <span title="This strategy's return vs. just buying and holding ${r.symbol} over the same period">vs. holding <b class="${beatBenchmark ? 'up' : 'down'}">${r.total_return_pct >= 0 ? '+' : ''}${r.total_return_pct.toFixed(1)}% / ${r.benchmark_return_pct >= 0 ? '+' : ''}${r.benchmark_return_pct.toFixed(1)}%</b></span>
           </span>
         </div>`;
       })
-      .join('') || '<div class="empty-note">No backtest pairs returned.</div>';
+      .join('') || '<div class="empty-note">No results yet.</div>';
 
     const combined = s.combined_portfolio || null;
 
@@ -1252,23 +1443,23 @@
             </div>
           </div>
         </div>`).join('')
-      : '<div class="empty-note">No autonomous trades yet — enable autonomous_trading_enabled to see activity here.</div>';
+      : '<div class="empty-note">No automatic trades yet.</div>';
 
     $('liveUpdatesBody').innerHTML = `
       <div class="lu-stats">
-        <div><div class="lu-stat-label">Trades</div><div class="lu-stat-value num">${s.total_trades ?? '—'}</div></div>
+        <div><div class="lu-stat-label">Trades tested</div><div class="lu-stat-value num">${s.total_trades ?? '—'}</div></div>
         <div><div class="lu-stat-label">Win rate</div><div class="lu-stat-value num">${s.win_rate != null ? pct(s.win_rate) : '—'}</div></div>
-        <div><div class="lu-stat-label">Total P/L</div><div class="lu-stat-value num ${s.total_pnl_usd >= 0 ? 'up' : 'down'}">${s.total_pnl_usd != null ? money(s.total_pnl_usd) : '—'}</div></div>
-        <div><div class="lu-stat-label">Pairs run</div><div class="lu-stat-value num">${s.pairs_run ?? '—'}</div></div>
-        <div><div class="lu-stat-label">Avg buy-and-hold</div><div class="lu-stat-value num">${s.avg_benchmark_return_pct != null ? (s.avg_benchmark_return_pct >= 0 ? '+' : '') + s.avg_benchmark_return_pct.toFixed(1) + '%' : '—'}</div></div>
-        <div><div class="lu-stat-label">Combined drawdown</div><div class="lu-stat-value num ${combined ? 'down' : ''}">${combined ? '−' + combined.max_drawdown_pct.toFixed(1) + '%' : '—'}</div></div>
+        <div><div class="lu-stat-label">Total profit/loss</div><div class="lu-stat-value num ${s.total_pnl_usd >= 0 ? 'up' : 'down'}">${s.total_pnl_usd != null ? money(s.total_pnl_usd) : '—'}</div></div>
+        <div><div class="lu-stat-label">Combos tested</div><div class="lu-stat-value num">${s.pairs_run ?? '—'}</div></div>
+        <div><div class="lu-stat-label">Just buying &amp; holding</div><div class="lu-stat-value num">${s.avg_benchmark_return_pct != null ? (s.avg_benchmark_return_pct >= 0 ? '+' : '') + s.avg_benchmark_return_pct.toFixed(1) + '%' : '—'}</div></div>
+        <div><div class="lu-stat-label">Worst dip (combined)</div><div class="lu-stat-value num ${combined ? 'down' : ''}">${combined ? '−' + combined.max_drawdown_pct.toFixed(1) + '%' : '—'}</div></div>
       </div>
-      <div class="lu-section-title">Combined portfolio (one shared $${combined ? Number(combined.starting_capital).toLocaleString() : '—'} account across every pair)</div>
-      <div class="lu-chart-wrap">${combined ? buildEquityChartSvg(combined.equity_curve, s.avg_benchmark_return_pct) : '<div class="empty-note">No combined portfolio data.</div>'}</div>
-      ${combined ? `<div class="lu-cost-note">${combined.total_return_pct >= 0 ? '+' : ''}${combined.total_return_pct.toFixed(2)}% combined return · ${money(combined.ending_capital)} ending equity · modeled with 5bps slippage per fill, $0 commission (Schwab-style)</div>` : ''}
-      <div class="lu-section-title">By symbol × strategy</div>
+      <div class="lu-section-title">All strategies combined, starting from ${combined ? bigMoney(combined.starting_capital) : '—'} (test account)</div>
+      <div class="lu-chart-wrap">${combined ? buildEquityChartSvg(combined.equity_curve, s.avg_benchmark_return_pct) : '<div class="empty-note">Not enough data yet.</div>'}</div>
+      ${combined ? `<div class="lu-cost-note">${combined.total_return_pct >= 0 ? '+' : ''}${combined.total_return_pct.toFixed(2)}% combined return · ${money(combined.ending_capital)} ending balance · includes a small estimate for trading costs</div>` : ''}
+      <div class="lu-section-title">Results by investment &amp; strategy</div>
       ${pairRows}
-      <div class="lu-section-title">Recent autonomous activity</div>
+      <div class="lu-section-title">Recent automatic trades</div>
       ${activityRows}
     `;
   }
@@ -1281,7 +1472,7 @@
     if (!force && cached && !isStale) { scheduleNextLiveUpdate(); return; }
 
     if (!cached || force) {
-      $('liveUpdatesMeta').textContent = 'Running a 3-year backtest against real market data — this can take up to a minute…';
+      $('liveUpdatesMeta').textContent = 'Testing your strategies against 3 years of real market data — this can take up to a minute…';
       $('liveUpdatesBody').innerHTML = '<div class="empty-note">Loading…</div>';
     }
 
@@ -1290,8 +1481,8 @@
       writeLiveUpdatesCache(data);
       renderLiveUpdates(data);
     } catch (e) {
-      $('liveUpdatesMeta').textContent = 'Could not refresh — ' + e.message;
-      if (!cached) $('liveUpdatesBody').innerHTML = '<div class="empty-note">Could not load live updates.</div>';
+      $('liveUpdatesMeta').textContent = 'Could not update — ' + e.message;
+      if (!cached) $('liveUpdatesBody').innerHTML = '<div class="empty-note">Could not load performance data.</div>';
     }
     scheduleNextLiveUpdate();
   }
@@ -1315,6 +1506,7 @@
   loadStrategies();
   initChart();
   refreshLiveUpdates(false);
+  loadFxRates();
   setInterval(refreshAll, 15000);
 })();
 </script>
