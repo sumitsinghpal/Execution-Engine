@@ -9,6 +9,7 @@ either uses a distinct agent_id or cleans up the scopes it touched.
 
 import pytest
 
+import src.notifications.webhook as webhook
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
 
 
@@ -76,3 +77,63 @@ def test_known_agent_scopes_excludes_global_and_includes_touched_agents(test_db_
     scopes = service.known_agent_scopes()
     assert "kst-registry-probe" in scopes
     assert GLOBAL_SCOPE not in scopes
+
+
+class TestKillSwitchChangeNotifications:
+    """
+    Every trip/clear goes through KillSwitchService.set_state regardless of
+    trigger (manual admin, DrawdownGuard, PositionReconciliationService),
+    so the notification hook lives there instead of at each call site — see
+    kill_switch_state.py's _notify_kill_switch_change.
+    """
+
+    def test_a_real_state_transition_fires_one_notification(self, test_db_engine_and_session, monkeypatch):
+        calls = []
+        monkeypatch.setattr(webhook, "notify_sync", lambda settings, text: calls.append(text))
+        _, session = test_db_engine_and_session
+        service = KillSwitchService(session)
+
+        try:
+            service.set_state(enabled=True, set_by="test", scope="kst-notif-agent")
+            assert len(calls) == 1
+            assert "ENABLED" in calls[0]
+            assert "kst-notif-agent" in calls[0]
+        finally:
+            service.set_state(enabled=False, set_by="test_cleanup", scope="kst-notif-agent")
+
+    def test_re_setting_the_same_state_does_not_fire_again(self, test_db_engine_and_session, monkeypatch):
+        calls = []
+        monkeypatch.setattr(webhook, "notify_sync", lambda settings, text: calls.append(text))
+        _, session = test_db_engine_and_session
+        service = KillSwitchService(session)
+
+        try:
+            service.set_state(enabled=True, set_by="test", scope="kst-notif-idempotent")
+            service.set_state(enabled=True, set_by="test-again", scope="kst-notif-idempotent")  # redundant re-set
+            assert len(calls) == 1  # only the real transition, not the redundant confirm
+        finally:
+            service.set_state(enabled=False, set_by="test_cleanup", scope="kst-notif-idempotent")
+
+    def test_clearing_fires_a_disabled_notification(self, test_db_engine_and_session, monkeypatch):
+        calls = []
+        monkeypatch.setattr(webhook, "notify_sync", lambda settings, text: calls.append(text))
+        _, session = test_db_engine_and_session
+        service = KillSwitchService(session)
+
+        service.set_state(enabled=True, set_by="test", scope="kst-notif-clear")
+        service.set_state(enabled=False, set_by="test", scope="kst-notif-clear")
+
+        assert len(calls) == 2
+        assert "resumed" in calls[1]
+
+    def test_includes_the_reason_when_one_is_given(self, test_db_engine_and_session, monkeypatch):
+        calls = []
+        monkeypatch.setattr(webhook, "notify_sync", lambda settings, text: calls.append(text))
+        _, session = test_db_engine_and_session
+        service = KillSwitchService(session)
+
+        try:
+            service.set_state(enabled=True, set_by="drawdown_guard", reason="daily loss limit breached", scope="kst-notif-reason")
+            assert "daily loss limit breached" in calls[0]
+        finally:
+            service.set_state(enabled=False, set_by="test_cleanup", scope="kst-notif-reason")

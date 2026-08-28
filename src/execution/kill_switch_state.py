@@ -88,6 +88,7 @@ class KillSwitchService:
         self, enabled: bool, set_by: str, reason: Optional[str] = None, scope: str = GLOBAL_SCOPE
     ) -> KillSwitchRecord:
         record = self._get_or_create(scope)
+        was_enabled = record.enabled
         record.enabled = enabled
         record.set_by = set_by
         record.set_at = datetime.utcnow()
@@ -95,6 +96,15 @@ class KillSwitchService:
         self.session.add(record)
         self.session.commit()
         self.session.refresh(record)
+        # Every trip/clear goes through this one method regardless of
+        # trigger — manual admin action, DrawdownGuard.check_and_halt, or
+        # PositionReconciliationService.reconcile_or_halt — so hooking the
+        # notification here covers all of them without a call site in each
+        # trigger. Only on an actual transition, not a redundant re-set of
+        # the same state, so re-confirming an already-on switch doesn't
+        # spam the webhook.
+        if record.enabled != was_enabled:
+            _notify_kill_switch_change(scope, record)
         return record
 
     def known_agent_scopes(self) -> list[str]:
@@ -110,6 +120,19 @@ class KillSwitchService:
         """
         stmt = select(KillSwitchRecord.scope).where(KillSwitchRecord.scope != GLOBAL_SCOPE)
         return list(self.session.exec(stmt).all())
+
+
+def _notify_kill_switch_change(scope: str, record: KillSwitchRecord) -> None:
+    """Deferred imports — config/notifications importing back into execution-layer modules elsewhere makes an eager import here risk a cycle; this module has no need of either at import time."""
+    from src.config import get_settings
+    from src.notifications.webhook import notify_sync
+
+    scope_label = "fleet-wide" if scope == GLOBAL_SCOPE else f"agent '{scope}'"
+    state_label = "ENABLED — trading halted" if record.enabled else "disabled — trading resumed"
+    text = f":octagonal_sign: Kill switch {state_label} ({scope_label}), by {record.set_by}"
+    if record.reason:
+        text += f"\n> {record.reason}"
+    notify_sync(get_settings(), text)
 
 
 __all__ = ["KillSwitchRecord", "KillSwitchService", "GLOBAL_SCOPE"]

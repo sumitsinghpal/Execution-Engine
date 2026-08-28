@@ -214,7 +214,18 @@ class Settings(BaseSettings):
     api_key_admin: str = "change-me-in-prod"
     request_signing_enabled: bool = False
     request_signing_private_key: Optional[str] = None
-    
+
+    # Notifications (src/notifications/webhook.py) — a single outbound
+    # webhook URL, posted a Slack-compatible {"text": ...} JSON payload
+    # (Discord's webhook endpoint accepts the same shape, so this covers
+    # both with no per-provider branching). Opt-in like Schwab credentials
+    # and LLM narration: unset means notifications are silently skipped,
+    # not an error. Fired on every kill switch trip/clear (any scope, any
+    # trigger — manual admin or an automatic halt from the drawdown guard
+    # or reconciliation guard, since they all go through
+    # KillSwitchService.set_state) and on every autonomous entry/exit.
+    notification_webhook_url: Optional[str] = None
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"

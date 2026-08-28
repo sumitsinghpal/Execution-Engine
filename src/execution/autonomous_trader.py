@@ -59,6 +59,7 @@ from src.execution.executor import Executor
 from src.execution.risk_reward import compute_standardized_exit, size_position
 from src.logging_config import get_logger
 from src.models.orders import AssetType, Instruction, OrderType, TradeProposal
+from src.notifications.webhook import notify
 from src.strategy import engine as strategy_engine
 
 logger = get_logger(__name__)
@@ -146,6 +147,7 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
                 exit_price=None,
                 exit_rationale=f"Exit order failed to submit: {exc}",
             )
+            await notify(settings, f":warning: Autonomous exit FAILED for {position.symbol} ({position.strategy_id}): {exc}")
             closed += 1
             continue
 
@@ -155,6 +157,12 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
             entry_price=position.entry_price, exit_price=last, pnl_usd=pnl,
         )
         service.close_position(position, status=status, exit_decision_id=decision_id, exit_price=last, exit_rationale=rationale)
+        pnl_emoji = ":chart_with_upwards_trend:" if pnl >= 0 else ":chart_with_downwards_trend:"
+        await notify(
+            settings,
+            f"{pnl_emoji} Closed {position.symbol} ({position.strategy_id}) on {exit_reason}: "
+            f"entry {position.entry_price:.2f} → exit {last:.2f}, P/L {pnl:+.2f}",
+        )
         closed += 1
 
     return closed
@@ -252,6 +260,11 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
                 stop_loss_price=exit_levels.stop_loss_price,
                 take_profit_price=exit_levels.take_profit_price,
                 entry_rationale=rationale,
+            )
+            await notify(
+                settings,
+                f":large_green_circle: Opened {symbol} ({strategy_id}): {quantity} @ {detail.entry_price:.2f}, "
+                f"stop {exit_levels.stop_loss_price:.2f} / target {exit_levels.take_profit_price:.2f}",
             )
             opened += 1
 

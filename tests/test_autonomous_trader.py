@@ -82,7 +82,7 @@ class _FakeAutoBroker:
     async def get_price_history(self, symbol, bar_interval, lookback_days): raise NotImplementedError
 
 
-_ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTX"
+_ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTO,ZAUTP,ZAUTX"
 
 
 def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **overrides):
@@ -259,6 +259,27 @@ class TestScanForEntries:
         assert opened == 0
 
     @pytest.mark.asyncio
+    async def test_opening_a_position_fires_a_notification(self, test_db_engine_and_session, monkeypatch):
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch, watchlist="ZAUTO")
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+        calls = []
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        async def fake_notify(s, text):
+            calls.append(text)
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        monkeypatch.setattr(autonomous_trader, "notify", fake_notify)
+        await scan_for_entries(session, settings)
+
+        assert len(calls) == 1
+        assert "ZAUTO" in calls[0]
+        assert "golden_cross" in calls[0]
+
+    @pytest.mark.asyncio
     async def test_a_failing_strategy_does_not_stop_the_rest_of_the_scan(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTI,ZAUTJ", strategy_ids="golden_cross")
@@ -353,6 +374,30 @@ class TestManageOpenPositions:
         # The second pass must not touch ZAUTN again — it's already CLOSED_TARGET.
         assert zautn_orders_after_first_pass == 1
         assert zautn_orders_after_second_pass == 1
+
+
+    @pytest.mark.asyncio
+    async def test_closing_a_position_fires_a_notification_with_pnl(self, test_db_engine_and_session, _fake_broker, monkeypatch):
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch)
+        service = AutonomousPositionService(session)
+        service.open_position(
+            symbol="ZAUTP", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
+            entry_decision_id="auto-entry-seed-notify", quantity=10, entry_price=100.0,
+            stop_loss_price=99.0, take_profit_price=102.0, entry_rationale="seeded for test",
+        )
+        _fake_broker.set_price("ZAUTP", 103.0)  # above take_profit_price
+        calls = []
+
+        async def fake_notify(s, text):
+            calls.append(text)
+
+        monkeypatch.setattr(autonomous_trader, "notify", fake_notify)
+        await manage_open_positions(session, settings)
+
+        matching = [c for c in calls if "ZAUTP" in c]
+        assert len(matching) == 1
+        assert "+30.00" in matching[0]  # (103 - 100) * 10
 
 
 class TestBuildBroker:
