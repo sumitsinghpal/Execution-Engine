@@ -191,7 +191,7 @@ async def health_check(
     )
 
 
-@app.post("/v1/orders/preview", response_model=OrderPreview)
+@app.post("/v1/orders/preview", response_model=OrderPreview, dependencies=[Depends(verify_admin_key)])
 async def preview_order(
     proposal: TradeProposal,
     db: Session = Depends(get_db),
@@ -245,7 +245,7 @@ async def preview_order(
         raise HTTPException(status_code=500, detail="Preview failed")
 
 
-@app.post("/v1/orders/execute", response_model=ExecutionReceipt)
+@app.post("/v1/orders/execute", response_model=ExecutionReceipt, dependencies=[Depends(verify_admin_key)])
 async def execute_order(
     request: ExecutionRequest,
     db: Session = Depends(get_db),
@@ -340,7 +340,7 @@ async def execute_order(
         raise HTTPException(status_code=500, detail="Execution failed")
 
 
-@app.get("/v1/orders")
+@app.get("/v1/orders", dependencies=[Depends(verify_admin_key)])
 async def list_orders(
     account: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -389,7 +389,7 @@ async def list_orders(
     }
 
 
-@app.get("/v1/account/{account}/balances")
+@app.get("/v1/account/{account}/balances", dependencies=[Depends(verify_admin_key)])
 async def get_account_balances(
     account: str,
     settings: Settings = Depends(get_settings_dep),
@@ -414,7 +414,7 @@ async def get_account_balances(
         raise HTTPException(status_code=502, detail=f"Could not fetch balances: {e}")
 
 
-@app.get("/v1/account/{account}/positions")
+@app.get("/v1/account/{account}/positions", dependencies=[Depends(verify_admin_key)])
 async def get_account_positions(
     account: str,
     settings: Settings = Depends(get_settings_dep),
@@ -433,7 +433,7 @@ async def get_account_positions(
         raise HTTPException(status_code=502, detail=f"Could not fetch positions: {e}")
 
 
-@app.get("/v1/orders/{decision_id}", response_model=OrderStatus_Model)
+@app.get("/v1/orders/{decision_id}", response_model=OrderStatus_Model, dependencies=[Depends(verify_admin_key)])
 async def get_order_status(
     decision_id: str,
     db: Session = Depends(get_db),
@@ -455,7 +455,7 @@ async def get_order_status(
         raise HTTPException(status_code=500, detail="Status query failed")
 
 
-@app.get("/v1/orders/{decision_id}/slices")
+@app.get("/v1/orders/{decision_id}/slices", dependencies=[Depends(verify_admin_key)])
 async def get_order_slices(decision_id: str, db: Session = Depends(get_db)):
     """
     Child MARKET slices submitted so far for a TWAP/VWAP order (see
@@ -646,7 +646,7 @@ async def get_market_status():
     return validator.get_market_status()
 
 
-@app.post("/v1/reconciliation/positions")
+@app.post("/v1/reconciliation/positions", dependencies=[Depends(verify_admin_key)])
 async def reconcile_positions(
     account: str = "primary",
     db: Session = Depends(get_db),
@@ -673,7 +673,7 @@ async def reconcile_positions(
         raise HTTPException(status_code=500, detail=f"Position reconciliation failed: {e}")
 
 
-@app.post("/v1/risk/drawdown-check")
+@app.post("/v1/risk/drawdown-check", dependencies=[Depends(verify_admin_key)])
 async def check_drawdown(
     account: str = "primary",
     db: Session = Depends(get_db),
@@ -701,7 +701,7 @@ async def check_drawdown(
         raise HTTPException(status_code=500, detail=f"Drawdown check failed: {e}")
 
 
-@app.post("/v1/risk/agent-exposure-check")
+@app.post("/v1/risk/agent-exposure-check", dependencies=[Depends(verify_admin_key)])
 async def check_agent_exposure(
     agent_id: str = Query(..., pattern=r"^[A-Za-z0-9_-]{1,64}$"),
     db: Session = Depends(get_db),
@@ -730,7 +730,7 @@ async def check_agent_exposure(
         raise HTTPException(status_code=500, detail=f"Agent exposure check failed: {e}")
 
 
-@app.get("/v1/risk/symbol-exposure")
+@app.get("/v1/risk/symbol-exposure", dependencies=[Depends(verify_admin_key)])
 async def get_symbol_exposure(
     account: str,
     symbol: str,
@@ -753,7 +753,7 @@ async def get_symbol_exposure(
         raise HTTPException(status_code=500, detail=f"Symbol exposure query failed: {e}")
 
 
-@app.post("/v1/strategies/scan-all")
+@app.post("/v1/strategies/scan-all", dependencies=[Depends(verify_admin_key)])
 async def scan_all_strategies_now(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
@@ -783,7 +783,7 @@ async def list_strategies():
     return {"strategies": [s.to_dict() for s in STRATEGIES.values()]}
 
 
-@app.post("/v1/strategies/{strategy_id}/scan")
+@app.post("/v1/strategies/{strategy_id}/scan", dependencies=[Depends(verify_admin_key)])
 async def scan_strategy(
     strategy_id: str,
     symbol: str = Query(..., pattern=r"^[A-Z]{1,5}$"),
@@ -823,7 +823,7 @@ def _pending_duplicate_signal(db: Session, strategy_id: str, symbol: str):
     return existing[0] if existing else None
 
 
-@app.get("/v1/strategies/signals")
+@app.get("/v1/strategies/signals", dependencies=[Depends(verify_admin_key)])
 async def list_strategy_signals(
     status: Optional[str] = Query(default=SignalStatus.PENDING),
     limit: int = 50,
@@ -838,7 +838,7 @@ async def list_strategy_signals(
     return {"signals": [r.to_dict() for r in records]}
 
 
-@app.post("/v1/strategies/signals/{signal_id}/dismiss")
+@app.post("/v1/strategies/signals/{signal_id}/dismiss", dependencies=[Depends(verify_admin_key)])
 async def dismiss_strategy_signal(signal_id: int, db: Session = Depends(get_db)):
     """Marks a signal reviewed-and-declined. No order-related side effect — purely bookkeeping."""
     try:
@@ -848,7 +848,7 @@ async def dismiss_strategy_signal(signal_id: int, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@app.post("/v1/external-signals/poll")
+@app.post("/v1/external-signals/poll", dependencies=[Depends(verify_admin_key)])
 async def poll_external_signals_now(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
@@ -868,7 +868,7 @@ async def poll_external_signals_now(
         raise HTTPException(status_code=502, detail=f"EDGE-TF poll failed: {e}")
 
 
-@app.get("/v1/external-signals")
+@app.get("/v1/external-signals", dependencies=[Depends(verify_admin_key)])
 async def list_external_signals(
     status: Optional[str] = Query(default=ExternalSignalStatus.PENDING),
     limit: int = 50,
@@ -885,7 +885,7 @@ async def list_external_signals(
     return {"signals": [r.to_dict() for r in records]}
 
 
-@app.post("/v1/external-signals/{trade_id}/load")
+@app.post("/v1/external-signals/{trade_id}/load", dependencies=[Depends(verify_admin_key)])
 async def load_external_signal(
     trade_id: str,
     account: str = Query(..., description="Account alias to execute this trade against"),
@@ -919,7 +919,7 @@ async def load_external_signal(
     return {"proposal": proposal}
 
 
-@app.post("/v1/external-signals/ingest")
+@app.post("/v1/external-signals/ingest", dependencies=[Depends(verify_admin_key)])
 async def ingest_external_signals(
     request: EarningsIngestRequest,
     db: Session = Depends(get_db),
@@ -939,7 +939,7 @@ async def ingest_external_signals(
     raise HTTPException(status_code=400, detail=f"Unknown or unsupported ingestion source: {request.source}")
 
 
-@app.post("/v1/external-signals/{trade_id}/dismiss")
+@app.post("/v1/external-signals/{trade_id}/dismiss", dependencies=[Depends(verify_admin_key)])
 async def dismiss_external_signal(trade_id: str, db: Session = Depends(get_db)):
     """Marks an external signal reviewed-and-declined. No upstream call, no order-related side effect."""
     record = ExternalSignalService(db).get_by_trade_id(trade_id)
@@ -949,7 +949,7 @@ async def dismiss_external_signal(trade_id: str, db: Session = Depends(get_db)):
     return updated.to_dict()
 
 
-@app.post("/v1/backtest/run")
+@app.post("/v1/backtest/run", dependencies=[Depends(verify_admin_key)])
 async def run_backtest_endpoint(request: BacktestRequest):
     """
     Backtests the exact live rules src/execution/autonomous_trader.py runs
@@ -990,7 +990,7 @@ async def run_backtest_endpoint(request: BacktestRequest):
     }
 
 
-@app.get("/v1/autonomous/status")
+@app.get("/v1/autonomous/status", dependencies=[Depends(verify_admin_key)])
 async def autonomous_status(settings: Settings = Depends(get_settings_dep)):
     """
     Read-only configuration snapshot for the autonomous trader
@@ -1015,7 +1015,7 @@ async def autonomous_status(settings: Settings = Depends(get_settings_dep)):
     }
 
 
-@app.post("/v1/autonomous/run-once")
+@app.post("/v1/autonomous/run-once", dependencies=[Depends(verify_admin_key)])
 async def autonomous_run_once(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
@@ -1036,7 +1036,7 @@ async def autonomous_run_once(
         raise HTTPException(status_code=500, detail=f"Autonomous cycle failed: {e}")
 
 
-@app.get("/v1/autonomous/positions")
+@app.get("/v1/autonomous/positions", dependencies=[Depends(verify_admin_key)])
 async def list_autonomous_positions(
     status: Optional[str] = Query(default=None, description="Filter by OPEN/CLOSED_TARGET/CLOSED_STOP/CLOSED_ERROR; omit for all."),
     limit: int = 100,

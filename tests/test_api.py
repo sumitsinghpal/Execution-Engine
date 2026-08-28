@@ -19,8 +19,8 @@ from src.models.orders import (
 
 @pytest.fixture
 def client(app_with_test_db):
-    """Create FastAPI test client with test database."""
-    return TestClient(app_with_test_db)
+    """Create FastAPI test client with test database. Most endpoints now require the admin key (see verify_admin_key) — sent as a default header here rather than per-call."""
+    return TestClient(app_with_test_db, headers={"x-admin-key": "change-me-in-prod"})
 
 
 class TestPreviewEndpoint:
@@ -282,7 +282,8 @@ class TestMultiAgentKillSwitch:
             client.post("/v1/kill-switch/agents/momentum-agent/off", headers={"x-admin-key": "change-me-in-prod"})
 
     def test_agent_kill_switch_requires_admin_key(self, client):
-        resp = client.post("/v1/kill-switch/agents/some-agent/on")
+        # The `client` fixture sends a valid key by default — override it here to test the rejection path.
+        resp = client.post("/v1/kill-switch/agents/some-agent/on", headers={"x-admin-key": ""})
         assert resp.status_code == 403
 
     def test_agent_kill_switch_rejects_reserved_global_scope(self, client):
@@ -417,8 +418,9 @@ class TestKillSwitchEndpoints:
     
     def test_kill_switch_on_requires_admin_key(self, client):
         """kill-switch/on requires admin key."""
-        response = client.post("/v1/kill-switch/on")
-        
+        # The `client` fixture sends a valid key by default — override it here to test the rejection path.
+        response = client.post("/v1/kill-switch/on", headers={"x-admin-key": ""})
+
         assert response.status_code == 403
     
     def test_kill_switch_on_with_valid_key(self, client):

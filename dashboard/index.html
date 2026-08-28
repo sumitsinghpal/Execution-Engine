@@ -121,6 +121,8 @@
   .pill.crit { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, var(--border)); background: var(--crit-soft); }
   .pill.crit .dot { background: var(--crit); animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  button.pill { font-family: var(--font-mono); cursor: pointer; -webkit-appearance: none; appearance: none; }
+  button.pill.set { color: var(--buy); border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
 
   /* Layout */
   .grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; min-width: 0; }
@@ -335,6 +337,7 @@
         <select class="account-select" id="accountSelect" title="Account alias"></select>
       </div>
       <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
+      <button class="pill" id="unlockPill" type="button" title="Set the admin API key — required for everything except health/catalog/market-status">🔒 <span id="unlockPillLabel">Set API key</span></button>
     </div>
   </div>
 
@@ -497,7 +500,7 @@
 <div class="overlay" id="adminOverlay">
   <div class="modal">
     <h3 id="adminTitle">Admin key required</h3>
-    <p>Toggling the kill switch requires the admin API key.</p>
+    <p id="adminSub">Required for the kill switch and every account/order/strategy action.</p>
     <div class="field">
       <label for="mAdminKey">X-Admin-Key</label>
       <input id="mAdminKey" type="password" placeholder="••••••••">
@@ -541,8 +544,13 @@
   }
 
   async function api(path, opts = {}) {
+    // Everything except /v1/health, /v1/strategies (catalog), and
+    // /v1/market-status requires the admin key now (see
+    // src/api/server.py's verify_admin_key) — sent on every call rather
+    // than per-endpoint. A 401/403 here means the key (top-right lock) is
+    // missing or wrong, not that the server is down.
     const res = await fetch(base() + path, {
-      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey(), ...(opts.headers || {}) },
       ...opts,
     });
     let body = null;
@@ -704,8 +712,9 @@
     });
   });
 
-  function openAdminModal(title, onConfirm) {
+  function openAdminModal(title, onConfirm, description) {
     $('adminTitle').textContent = title;
+    $('adminSub').textContent = description || 'Required for the kill switch and every account/order/strategy action.';
     $('mAdminKey').value = store.get('edge.adminKey', '');
     $('adminOverlay').classList.add('show');
     const confirmBtn = $('mAdminConfirm');
@@ -721,6 +730,21 @@
     confirmBtn.onclick = handler;
   }
   $('mAdminCancel').addEventListener('click', () => $('adminOverlay').classList.remove('show'));
+
+  // ---- Admin key (unlock) pill — every endpoint except health/catalog/market-status needs this now ----
+  function refreshUnlockPill() {
+    const set = !!adminKey();
+    $('unlockPill').classList.toggle('set', set);
+    $('unlockPillLabel').textContent = set ? 'API key set' : 'Set API key';
+  }
+  $('unlockPill').addEventListener('click', () => {
+    openAdminModal('Set API key', async () => {
+      refreshUnlockPill();
+      toast('API key saved');
+      refreshAll(); loadStrategies(); refreshLiveUpdates(true);
+    });
+  });
+  refreshUnlockPill();
 
   // ---- Order ticket ----
   let side = 'BUY';

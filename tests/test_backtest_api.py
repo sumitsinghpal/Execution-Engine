@@ -18,7 +18,7 @@ from src.backtest.engine import BacktestResult, BacktestTrade
 
 @pytest.fixture
 def client(app_with_test_db):
-    return TestClient(app_with_test_db)
+    return TestClient(app_with_test_db, headers={"x-admin-key": "change-me-in-prod"})
 
 
 def _all_wins_result() -> BacktestResult:

@@ -18,7 +18,7 @@ from src.models.orders import AssetType, Instruction, OrderType, TradeProposal
 
 @pytest.fixture
 def client(app_with_test_db):
-    return TestClient(app_with_test_db)
+    return TestClient(app_with_test_db, headers={"x-admin-key": "change-me-in-prod"})
 
 
 class _FakeEdgeTFClient:
