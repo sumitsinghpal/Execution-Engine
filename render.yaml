@@ -24,6 +24,12 @@ services:
     startCommand: uvicorn src.api.server:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /v1/health
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7 # pin required: Render's default runtime is Python 3.14, and pydantic-core==2.14.1
+        # (pinned in pyproject.toml, Oct 2023) has no prebuilt wheel for cp314 — pip falls back to
+        # building it from source via maturin/Rust, which fails outright on Render's build sandbox
+        # (its Cargo registry cache dir is read-only). 3.12.7 matches this repo's own dev environment,
+        # where every dependency here already has a working prebuilt wheel.
       - key: EXECUTION_MODE
         value: PAPER
       - key: DATABASE_URL
