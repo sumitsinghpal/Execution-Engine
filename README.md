@@ -659,13 +659,15 @@ Render service's URL into the connection field at the top (it defaults to
 `http://localhost:8000` for local dev) — the dashboard talks to whatever
 API URL you give it, nothing is hardcoded.
 
-**Security note on both, as deployed by default:** only the kill-switch
-endpoints require `API_KEY_ADMIN`. Order preview/execute, balances,
-positions, and the backtest endpoint are open to anyone with the URL.
-That's an acceptable posture for a paper-only demo behind an unguessable
-Render URL, but add real request auth (e.g. an API-key middleware in
-front of everything, not just the kill switch) before pointing this at a
-real Schwab account or handing the URL out widely.
+**Security note on both, as deployed by default:** every endpoint with a
+side effect or that reads account/order data requires `API_KEY_ADMIN`
+(`X-Admin-Key` header) — order preview/execute, balances, positions,
+strategy scans/signals, external signals, the backtest endpoint, the
+autonomous-trader controls, and both kill switches. Only pure
+infrastructure/catalog reads stay open without a key: `/v1/health`,
+`/v1/strategies` (the catalog), `/v1/market-status`, and kill-switch
+*status* GETs. Set `API_KEY_ADMIN` to a real random value before
+deploying — the default (`change-me-in-prod`) is exactly what it says.
 
 ---
 
