@@ -321,6 +321,18 @@
   .lu-pair-name { font-family: var(--font-mono); color: var(--ink-muted); }
   .lu-pair-metrics { display: flex; gap: 12px; font-family: var(--font-mono); color: var(--ink-faint); }
   .lu-pair-metrics b { color: var(--ink); }
+  .lu-chart-wrap { margin: 4px 0 6px; }
+  .lu-chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .lu-chart-grid { stroke: var(--border); stroke-width: 1; }
+  .lu-chart-axis { font-family: var(--font-mono); font-size: 9px; fill: var(--ink-faint); }
+  .lu-chart-area { opacity: 0.14; }
+  .lu-chart-line { fill: none; stroke-width: 2; }
+  .lu-chart-benchmark { fill: none; stroke: var(--ink-faint); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .lu-chart-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11px; font-family: var(--font-mono); color: var(--ink-faint); margin-top: 8px; }
+  .lu-chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .lu-chart-legend .swatch { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
+  .lu-chart-legend .swatch.dashed { background: none; border-top: 1.5px dashed var(--ink-faint); height: 0; }
+  .lu-cost-note { font-size: 11px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -1064,7 +1076,7 @@
   // Reversion) trade 5-minute bars and are excluded — this backtest only
   // ever fetches daily history, so backtesting them against it would
   // silently produce meaningless numbers, not real ones.
-  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v3'; // v3: notional bumped to $1000 (matches the live autonomous trader's own sizing) — $100 couldn't buy 1 share of QQQ/SPY/IWM, so every pair reported "too small" instead of real trades
+  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v4'; // v4: response now carries summary.combined_portfolio (equity curve) + avg_benchmark_return_pct + per-pair benchmark_return_pct — a v3 cache predates those fields, so bump to force a fresh fetch rather than rendering an empty chart from stale data
   const LIVE_UPDATES_INTERVAL_MS = 3 * 60 * 60 * 1000;
   const LIVE_UPDATES_NOTIONAL_USD = 1000; // matches settings.autonomous_notional_per_trade_usd, the live autonomous trader's own default sizing
   let liveUpdatesTimer = null;
@@ -1151,6 +1163,57 @@
     });
   }
 
+  // Renders summary.combined_portfolio.equity_curve as an inline SVG line
+  // chart — no charting library, matching the rest of the dashboard. A
+  // dashed reference line projects avg_benchmark_return_pct in a straight
+  // line from the same starting capital to the same end date, so "did the
+  // combined portfolio beat buy-and-hold" is a single glance, not a
+  // separate lookup.
+  function buildEquityChartSvg(curve, benchmarkPct) {
+    if (!curve || curve.length < 2) return '<div class="empty-note">Not enough closed trades yet for a chart.</div>';
+
+    const W = 640, H = 180, PAD_L = 58, PAD_R = 10, PAD_T = 14, PAD_B = 10;
+    const plotW = W - PAD_L - PAD_R, plotH = H - PAD_T - PAD_B;
+    const startEquity = curve[0].equity;
+    const benchmarkEnd = benchmarkPct != null ? startEquity * (1 + benchmarkPct / 100) : null;
+    const values = benchmarkEnd != null ? [...curve.map(p => p.equity), benchmarkEnd] : curve.map(p => p.equity);
+    const min = Math.min(...values), max = Math.max(...values);
+    const range = (max - min) || Math.max(1, startEquity * 0.01);
+    const yFor = (v) => PAD_T + plotH - ((v - min) / range) * plotH;
+    const xFor = (i) => PAD_L + (curve.length === 1 ? 0 : (i / (curve.length - 1)) * plotW);
+
+    const linePoints = curve.map((p, i) => `${xFor(i).toFixed(1)},${yFor(p.equity).toFixed(1)}`).join(' ');
+    const floorY = (PAD_T + plotH).toFixed(1);
+    const areaPoints = `${xFor(0).toFixed(1)},${floorY} ${linePoints} ${xFor(curve.length - 1).toFixed(1)},${floorY}`;
+    const last = curve[curve.length - 1];
+    const lastUp = last.equity >= startEquity;
+    const strokeColor = lastUp ? 'var(--buy)' : 'var(--sell)';
+
+    const gridLines = [0, 0.5, 1].map(f => {
+      const y = PAD_T + plotH * f;
+      const val = max - range * f;
+      return `<line x1="${PAD_L}" y1="${y.toFixed(1)}" x2="${W - PAD_R}" y2="${y.toFixed(1)}" class="lu-chart-grid" />
+        <text x="${PAD_L - 8}" y="${(y + 3).toFixed(1)}" class="lu-chart-axis" text-anchor="end">${money(val)}</text>`;
+    }).join('');
+
+    const benchmarkLine = benchmarkEnd != null
+      ? `<line x1="${xFor(0).toFixed(1)}" y1="${yFor(startEquity).toFixed(1)}" x2="${xFor(curve.length - 1).toFixed(1)}" y2="${yFor(benchmarkEnd).toFixed(1)}" class="lu-chart-benchmark" />`
+      : '';
+
+    return `
+      <svg viewBox="0 0 ${W} ${H}" class="lu-chart-svg" role="img" aria-label="Combined portfolio equity curve vs buy-and-hold benchmark">
+        ${gridLines}
+        <polygon points="${areaPoints}" class="lu-chart-area" style="fill:${strokeColor}"></polygon>
+        ${benchmarkLine}
+        <polyline points="${linePoints}" class="lu-chart-line" style="stroke:${strokeColor}"></polyline>
+        <circle cx="${xFor(curve.length - 1).toFixed(1)}" cy="${yFor(last.equity).toFixed(1)}" r="3.5" style="fill:${strokeColor}"></circle>
+      </svg>
+      <div class="lu-chart-legend">
+        <span><i class="swatch" style="background:${strokeColor}"></i>Combined portfolio (one shared account)</span>
+        ${benchmarkEnd != null ? `<span><i class="swatch dashed"></i>Buy-and-hold benchmark (avg across symbols)</span>` : ''}
+      </div>`;
+  }
+
   function renderLiveUpdates(data) {
     const s = (data.backtest && data.backtest.summary) || {};
     strategyAggCache = { byStrategy: aggregateByStrategy(data.backtest), intradayIds: data.intradayStrategyIds || [] };
@@ -1161,16 +1224,22 @@
     const pairRows = ((data.backtest && data.backtest.results) || [])
       .slice()
       .sort((a, z) => z.total_return_pct - a.total_return_pct)
-      .map(r => `
+      .map(r => {
+        const beatBenchmark = r.total_return_pct >= r.benchmark_return_pct;
+        return `
         <div class="lu-pair-row">
           <span class="lu-pair-name">${r.symbol} · ${r.strategy_id}</span>
           <span class="lu-pair-metrics">
             <span>${r.total_trades} trades</span>
             <span>win <b>${pct(r.win_rate)}</b></span>
             <span>pf <b class="${r.profit_factor != null && r.profit_factor >= 1 ? 'up' : 'down'}">${r.profit_factor == null ? '—' : Number(r.profit_factor).toFixed(2)}</b></span>
+            <span title="Buy-and-hold ${r.symbol} over the same window">vs hold <b class="${beatBenchmark ? 'up' : 'down'}">${r.total_return_pct >= 0 ? '+' : ''}${r.total_return_pct.toFixed(1)}% / ${r.benchmark_return_pct >= 0 ? '+' : ''}${r.benchmark_return_pct.toFixed(1)}%</b></span>
           </span>
-        </div>`)
+        </div>`;
+      })
       .join('') || '<div class="empty-note">No backtest pairs returned.</div>';
+
+    const combined = s.combined_portfolio || null;
 
     const activityRows = data.positions.length
       ? data.positions.map(p => `
@@ -1191,7 +1260,12 @@
         <div><div class="lu-stat-label">Win rate</div><div class="lu-stat-value num">${s.win_rate != null ? pct(s.win_rate) : '—'}</div></div>
         <div><div class="lu-stat-label">Total P/L</div><div class="lu-stat-value num ${s.total_pnl_usd >= 0 ? 'up' : 'down'}">${s.total_pnl_usd != null ? money(s.total_pnl_usd) : '—'}</div></div>
         <div><div class="lu-stat-label">Pairs run</div><div class="lu-stat-value num">${s.pairs_run ?? '—'}</div></div>
+        <div><div class="lu-stat-label">Avg buy-and-hold</div><div class="lu-stat-value num">${s.avg_benchmark_return_pct != null ? (s.avg_benchmark_return_pct >= 0 ? '+' : '') + s.avg_benchmark_return_pct.toFixed(1) + '%' : '—'}</div></div>
+        <div><div class="lu-stat-label">Combined drawdown</div><div class="lu-stat-value num ${combined ? 'down' : ''}">${combined ? '−' + combined.max_drawdown_pct.toFixed(1) + '%' : '—'}</div></div>
       </div>
+      <div class="lu-section-title">Combined portfolio (one shared $${combined ? Number(combined.starting_capital).toLocaleString() : '—'} account across every pair)</div>
+      <div class="lu-chart-wrap">${combined ? buildEquityChartSvg(combined.equity_curve, s.avg_benchmark_return_pct) : '<div class="empty-note">No combined portfolio data.</div>'}</div>
+      ${combined ? `<div class="lu-cost-note">${combined.total_return_pct >= 0 ? '+' : ''}${combined.total_return_pct.toFixed(2)}% combined return · ${money(combined.ending_capital)} ending equity · modeled with 5bps slippage per fill, $0 commission (Schwab-style)</div>` : ''}
       <div class="lu-section-title">By symbol × strategy</div>
       ${pairRows}
       <div class="lu-section-title">Recent autonomous activity</div>
