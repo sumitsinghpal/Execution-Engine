@@ -571,8 +571,18 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch {} },
   };
 
+  // Default server address: localhost when this file itself is being
+  // served from localhost (local dev, python -m http.server), otherwise
+  // the live API — so the same file works out of the box whether it's
+  // opened locally or visited at its deployed URL, with no separate
+  // build/config per environment. Either way it's just a starting point:
+  // the settings panel below can always point it somewhere else.
+  const DEFAULT_API_URL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+    ? 'http://localhost:8000'
+    : 'https://edge-execution-engine.onrender.com';
+
   const baseUrlInput = $('baseUrl');
-  baseUrlInput.value = store.get('edge.baseUrl', 'http://localhost:8000');
+  baseUrlInput.value = store.get('edge.baseUrl', DEFAULT_API_URL);
   baseUrlInput.addEventListener('change', () => { store.set('edge.baseUrl', baseUrlInput.value.trim()); refreshAll(); });
 
   const accountSelect = $('accountSelect');
