@@ -32,6 +32,7 @@ PROTECTED_GET_ROUTES = [
     "/v1/quotes?symbols=QQQ",
     "/v1/watchlists",
     "/v1/alerts",
+    "/v1/orders/bracket",
 ]
 
 PROTECTED_POST_ROUTES = [
@@ -59,6 +60,9 @@ PROTECTED_POST_ROUTES = [
     "/v1/watchlists/Tech/items",
     "/v1/alerts",
     "/v1/alerts/check-now",
+    "/v1/orders/bracket/attach",
+    "/v1/orders/bracket/1/cancel",
+    "/v1/orders/bracket/check-now",
 ]
 
 PROTECTED_DELETE_ROUTES = [

@@ -407,6 +407,26 @@
   .alert-row .alert-meta { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 2px; }
   .alert-row .wl-remove { background: none; border: none; color: var(--ink-faint); cursor: pointer; font-size: 15px; padding: 2px 6px; flex: none; }
   .alert-row .wl-remove:hover { color: var(--sell); }
+
+  /* Bracket order fields on the order ticket */
+  .checkbox-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .checkbox-label input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .checkbox-label .hint { font-weight: 500; }
+  .bracket-fields { margin-top: 10px; padding: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+
+  /* Bracket orders list */
+  .bracket-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .bracket-row:last-child { border-bottom: none; }
+  .bracket-row-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .bracket-row .brk-symbol { font-weight: 700; font-size: 13.5px; }
+  .bracket-row .brk-status { font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 999px; }
+  .bracket-row .brk-status.open { background: var(--accent-soft); color: var(--accent); }
+  .bracket-row .brk-status.target { background: var(--buy-soft); color: var(--buy); }
+  .bracket-row .brk-status.stop { background: var(--sell-soft); color: var(--sell); }
+  .bracket-row .brk-status.canceled, .bracket-row .brk-status.error { background: var(--surface-2); color: var(--ink-faint); }
+  .bracket-row .brk-levels { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint); margin-top: 3px; }
+  .bracket-row .wl-remove { background: none; border: none; color: var(--ink-faint); cursor: pointer; font-size: 15px; padding: 2px 6px; flex: none; }
+  .bracket-row .wl-remove:hover { color: var(--sell); }
   .lu-meta { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); margin-bottom: 14px; }
   .lu-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 14px; margin-bottom: 18px; }
   .lu-stat-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; margin-bottom: 4px; }
@@ -642,9 +662,34 @@
           </div>
         </div>
 
+        <div class="field" id="bracketToggleField">
+          <label class="checkbox-label"><input type="checkbox" id="fUseBracket"> Auto-exit this trade <span class="hint">(Buy only — closes itself when a level hits)</span></label>
+        </div>
+        <div id="bracketFields" class="bracket-fields" style="display:none">
+          <div class="field-row">
+            <div class="field">
+              <label for="fBracketStop">Stop loss (USD)</label>
+              <input id="fBracketStop" type="number" step="0.01" placeholder="optional">
+            </div>
+            <div class="field">
+              <label for="fBracketTarget">Take profit (USD)</label>
+              <input id="fBracketTarget" type="number" step="0.01" placeholder="optional">
+            </div>
+          </div>
+          <div class="field">
+            <label for="fBracketTrail">Or trail the stop (%)</label>
+            <input id="fBracketTrail" type="number" step="0.1" min="0.1" max="89" placeholder="e.g. 5 for 5%">
+          </div>
+        </div>
+
         <button class="btn btn-primary" id="previewBtn">Review order</button>
 
         <div id="verdictBox"></div>
+      </div>
+
+      <div class="card">
+        <h2>Bracket orders <span class="hint">auto-exit plans, watched and closed for you</span></h2>
+        <div id="bracketList"><div class="empty-note">Loading…</div></div>
       </div>
 
     </div>
@@ -1339,6 +1384,53 @@
   });
   $('alertPrice').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('alertAddBtn').click(); });
 
+  // ---- Bracket orders (src/execution/bracket_orders.py) ----
+  const BRACKET_STATUS_META = {
+    OPEN: { label: 'Watching', cls: 'open' },
+    CLOSED_TARGET: { label: 'Hit target', cls: 'target' },
+    CLOSED_STOP: { label: 'Hit stop', cls: 'stop' },
+    CLOSED_TRAILING_STOP: { label: 'Hit trailing stop', cls: 'stop' },
+    CLOSED_ERROR: { label: 'Exit failed', cls: 'error' },
+    CANCELED: { label: 'Canceled', cls: 'canceled' },
+  };
+
+  async function refreshBracketOrders() {
+    const el = $('bracketList');
+    try {
+      const r = await api('/v1/orders/bracket');
+      const brackets = r.brackets || [];
+      if (!brackets.length) {
+        el.innerHTML = '<div class="empty-note">No auto-exit plans yet — check "Auto-exit this trade" on a buy order to set one.</div>';
+        return;
+      }
+      el.innerHTML = brackets.map(b => {
+        const meta = BRACKET_STATUS_META[b.status] || { label: b.status, cls: 'canceled' };
+        const levels = [
+          b.stop_loss_price ? `Stop ${money(b.stop_loss_price)}` : null,
+          b.take_profit_price ? `Target ${money(b.take_profit_price)}` : null,
+          b.trailing_stop_pct ? `Trailing ${(Number(b.trailing_stop_pct) * 100).toFixed(1)}%` : null,
+        ].filter(Boolean).join(' · ');
+        return `
+        <div class="bracket-row" data-bracket-id="${b.id}">
+          <div class="bracket-row-top">
+            <span class="brk-symbol">${formatSymbol(b.symbol)} <span style="color:var(--ink-faint);font-weight:500">×${b.quantity}</span></span>
+            <span class="brk-status ${meta.cls}">${meta.label}</span>
+            ${b.status === 'OPEN' ? `<button class="wl-remove" data-cancel-bracket="${b.id}" title="Stop watching (position stays open)">✕</button>` : ''}
+          </div>
+          <div class="brk-levels">Entry ${money(b.entry_price)} · ${levels || 'no levels set'}</div>
+        </div>`;
+      }).join('');
+      el.querySelectorAll('[data-cancel-bracket]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          await api(`/v1/orders/bracket/${btn.dataset.cancelBracket}/cancel`, { method: 'POST' });
+          refreshBracketOrders();
+        });
+      });
+    } catch (e) {
+      el.innerHTML = `<div class="empty-note">Could not load bracket orders: ${e.message}</div>`;
+    }
+  }
+
   // ---- Kill switch ----
   async function refreshKillSwitch() {
     try {
@@ -1406,10 +1498,17 @@
     side = s;
     $('sideBuy').classList.toggle('active', s === 'BUY');
     $('sideSell').classList.toggle('active', s === 'SELL');
+    // A bracket manages a long position's exit — see src/execution/bracket_orders.py's module docstring — so it's only offered on a BUY.
+    $('bracketToggleField').style.display = s === 'BUY' ? '' : 'none';
+    if (s === 'SELL') { $('fUseBracket').checked = false; $('bracketFields').style.display = 'none'; }
   }
 
   $('fType').addEventListener('change', () => {
     $('limitPriceField').style.display = $('fType').value === 'LIMIT' ? '' : 'none';
+  });
+
+  $('fUseBracket').addEventListener('change', () => {
+    $('bracketFields').style.display = $('fUseBracket').checked ? '' : 'none';
   });
 
   let lastPreview = null;
@@ -1534,6 +1633,33 @@
       };
       const receipt = await api('/v1/orders/execute', { method: 'POST', body: JSON.stringify(req) });
       toast(`Order placed · ${receipt.execution_id}`);
+
+      if (side === 'BUY' && $('fUseBracket').checked) {
+        const stop = $('fBracketStop').value;
+        const target = $('fBracketTarget').value;
+        const trailPct = $('fBracketTrail').value;
+        if (stop || target || trailPct) {
+          try {
+            await api('/v1/orders/bracket/attach', {
+              method: 'POST',
+              body: JSON.stringify({
+                entry_decision_id: lastPreview.proposal.decision_id,
+                stop_loss_price: stop ? Number(stop) : undefined,
+                take_profit_price: target ? Number(target) : undefined,
+                trailing_stop_pct: trailPct ? Number(trailPct) / 100 : undefined,
+                created_by: approvedBy,
+              }),
+            });
+            toast('Auto-exit plan attached — it will close itself when a level hits');
+            refreshBracketOrders();
+          } catch (e) {
+            toast('Order placed, but the auto-exit plan could not be attached: ' + e.message);
+          }
+        }
+        $('fUseBracket').checked = false; $('bracketFields').style.display = 'none';
+        $('fBracketStop').value = ''; $('fBracketTarget').value = ''; $('fBracketTrail').value = '';
+      }
+
       $('approvalOverlay').classList.remove('show');
       $('verdictBox').innerHTML = '';
       activePlan = null; renderPlanBanner();
@@ -2087,7 +2213,7 @@
   function refreshAll() {
     refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
     refreshPositions(); refreshFeed(); refreshKillSwitch(); refreshSignals(); refreshDailyPlan();
-    refreshWatchlists(); refreshAlerts();
+    refreshWatchlists(); refreshAlerts(); refreshBracketOrders();
   }
   refreshAll();
   loadStrategies();

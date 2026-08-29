@@ -949,6 +949,113 @@ class TestPriceAlertEndpoints:
         assert "fired" in resp.json()
 
 
+class TestBracketOrderEndpoints:
+    """POST /v1/orders/bracket/attach and friends — see src/execution/bracket_orders.py."""
+
+    def _executed_buy_decision_id(self, client, sample_trade_proposal, suffix):
+        # The idempotency dedup is keyed by decision_id alone (see
+        # TestExecuteEndpoint._unique_proposal above) — each test needs its
+        # own decision_id so an earlier test's executed order can't be
+        # mistaken for this one's.
+        proposal = sample_trade_proposal.model_copy(update={"decision_id": f"{sample_trade_proposal.decision_id}-bracket-{suffix}"})
+        preview_resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        assert preview_resp.status_code == 200
+        preview_id = preview_resp.json()["preview_id"]
+
+        exec_resp = client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview_id,
+                "approval": {
+                    "preview_id": preview_id,
+                    "approved_by": "test_operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "Approved for bracket-order integration test",
+                    "idempotency_key": f"{proposal.decision_id}:exec:bracket",
+                },
+            },
+        )
+        assert exec_resp.status_code == 200
+        return proposal.decision_id
+
+    def test_attach_to_an_executed_order_succeeds(self, client, sample_trade_proposal):
+        decision_id = self._executed_buy_decision_id(client, sample_trade_proposal, "ok")
+
+        resp = client.post(
+            "/v1/orders/bracket/attach",
+            json={"entry_decision_id": decision_id, "stop_loss_price": 1.0, "take_profit_price": 99999.0, "created_by": "sumit"},
+        )
+
+        assert resp.status_code == 200
+        bracket = resp.json()
+        assert bracket["entry_decision_id"] == decision_id
+        assert bracket["status"] == "OPEN"
+
+        list_resp = client.get("/v1/orders/bracket")
+        assert any(b["entry_decision_id"] == decision_id for b in list_resp.json()["brackets"])
+
+    def test_attach_requires_at_least_one_stop(self, client, sample_trade_proposal):
+        decision_id = self._executed_buy_decision_id(client, sample_trade_proposal, "no-stop")
+
+        resp = client.post("/v1/orders/bracket/attach", json={"entry_decision_id": decision_id, "created_by": "sumit"})
+
+        assert resp.status_code == 422
+
+    def test_attach_to_an_unknown_order_is_404(self, client):
+        resp = client.post(
+            "/v1/orders/bracket/attach",
+            json={"entry_decision_id": "not-a-real-decision-id", "stop_loss_price": 1.0, "created_by": "sumit"},
+        )
+        assert resp.status_code == 404
+
+    def test_attach_to_a_preview_only_order_is_400(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(update={"decision_id": f"{sample_trade_proposal.decision_id}-bracket-unexecuted"})
+        preview_resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        assert preview_resp.status_code == 200
+
+        resp = client.post(
+            "/v1/orders/bracket/attach",
+            json={"entry_decision_id": proposal.decision_id, "stop_loss_price": 1.0, "created_by": "sumit"},
+        )
+        assert resp.status_code == 400
+
+    def test_attaching_twice_is_400(self, client, sample_trade_proposal):
+        decision_id = self._executed_buy_decision_id(client, sample_trade_proposal, "twice")
+        first = client.post(
+            "/v1/orders/bracket/attach",
+            json={"entry_decision_id": decision_id, "stop_loss_price": 1.0, "created_by": "sumit"},
+        )
+        assert first.status_code == 200
+
+        second = client.post(
+            "/v1/orders/bracket/attach",
+            json={"entry_decision_id": decision_id, "stop_loss_price": 2.0, "created_by": "sumit"},
+        )
+        assert second.status_code == 400
+
+    def test_cancel_bracket(self, client, sample_trade_proposal):
+        decision_id = self._executed_buy_decision_id(client, sample_trade_proposal, "cancel")
+        bracket = client.post(
+            "/v1/orders/bracket/attach",
+            json={"entry_decision_id": decision_id, "stop_loss_price": 1.0, "created_by": "sumit"},
+        ).json()
+
+        resp = client.post(f"/v1/orders/bracket/{bracket['id']}/cancel")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "CANCELED"
+
+    def test_cancel_unknown_bracket_is_404(self, client):
+        resp = client.post("/v1/orders/bracket/999999/cancel")
+        assert resp.status_code == 404
+
+    def test_check_now_runs_without_error(self, client):
+        resp = client.post("/v1/orders/bracket/check-now")
+        assert resp.status_code == 200
+        assert "closed" in resp.json()
+
+
 class TestStrategyEndpoints:
     """
     Test the strategy catalog, on-demand scan, and signal review endpoints.

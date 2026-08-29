@@ -30,6 +30,7 @@ from src.execution.daily_plan import DailyPlanService
 from src.execution.strategy_ranking import rank_strategies_by_recent_performance
 from src.execution.strategy_rotation import rotate_once, run_strategy_rotation_loop
 from src.execution.price_alerts import PriceAlertService, check_alerts_once, run_price_alert_loop
+from src.execution.bracket_orders import BracketOrderService, manage_bracket_orders, run_bracket_order_loop
 from src.execution.watchlists import WatchlistService
 from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
 from src.execution.ep_edge_earnings_adapter import (
@@ -49,6 +50,7 @@ from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.integrations.edge_tf_client import EdgeTFGatewayError
 from src.logging_config import configure_logging, get_logger
 from src.models.daily_plan_api import ArmPlanRequest, DisarmPlanRequest, RankStrategiesRequest, StartAgentRequest
+from src.models.bracket_order_api import AttachBracketOrderRequest
 from src.models.price_alert_api import CreatePriceAlertRequest
 from src.models.watchlist_api import AddWatchlistSymbolRequest
 from src.models.multi_leg_orders import MultiLegExecuteRequest, MultiLegPreviewRequest
@@ -117,6 +119,8 @@ _strategy_rotation_stop_event: Optional[asyncio.Event] = None
 _strategy_rotation_task: Optional[asyncio.Task] = None
 _price_alert_stop_event: Optional[asyncio.Event] = None
 _price_alert_task: Optional[asyncio.Task] = None
+_bracket_order_stop_event: Optional[asyncio.Event] = None
+_bracket_order_task: Optional[asyncio.Task] = None
 
 
 @app.on_event("startup")
@@ -128,6 +132,7 @@ async def startup_event():
     global _scanner_stop_event, _scanner_task, _edge_tf_connector_stop_event, _edge_tf_connector_task
     global _autonomous_trader_stop_event, _autonomous_trader_task
     global _strategy_rotation_stop_event, _strategy_rotation_task, _price_alert_stop_event, _price_alert_task
+    global _bracket_order_stop_event, _bracket_order_task
     _scanner_stop_event = asyncio.Event()
     _scanner_task = asyncio.create_task(run_scanner_loop(SessionLocal, get_settings, _scanner_stop_event))
 
@@ -149,6 +154,11 @@ async def startup_event():
     _price_alert_stop_event = asyncio.Event()
     _price_alert_task = asyncio.create_task(
         run_price_alert_loop(SessionLocal, get_settings, _price_alert_stop_event)
+    )
+
+    _bracket_order_stop_event = asyncio.Event()
+    _bracket_order_task = asyncio.create_task(
+        run_bracket_order_loop(SessionLocal, get_settings, _bracket_order_stop_event)
     )
 
     logger.info("startup_complete")
@@ -181,6 +191,11 @@ async def shutdown_event():
         _price_alert_stop_event.set()
     if _price_alert_task is not None:
         await asyncio.wait_for(_price_alert_task, timeout=10)
+
+    if _bracket_order_stop_event is not None:
+        _bracket_order_stop_event.set()
+    if _bracket_order_task is not None:
+        await asyncio.wait_for(_bracket_order_task, timeout=10)
 
 
 @app.get("/v1/health")
@@ -711,6 +726,79 @@ async def check_price_alerts_now(db: Session = Depends(get_db), settings: Settin
     broker = build_broker_adapter(settings)
     fired = await check_alerts_once(db, settings, broker)
     return {"fired": fired}
+
+
+@app.post("/v1/orders/bracket/attach", dependencies=[Depends(verify_admin_key)])
+async def attach_bracket_order(
+    request: AttachBracketOrderRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Attaches a stop-loss / take-profit / trailing-stop exit plan to an
+    already-executed BUY order (Dhan's "Super Order" pattern) — a human
+    still places the entry through the normal preview -> execute flow
+    first; this call only starts the background monitoring that closes it
+    automatically once a level is hit (src/execution/bracket_orders.py).
+    entry_price is the live quote at the moment of attaching, matching how
+    every other paper-mode entry in this system treats "current price" as
+    the fill price for a MARKET order.
+    """
+    stmt = select(OrderRecord).where(OrderRecord.decision_id == request.entry_decision_id)
+    order = db.exec(stmt).first()
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Order {request.entry_decision_id} not found")
+    if order.status != "SUBMITTED":
+        raise HTTPException(status_code=400, detail=f"Order {request.entry_decision_id} has not been executed (status: {order.status})")
+    if order.instruction != "BUY":
+        raise HTTPException(status_code=400, detail="A bracket can only be attached to a BUY entry — it manages a long position's exit")
+
+    try:
+        broker = build_broker_adapter(settings)
+        quote = await broker.get_quote(order.symbol)
+        entry_price = float(quote["last"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not fetch a live quote for {order.symbol}: {e}")
+
+    try:
+        record = BracketOrderService(db).attach(
+            entry_decision_id=order.decision_id,
+            account=order.account,
+            symbol=order.symbol,
+            quantity=order.quantity,
+            entry_price=entry_price,
+            stop_loss_price=request.stop_loss_price,
+            take_profit_price=request.take_profit_price,
+            trailing_stop_pct=request.trailing_stop_pct,
+            created_by=request.created_by,
+        )
+        return record.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/v1/orders/bracket", dependencies=[Depends(verify_admin_key)])
+async def list_bracket_orders(db: Session = Depends(get_db)):
+    """Every bracket order, most recent first — open ones are actively monitored, closed ones show how/where they exited."""
+    records = BracketOrderService(db).list_all()
+    return {"brackets": [r.to_dict() for r in records]}
+
+
+@app.post("/v1/orders/bracket/{bracket_id}/cancel", dependencies=[Depends(verify_admin_key)])
+async def cancel_bracket_order(bracket_id: int, db: Session = Depends(get_db)):
+    """Stops monitoring a bracket — the underlying position stays open, exactly like an order that was never bracketed."""
+    record = BracketOrderService(db).cancel(bracket_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Bracket {bracket_id} not found or no longer open")
+    return record.to_dict()
+
+
+@app.post("/v1/orders/bracket/check-now", dependencies=[Depends(verify_admin_key)])
+async def check_bracket_orders_now(db: Session = Depends(get_db), settings: Settings = Depends(get_settings_dep)):
+    """Triggers one immediate bracket-order check instead of waiting for the next ~30s background tick — for testing/demo."""
+    broker = build_broker_adapter(settings)
+    closed = await manage_bracket_orders(db, settings, broker)
+    return {"closed": closed}
 
 
 @app.get("/v1/orders/{decision_id}", response_model=OrderStatus_Model, dependencies=[Depends(verify_admin_key)])
