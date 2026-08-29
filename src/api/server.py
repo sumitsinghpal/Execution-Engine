@@ -26,6 +26,8 @@ from src.backtest.api_models import BacktestRequest
 from src.backtest.runner import run_backtest_suite, summarize_suite
 from src.execution.autonomous_positions import AutonomousPositionService
 from src.execution.autonomous_trader import autonomous_cycle_once, run_autonomous_loop
+from src.execution.daily_plan import DailyPlanService
+from src.execution.strategy_ranking import rank_strategies_by_recent_performance
 from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
 from src.execution.ep_edge_earnings_adapter import (
     ExternalSignalIngestRequest as EarningsIngestRequest,
@@ -43,6 +45,7 @@ from src.execution.strategy_signals import SignalStatus, StrategySignalService
 from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.integrations.edge_tf_client import EdgeTFGatewayError
 from src.logging_config import configure_logging, get_logger
+from src.models.daily_plan_api import ArmPlanRequest, DisarmPlanRequest, RankStrategiesRequest
 from src.models.multi_leg_orders import MultiLegExecuteRequest, MultiLegPreviewRequest
 from src.models.orders import (
     TradeProposal,
@@ -1079,7 +1082,7 @@ async def run_backtest_endpoint(request: BacktestRequest):
 
 
 @app.get("/v1/autonomous/status", dependencies=[Depends(verify_admin_key)])
-async def autonomous_status(settings: Settings = Depends(get_settings_dep)):
+async def autonomous_status(settings: Settings = Depends(get_settings_dep), db: Session = Depends(get_db)):
     """
     Read-only configuration snapshot for the autonomous trader
     (src/execution/autonomous_trader.py) — whether it's enabled, which
@@ -1087,7 +1090,12 @@ async def autonomous_status(settings: Settings = Depends(get_settings_dep)):
     using. To actually stop it: either autonomous_trading_enabled=false, or
     POST /v1/kill-switch/agents/{autonomous_agent_id}/on for an immediate
     halt without a redeploy.
+
+    "strategy_ids"/"notional_per_trade_usd" here are the static settings
+    fallback only — active_plan (see GET /v1/autonomous/plan) is what
+    scan_for_entries() actually uses when present, and takes priority.
     """
+    active_plan = DailyPlanService(db).get_active_plan()
     return {
         "enabled": settings.autonomous_trading_enabled,
         "agent_id": settings.autonomous_agent_id,
@@ -1100,6 +1108,7 @@ async def autonomous_status(settings: Settings = Depends(get_settings_dep)):
         "scan_interval_sec": settings.autonomous_scan_interval_sec,
         "broker": "PAPER (hard-coded, cannot be changed via settings)",
         "llm_narration_enabled": settings.llm_narration_enabled,
+        "active_plan": active_plan.to_dict() if active_plan else None,
     }
 
 
@@ -1135,6 +1144,88 @@ async def list_autonomous_positions(
     if status:
         records = [r for r in records if r.status == status]
     return {"positions": [r.to_dict() for r in records]}
+
+
+@app.post("/v1/autonomous/rank-strategies", dependencies=[Depends(verify_admin_key)])
+async def rank_strategies(
+    request: RankStrategiesRequest,
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Ranks every daily-bar strategy by real performance over a recent
+    rolling window (see src/execution/strategy_ranking.py for exactly how
+    — real network data per symbol, so this can take up to a minute).
+    Read-only: computes and returns a ranking plus a suggested top_n
+    picks, does not arm or execute anything. The dashboard's "arm for
+    today" flow calls this first, shows the numbers to a human, and only
+    then calls POST /v1/autonomous/arm with whatever they actually chose
+    (not necessarily identical to top_picks).
+    """
+    symbols = request.symbols or settings.autonomous_watchlist
+    try:
+        ranking = await rank_strategies_by_recent_performance(
+            symbols,
+            lookback_days=request.lookback_days,
+            top_n=request.top_n,
+            notional_per_trade_usd=request.notional_per_trade_usd,
+            risk_pct=request.risk_pct,
+            reward_risk_ratio=request.reward_risk_ratio,
+        )
+        return ranking.to_dict()
+    except Exception as e:
+        logger.error("rank_strategies_error", error=str(e))
+        raise HTTPException(status_code=502, detail=f"Ranking failed: {e}")
+
+
+@app.post("/v1/autonomous/arm", dependencies=[Depends(verify_admin_key)])
+async def arm_daily_plan(
+    request: ArmPlanRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Arms today's autonomous trading plan — the strategies in
+    request.strategy_ids become the only ones scan_for_entries() will act
+    on, sized at request.notional_per_trade_usd per trade, until disarmed
+    (POST /v1/autonomous/disarm) or ttl_hours passes (default 24h).
+    Replaces any previously active plan; does not touch positions already
+    open. Every strategy_id must be a real, daily-bar strategy in the
+    catalog — an intraday one (ORB, VWAP Reversion) can't be armed here
+    since this system never backtests or ranks those against daily data.
+    """
+    unknown = [s for s in request.strategy_ids if s not in STRATEGIES]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy_id(s): {unknown}")
+    non_daily = [s for s in request.strategy_ids if STRATEGIES[s].bar_interval != "daily"]
+    if non_daily:
+        raise HTTPException(status_code=400, detail=f"Only daily-bar strategies can be armed here: {non_daily}")
+
+    try:
+        plan = DailyPlanService(db).arm(
+            request.strategy_ids,
+            request.notional_per_trade_usd,
+            request.armed_by,
+            ttl_hours=request.ttl_hours,
+        )
+        return plan.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/v1/autonomous/disarm", dependencies=[Depends(verify_admin_key)])
+async def disarm_daily_plan(
+    request: DisarmPlanRequest,
+    db: Session = Depends(get_db),
+):
+    """Stops new autonomous entries immediately — this is the "stop the trade" action. Positions already open are untouched and keep being managed normally."""
+    plan = DailyPlanService(db).disarm(request.disarmed_by)
+    return {"was_active": plan is not None, "plan": plan.to_dict() if plan else None}
+
+
+@app.get("/v1/autonomous/plan", dependencies=[Depends(verify_admin_key)])
+async def get_daily_plan(db: Session = Depends(get_db)):
+    """The currently active daily plan, or null if not armed (or expired)."""
+    plan = DailyPlanService(db).get_active_plan()
+    return {"active_plan": plan.to_dict() if plan else None}
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
 from src.execution.autonomous_trader import manage_open_positions, scan_for_entries
+from src.execution.daily_plan import DailyPlanService
 from src.execution.executor import OrderRecord
 from src.execution.kill_switch_state import KillSwitchService
 import src.execution.autonomous_trader as autonomous_trader
@@ -82,7 +83,7 @@ class _FakeAutoBroker:
     async def get_price_history(self, symbol, bar_interval, lookback_days): raise NotImplementedError
 
 
-_ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTO,ZAUTP,ZAUTX"
+_ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTO,ZAUTP,ZAUTQ,ZAUTR,ZAUTS,ZAUTT,ZAUTX"
 
 
 def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **overrides):
@@ -112,6 +113,17 @@ def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **ove
     return settings
 
 
+def _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="1000", ttl_hours=24):
+    """
+    scan_for_entries() only opens anything with an active daily plan (see
+    src/execution/daily_plan.py) — every TestScanForEntries test needs
+    one armed with the same strategy_ids/notional it's exercising.
+    """
+    from decimal import Decimal
+    ids = strategy_ids.split(",") if isinstance(strategy_ids, str) else list(strategy_ids)
+    return DailyPlanService(session).arm(ids, Decimal(notional_per_trade_usd), armed_by="test", ttl_hours=ttl_hours)
+
+
 @pytest.fixture(autouse=True)
 def _fake_broker(monkeypatch):
     """Every test in this file gets a fresh _FakeAutoBroker in place of the real PaperBrokerAdapter."""
@@ -125,6 +137,7 @@ class TestScanForEntries:
     async def test_a_fired_signal_opens_a_position_with_standardized_exits(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTA", autonomous_risk_pct="0.01", autonomous_reward_risk_ratio="2")
+        _arm(session)
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced golden cross")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -151,6 +164,7 @@ class TestScanForEntries:
     async def test_order_actually_reaches_the_broker(self, test_db_engine_and_session, monkeypatch, _fake_broker):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTB")
+        _arm(session)
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -165,6 +179,7 @@ class TestScanForEntries:
     async def test_order_record_uses_the_autonomous_agent_id_not_default(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTC", autonomous_agent_id="my-auto-agent")
+        _arm(session)
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -182,6 +197,7 @@ class TestScanForEntries:
     async def test_no_signal_opens_nothing(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTD")
+        _arm(session)
 
         async def fake_scan(broker, symbol, strategy_id):
             return None
@@ -195,6 +211,7 @@ class TestScanForEntries:
     async def test_does_not_pyramid_an_existing_open_position(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTE")
+        _arm(session)
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -214,6 +231,7 @@ class TestScanForEntries:
     async def test_too_small_a_notional_for_one_share_skips_the_trade(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTF", autonomous_notional_per_trade_usd="1000")
+        _arm(session, notional_per_trade_usd="1000")
         # $5000 entry price, $1000 notional budget: not even one share fits.
         detail = SignalDetail(entry_price=5000.0, stop_loss_price=4500.0, take_profit_price=6000.0, rationale="forced")
 
@@ -230,6 +248,7 @@ class TestScanForEntries:
     async def test_fleet_wide_kill_switch_blocks_new_entries(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTG")
+        _arm(session)
         KillSwitchService(session).set_state(enabled=True, set_by="test", reason="halt everything")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
@@ -247,6 +266,7 @@ class TestScanForEntries:
     async def test_per_agent_kill_switch_blocks_only_the_autonomous_agent(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTH", autonomous_agent_id="auto-halted-test-agent")
+        _arm(session)
         KillSwitchService(session).set_state(enabled=True, set_by="test", reason="halt this agent only", scope="auto-halted-test-agent")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
@@ -262,6 +282,7 @@ class TestScanForEntries:
     async def test_opening_a_position_fires_a_notification(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTO")
+        _arm(session)
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
         calls = []
 
@@ -283,6 +304,7 @@ class TestScanForEntries:
     async def test_a_failing_strategy_does_not_stop_the_rest_of_the_scan(self, test_db_engine_and_session, monkeypatch):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch, watchlist="ZAUTI,ZAUTJ", strategy_ids="golden_cross")
+        _arm(session, strategy_ids="golden_cross")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def flaky_scan(broker, symbol, strategy_id):
@@ -294,6 +316,82 @@ class TestScanForEntries:
         opened = await scan_for_entries(session, settings)
 
         assert opened == 1  # ZAUTJ still went through despite ZAUTI failing
+
+    @pytest.mark.asyncio
+    async def test_without_an_armed_plan_nothing_opens_even_with_a_fired_signal(self, test_db_engine_and_session, monkeypatch):
+        """
+        The core new gate: settings.autonomous_trading_enabled=True alone
+        is no longer enough — see daily_plan.py. daily_plan has no
+        per-test scoping the way symbols/agent_ids elsewhere in this file
+        do (it's a single "what's active right now" record, by design —
+        see its own docstring), so this explicitly disarms first rather
+        than just relying on no earlier test in this shared-DB session
+        having armed one.
+        """
+        _, session = test_db_engine_and_session
+        DailyPlanService(session).disarm(disarmed_by="test-setup")
+        settings = _settings(monkeypatch, watchlist="ZAUTQ")  # deliberately no _arm(session) call
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 0
+        assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZAUTQ"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_expired_plan_behaves_as_not_armed(self, test_db_engine_and_session, monkeypatch):
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch, watchlist="ZAUTR")
+        _arm(session, ttl_hours=-1)  # already expired
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 0
+
+    @pytest.mark.asyncio
+    async def test_disarming_stops_new_entries_immediately(self, test_db_engine_and_session, monkeypatch):
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch, watchlist="ZAUTS")
+        _arm(session)
+        DailyPlanService(session).disarm(disarmed_by="test")
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 0
+
+    @pytest.mark.asyncio
+    async def test_armed_plans_notional_and_strategy_ids_take_priority_over_settings_defaults(self, test_db_engine_and_session, monkeypatch):
+        """The whole point of arming: what's used is what a human chose today, not the static settings fallback."""
+        _, session = test_db_engine_and_session
+        # settings itself says a different strategy ("turtle_donchian") and a much bigger notional — the plan must win.
+        settings = _settings(monkeypatch, watchlist="ZAUTT", strategy_ids="turtle_donchian", autonomous_notional_per_trade_usd="50000")
+        _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="500")
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail if strategy_id == "golden_cross" else None
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 1
+        position = next(p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZAUTT")
+        assert position.strategy_id == "golden_cross"
+        assert position.quantity == 5  # $500 plan notional / $100 entry, NOT $50000 / $100
 
 
 class TestManageOpenPositions:

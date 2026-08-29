@@ -313,6 +313,87 @@ class TestMultiLegEndpoints:
         assert response.status_code == 404
 
 
+class TestDailyPlanEndpoints:
+    """
+    POST /v1/autonomous/rank-strategies, /arm, /disarm, and GET
+    /v1/autonomous/plan — the "which strategies trade my money today"
+    workflow (see src/execution/daily_plan.py and
+    src/execution/strategy_ranking.py). rank-strategies hits real
+    yfinance data (network); the others are pure DB operations tested
+    without mocking anything.
+    """
+
+    def test_arm_then_plan_shows_it_active(self, client):
+        arm_response = client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["golden_cross"], "notional_per_trade_usd": "750", "armed_by": "sumit"},
+        )
+        assert arm_response.status_code == 200
+        armed = arm_response.json()
+        assert armed["strategy_ids"] == ["golden_cross"]
+        assert armed["notional_per_trade_usd"] == "750"
+        assert armed["active"] is True
+
+        plan_response = client.get("/v1/autonomous/plan")
+        assert plan_response.status_code == 200
+        assert plan_response.json()["active_plan"]["strategy_ids"] == ["golden_cross"]
+
+    def test_arm_rejects_an_unknown_strategy_id(self, client):
+        response = client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["not-a-real-strategy"], "notional_per_trade_usd": "500", "armed_by": "sumit"},
+        )
+        assert response.status_code == 400
+        assert "not-a-real-strategy" in response.json()["detail"]
+
+    def test_arm_rejects_an_intraday_strategy(self, client):
+        response = client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["orb"], "notional_per_trade_usd": "500", "armed_by": "sumit"},
+        )
+        assert response.status_code == 400
+        assert "daily-bar" in response.json()["detail"]
+
+    def test_arm_rejects_non_positive_notional(self, client):
+        response = client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["golden_cross"], "notional_per_trade_usd": "0", "armed_by": "sumit"},
+        )
+        assert response.status_code == 422  # caught by the request model's gt=0 constraint
+
+    def test_disarm_clears_the_plan(self, client):
+        client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["golden_cross"], "notional_per_trade_usd": "500", "armed_by": "sumit"},
+        )
+
+        disarm_response = client.post("/v1/autonomous/disarm", json={"disarmed_by": "sumit"})
+        assert disarm_response.status_code == 200
+        assert disarm_response.json()["was_active"] is True
+
+        plan_response = client.get("/v1/autonomous/plan")
+        assert plan_response.json()["active_plan"] is None
+
+    def test_plan_is_null_when_nothing_armed(self, client):
+        client.post("/v1/autonomous/disarm", json={"disarmed_by": "test-setup"})  # ensure a clean slate
+
+        response = client.get("/v1/autonomous/plan")
+
+        assert response.status_code == 200
+        assert response.json()["active_plan"] is None
+
+    def test_autonomous_status_reflects_the_active_plan(self, client):
+        client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["rsi2_connors"], "notional_per_trade_usd": "300", "armed_by": "sumit"},
+        )
+
+        response = client.get("/v1/autonomous/status")
+
+        assert response.status_code == 200
+        assert response.json()["active_plan"]["strategy_ids"] == ["rsi2_connors"]
+
+
 class TestKillSwitchActuallyBlocksOrders:
     """
     The kill switch admin endpoints and the actual order-blocking check used

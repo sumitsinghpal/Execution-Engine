@@ -28,6 +28,7 @@ PROTECTED_GET_ROUTES = [
     "/v1/external-signals",
     "/v1/autonomous/status",
     "/v1/autonomous/positions",
+    "/v1/autonomous/plan",
 ]
 
 PROTECTED_POST_ROUTES = [
@@ -47,6 +48,9 @@ PROTECTED_POST_ROUTES = [
     "/v1/autonomous/run-once",
     "/v1/orders/multi-leg/preview",
     "/v1/orders/multi-leg/execute",
+    "/v1/autonomous/rank-strategies",
+    "/v1/autonomous/arm",
+    "/v1/autonomous/disarm",
 ]
 
 PUBLIC_ROUTES = ["/v1/health", "/v1/strategies", "/v1/market-status"]

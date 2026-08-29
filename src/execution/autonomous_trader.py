@@ -36,6 +36,17 @@ Three things make that safe to ship:
    docstring for exactly which methods are real vs. simulated. Making
    ORDERS (not just data) real would mean changing what this function
    returns, a deliberate code change, not a config flip.
+4. scan_for_entries() opens NOTHING unless a human has explicitly armed
+   a strategy set and a per-trade quantity for today (see
+   src/execution/daily_plan.py) — which strategies get to trade, and how
+   much, are never silently inherited from a static default. The
+   strategies offered for arming are themselves ranked from real recent
+   performance (src/execution/strategy_ranking.py), not hand-picked once
+   and left there; see that module's docstring for how the ranking
+   itself is computed and why it's a starting point for a human decision,
+   not an autonomous decision of its own. manage_open_positions() is NOT
+   gated by this — a position already open still gets managed/exited
+   normally even after the plan is disarmed or expires.
 """
 
 from __future__ import annotations
@@ -55,6 +66,7 @@ from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
+from src.execution.daily_plan import DailyPlanService
 from src.execution.executor import Executor
 from src.execution.risk_reward import compute_standardized_exit, size_position
 from src.logging_config import get_logger
@@ -170,20 +182,34 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
 
 async def scan_for_entries(session: Session, settings: Settings) -> int:
     """
-    Runs every strategy in settings.autonomous_strategy_ids against every
-    symbol in settings.autonomous_watchlist; for each fresh entry signal
-    (skipping any (symbol, strategy) pair already holding an open position
-    — no pyramiding), sizes it, computes the standardized stop/target, and
-    submits it through the normal preview -> execute gate. Returns how many
-    positions were opened.
+    Runs every strategy in today's armed plan (see
+    src/execution/daily_plan.py) against every symbol in
+    settings.autonomous_watchlist; for each fresh entry signal (skipping
+    any (symbol, strategy) pair already holding an open position — no
+    pyramiding), sizes it using the plan's own notional_per_trade_usd,
+    computes the standardized stop/target, and submits it through the
+    normal preview -> execute gate. Returns how many positions were
+    opened.
+
+    Opens nothing at all — not an error, just 0 — when there is no
+    active plan: this is the "ready to execute" gate the rest of the
+    autonomous safety machinery (the master enable setting, the kill
+    switch) sits on top of, not underneath. A human has to have reviewed
+    a strategy ranking and explicitly armed a strategy set + quantity
+    for today before this function does anything.
     """
+    plan = DailyPlanService(session).get_active_plan()
+    if plan is None:
+        return 0
+
     broker = _build_broker(settings)
     executor = Executor(session=session, broker=broker)
     service = AutonomousPositionService(session)
     opened = 0
+    notional_per_trade_usd = Decimal(plan.notional_per_trade_usd)
 
     for symbol in settings.autonomous_watchlist:
-        for strategy_id in settings.autonomous_strategy_ids:
+        for strategy_id in plan.strategy_ids:
             if service.has_open_position(symbol, strategy_id):
                 continue
             try:
@@ -197,7 +223,7 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
             exit_levels = compute_standardized_exit(
                 detail.entry_price, risk_pct=settings.autonomous_risk_pct, reward_risk_ratio=settings.autonomous_reward_risk_ratio
             )
-            quantity = size_position(settings.autonomous_notional_per_trade_usd, detail.entry_price)
+            quantity = size_position(notional_per_trade_usd, detail.entry_price)
             if quantity < 1:
                 logger.info("autonomous_entry_skipped_too_small", symbol=symbol, strategy_id=strategy_id, entry_price=detail.entry_price)
                 continue
