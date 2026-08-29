@@ -7,7 +7,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from src.execution.daily_plan import DEFAULT_PLAN_TTL_HOURS
 from src.execution.strategy_ranking import DEFAULT_LOOKBACK_DAYS, DEFAULT_TOP_N
 
 
@@ -22,11 +21,25 @@ class RankStrategiesRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class StartAgentRequest(BaseModel):
+    """
+    The one-click "take this money and trade it until I say stop" flow —
+    computes a fresh ranking and arms it in a single call, so the
+    dashboard needs exactly one button and one request, not a
+    rank-then-review-then-arm sequence.
+    """
+    notional_per_trade_usd: Decimal = Field(..., gt=0)
+    started_by: str = Field(..., min_length=1)
+    symbols: Optional[list[str]] = Field(default=None, description="Defaults to settings.autonomous_watchlist when omitted")
+
+    model_config = {"extra": "forbid"}
+
+
 class ArmPlanRequest(BaseModel):
+    """Lower-level than /start: arms an explicit strategy list directly, skipping the ranking step. Used by /start internally and available on its own for anyone who wants to bypass ranking entirely."""
     strategy_ids: list[str] = Field(..., min_length=1, max_length=10)
     notional_per_trade_usd: Decimal = Field(..., gt=0)
     armed_by: str = Field(..., min_length=1)
-    ttl_hours: float = Field(default=DEFAULT_PLAN_TTL_HOURS, gt=0, le=168)
 
     model_config = {"extra": "forbid"}
 
@@ -37,4 +50,4 @@ class DisarmPlanRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-__all__ = ["ArmPlanRequest", "DisarmPlanRequest", "RankStrategiesRequest"]
+__all__ = ["ArmPlanRequest", "DisarmPlanRequest", "RankStrategiesRequest", "StartAgentRequest"]

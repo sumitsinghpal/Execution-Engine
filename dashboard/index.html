@@ -368,14 +368,6 @@
   .plan-status .t1 { font-weight: 700; font-size: 13.5px; }
   .plan-status .t2 { font-size: 12px; color: var(--ink-faint); margin-top: 3px; }
   .plan-status.armed .t1 { color: var(--buy); }
-  .rank-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
-  .rank-row:last-child { border-bottom: none; }
-  .rank-row input[type="checkbox"] { width: 17px; height: 17px; flex: none; accent-color: var(--accent); cursor: pointer; }
-  .rank-row .rank-name { font-weight: 700; font-size: 13px; flex: 1; min-width: 0; }
-  .rank-row .rank-metrics { display: flex; gap: 10px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint); white-space: nowrap; }
-  .rank-row .rank-metrics b { color: var(--ink); }
-  .rank-row.top-pick { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-  .pick-badge { font-family: var(--font-mono); font-size: 9.5px; font-weight: 800; padding: 2px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); flex: none; text-transform: uppercase; letter-spacing: .03em; }
   .agent-badge {
     display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 9.5px; font-weight: 800;
     padding: 3px 7px; border-radius: 999px; background: var(--buy-soft); color: var(--buy); text-transform: uppercase; letter-spacing: .03em;
@@ -473,10 +465,15 @@
       </div>
 
       <div class="card">
-        <h2>Automate my strategies <span class="hint">picks your best 3, then trades them for you</span></h2>
+        <h2>My trading agent <span class="hint">hand it money, it trades your best strategies until you stop it</span></h2>
         <div id="planStatus"><div class="empty-note">Loading…</div></div>
-        <button class="btn btn-ghost" id="getPicksBtn" style="margin-top:12px">Get today's picks</button>
-        <div id="rankingBody"></div>
+        <div id="startAgentForm">
+          <div class="field">
+            <label for="agentNotional">Amount per trade (USD)</label>
+            <input id="agentNotional" type="number" min="1" step="1" value="1000">
+          </div>
+          <button class="btn btn-primary" id="startAgentBtn">Start trading</button>
+        </div>
       </div>
 
       <div class="card">
@@ -1253,42 +1250,43 @@
     toast(`${signal.symbol} · ${signal.strategy_name} added to your order form below`);
   }
 
-  // ---- Automate my strategies: daily-plan arm/disarm + strategy ranking
-  // (src/execution/daily_plan.py, src/execution/strategy_ranking.py).
+  // ---- My trading agent: one-time start/stop (src/execution/daily_plan.py,
+  // src/execution/strategy_ranking.py, src/execution/strategy_rotation.py).
+  // This is a real "set it and forget it" agent, not a signal feed with
+  // buttons to click: Start computes a ranking and arms it in ONE call
+  // (POST /v1/autonomous/start), and from then on a background loop on
+  // the server re-ranks and swaps in whichever strategies are working
+  // best roughly once a day, entirely on its own — no daily "come back
+  // and re-confirm" step here. The only manual action is Stop.
+  //
   // "dailyPlanState" here is the CURRENTLY ARMED plan from the API — not
   // to be confused with "activePlan" above, which is the unrelated
-  // per-order strategy banner shown when a suggested trade is loaded
-  // into the order form.
+  // per-order strategy banner shown when a suggested trade from the
+  // "Suggested trades" card is loaded into the order form; that's a
+  // separate, manual, review-one-signal-at-a-time feature, not this one.
   let dailyPlanState = null;
-  let lastRanking = null;
-
-  function fmtExpiry(iso) {
-    const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z'));
-    const hrs = Math.round((d.getTime() - Date.now()) / 3600000);
-    if (hrs <= 0) return 'expiring any moment';
-    if (hrs < 24) return `in about ${hrs}h`;
-    return `in about ${Math.round(hrs / 24)}d`;
-  }
 
   function renderPlanStatus() {
     const el = $('planStatus');
     if (!dailyPlanState) {
       el.innerHTML = `
         <div class="plan-status">
-          <div><div class="t1">Not automated right now</div><div class="t2">Get today's picks below, choose a quantity, and arm to let it trade for you.</div></div>
+          <div><div class="t1">Agent is off</div><div class="t2">Enter an amount below and start it — it picks your best-performing strategies and keeps trading until you stop it.</div></div>
         </div>`;
+      $('startAgentForm').style.display = '';
       return;
     }
     const names = dailyPlanState.strategy_ids.map(id => STRATEGY_NAMES[id] || id).join(', ');
     el.innerHTML = `
       <div class="plan-status armed">
         <div>
-          <div class="t1">Automated — trading for you</div>
-          <div class="t2">${names} · ${money(Number(dailyPlanState.notional_per_trade_usd))}/trade · expires ${fmtExpiry(dailyPlanState.expires_at)}</div>
+          <div class="t1">🤖 Agent is running</div>
+          <div class="t2">Trading ${names} at ${money(Number(dailyPlanState.notional_per_trade_usd))}/trade — it rotates in your best strategies automatically, about once a day.</div>
         </div>
-        <button class="btn btn-danger" id="stopAutomationBtn" style="width:auto;margin-top:0;padding:9px 16px">Stop</button>
+        <button class="btn btn-danger" id="stopAgentBtn" style="width:auto;margin-top:0;padding:9px 16px">Stop</button>
       </div>`;
-    $('stopAutomationBtn').addEventListener('click', stopAutomation);
+    $('startAgentForm').style.display = 'none';
+    $('stopAgentBtn').addEventListener('click', stopAgent);
   }
 
   async function refreshDailyPlan() {
@@ -1302,12 +1300,12 @@
     renderAgentBadges();
   }
 
-  async function stopAutomation() {
-    const btn = $('stopAutomationBtn');
+  async function stopAgent() {
+    const btn = $('stopAgentBtn');
     btn.disabled = true; btn.textContent = 'Stopping…';
     try {
       await api('/v1/autonomous/disarm', { method: 'POST', body: JSON.stringify({ disarmed_by: store.get('edge.approver', 'you') }) });
-      toast('Automation stopped — open positions are still managed normally');
+      toast('Agent stopped — open positions are still managed normally');
       await refreshDailyPlan();
     } catch (e) {
       toast('Could not stop: ' + e.message);
@@ -1339,69 +1337,27 @@
     });
   }
 
-  $('getPicksBtn').addEventListener('click', async () => {
-    const btn = $('getPicksBtn');
-    btn.disabled = true; btn.textContent = 'Checking the last 90 days…';
-    $('rankingBody').innerHTML = '<div class="empty-note">Testing every strategy against recent real market data — this can take up to a minute…</div>';
-    try {
-      const ranking = await api('/v1/autonomous/rank-strategies', { method: 'POST', body: JSON.stringify({}) });
-      lastRanking = ranking;
-      renderRanking(ranking);
-    } catch (e) {
-      $('rankingBody').innerHTML = `<div class="empty-note">Could not check strategies: ${e.message}</div>`;
-    } finally {
-      btn.disabled = false; btn.textContent = "Get today's picks";
-    }
-  });
-
-  function renderRanking(ranking) {
-    const topSet = new Set(ranking.top_picks);
-    const rows = ranking.rankings.map(r => `
-      <div class="rank-row ${topSet.has(r.strategy_id) ? 'top-pick' : ''}">
-        <input type="checkbox" data-pick="${r.strategy_id}" ${topSet.has(r.strategy_id) ? 'checked' : ''}>
-        <span class="rank-name">${r.strategy_name}</span>
-        ${topSet.has(r.strategy_id) ? '<span class="pick-badge">Top pick</span>' : ''}
-        <span class="rank-metrics">
-          <span>${r.total_trades} trades</span>
-          <span>win <b>${pct(r.win_rate)}</b></span>
-        </span>
-      </div>`).join('') || '<div class="empty-note">No strategy fired in the last 90 days on your watchlist.</div>';
-
-    $('rankingBody').innerHTML = `
-      <div class="lu-section-title">Last 90 days — pick who trades today</div>
-      ${rows}
-      <div class="field">
-        <label for="planNotional">Amount per trade (USD)</label>
-        <input id="planNotional" type="number" min="1" step="1" value="1000">
-      </div>
-      <button class="btn btn-primary" id="armBtn">Arm for today</button>
-    `;
-    $('armBtn').addEventListener('click', armSelectedStrategies);
-  }
-
-  async function armSelectedStrategies() {
-    const selected = [...document.querySelectorAll('#rankingBody [data-pick]:checked')].map(cb => cb.dataset.pick);
-    if (!selected.length) { toast('Pick at least one strategy'); return; }
-    const notional = $('planNotional').value;
+  $('startAgentBtn').addEventListener('click', async () => {
+    const notional = $('agentNotional').value;
     if (!notional || Number(notional) <= 0) { toast('Enter an amount per trade'); return; }
-    const armedBy = store.get('edge.approver', 'you');
+    const startedBy = store.get('edge.approver', 'you');
 
-    const btn = $('armBtn');
-    btn.disabled = true; btn.textContent = 'Arming…';
+    const btn = $('startAgentBtn');
+    btn.disabled = true; btn.textContent = 'Checking recent performance…';
     try {
-      await api('/v1/autonomous/arm', {
+      const result = await api('/v1/autonomous/start', {
         method: 'POST',
-        body: JSON.stringify({ strategy_ids: selected, notional_per_trade_usd: String(notional), armed_by: armedBy }),
+        body: JSON.stringify({ notional_per_trade_usd: String(notional), started_by: startedBy }),
       });
-      toast(`Armed — ${selected.length} strateg${selected.length === 1 ? 'y' : 'ies'} trading at ${money(Number(notional))}/trade`);
-      $('rankingBody').innerHTML = '';
+      const names = result.plan.strategy_ids.map(id => STRATEGY_NAMES[id] || id).join(', ');
+      toast(`Agent started — trading ${names} at ${money(Number(notional))}/trade`);
       await refreshDailyPlan();
     } catch (e) {
-      toast('Could not arm: ' + e.message);
+      toast('Could not start: ' + e.message);
     } finally {
-      btn.disabled = false; btn.textContent = 'Arm for today';
+      btn.disabled = false; btn.textContent = 'Start trading';
     }
-  }
+  });
 
   // ---- Chart (TradingView — independent widget, not fed by this API) ----
   function loadChart(symbol) {

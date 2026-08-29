@@ -49,8 +49,10 @@ PROTECTED_POST_ROUTES = [
     "/v1/orders/multi-leg/preview",
     "/v1/orders/multi-leg/execute",
     "/v1/autonomous/rank-strategies",
+    "/v1/autonomous/start",
     "/v1/autonomous/arm",
     "/v1/autonomous/disarm",
+    "/v1/autonomous/rotate-now",
 ]
 
 PUBLIC_ROUTES = ["/v1/health", "/v1/strategies", "/v1/market-status"]

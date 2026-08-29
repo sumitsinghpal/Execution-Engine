@@ -83,7 +83,7 @@ class _FakeAutoBroker:
     async def get_price_history(self, symbol, bar_interval, lookback_days): raise NotImplementedError
 
 
-_ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTO,ZAUTP,ZAUTQ,ZAUTR,ZAUTS,ZAUTT,ZAUTX"
+_ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTO,ZAUTP,ZAUTQ,ZAUTR,ZAUXY,ZAUTS,ZAUTT,ZAUTX"
 
 
 def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **overrides):
@@ -113,7 +113,7 @@ def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **ove
     return settings
 
 
-def _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="1000", ttl_hours=24):
+def _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="1000"):
     """
     scan_for_entries() only opens anything with an active daily plan (see
     src/execution/daily_plan.py) — every TestScanForEntries test needs
@@ -121,7 +121,7 @@ def _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="1000", tt
     """
     from decimal import Decimal
     ids = strategy_ids.split(",") if isinstance(strategy_ids, str) else list(strategy_ids)
-    return DailyPlanService(session).arm(ids, Decimal(notional_per_trade_usd), armed_by="test", ttl_hours=ttl_hours)
+    return DailyPlanService(session).arm(ids, Decimal(notional_per_trade_usd), armed_by="test")
 
 
 @pytest.fixture(autouse=True)
@@ -343,19 +343,29 @@ class TestScanForEntries:
         assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZAUTQ"] == []
 
     @pytest.mark.asyncio
-    async def test_an_expired_plan_behaves_as_not_armed(self, test_db_engine_and_session, monkeypatch):
+    async def test_an_armed_plan_has_no_expiry_and_stays_active_across_cycles(self, test_db_engine_and_session, monkeypatch):
+        """
+        The whole point of arm(): a one-time "take this money and trade
+        it" authorization, not a daily chore — see daily_plan.py's module
+        docstring. No TTL, so a plan armed once keeps authorizing new
+        entries across as many scan cycles as it takes, until explicitly
+        disarmed. Two symbols so the second call's open isn't blocked by
+        the no-pyramiding rule on the first.
+        """
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTR")
-        _arm(session, ttl_hours=-1)  # already expired
+        settings = _settings(monkeypatch, watchlist="ZAUTR,ZAUXY")
+        _arm(session)
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
             return detail
 
         monkeypatch.setattr(strategy_engine, "scan", fake_scan)
-        opened = await scan_for_entries(session, settings)
+        first = await scan_for_entries(session, settings)
+        second = await scan_for_entries(session, settings)
 
-        assert opened == 0
+        assert first == 2  # both ZAUTR and ZAUXY opened on the first pass
+        assert second == 0  # both already have open positions on the second pass — still armed, just nothing new to open
 
     @pytest.mark.asyncio
     async def test_disarming_stops_new_entries_immediately(self, test_db_engine_and_session, monkeypatch):

@@ -393,6 +393,60 @@ class TestDailyPlanEndpoints:
         assert response.status_code == 200
         assert response.json()["active_plan"]["strategy_ids"] == ["rsi2_connors"]
 
+    def test_arm_has_no_expiry_field(self, client):
+        """The one-time "take this money and trade it" flow — no ttl_hours, no expires_at. See src/execution/daily_plan.py's module docstring."""
+        response = client.post(
+            "/v1/autonomous/arm",
+            json={"strategy_ids": ["golden_cross"], "notional_per_trade_usd": "500", "armed_by": "sumit"},
+        )
+        assert response.status_code == 200
+        assert "expires_at" not in response.json()
+        assert "ttl_hours" not in response.json()
+
+    def test_rotate_now_is_a_no_op_when_nothing_armed(self, client):
+        client.post("/v1/autonomous/disarm", json={"disarmed_by": "test-setup"})
+
+        response = client.post("/v1/autonomous/rotate-now")
+
+        assert response.status_code == 200
+        assert response.json() == {"rotated": False, "plan": None}
+
+    def test_start_rejects_when_ranking_finds_nothing(self, client, monkeypatch):
+        import src.api.server as server
+
+        async def fake_empty_ranking(symbols, **kwargs):
+            from src.execution.strategy_ranking import StrategyRanking
+            return StrategyRanking(lookback_days=90, symbols=symbols, computed_for_date="2026-01-01", rankings=[], top_picks=[], errors=[])
+
+        monkeypatch.setattr(server, "rank_strategies_by_recent_performance", fake_empty_ranking)
+
+        response = client.post("/v1/autonomous/start", json={"notional_per_trade_usd": "1000", "started_by": "sumit"})
+
+        assert response.status_code == 422
+        plan_response = client.get("/v1/autonomous/plan")
+        assert plan_response.json()["active_plan"] is None  # nothing got armed
+
+    def test_start_arms_the_top_picks_from_the_ranking(self, client, monkeypatch):
+        import src.api.server as server
+
+        async def fake_ranking(symbols, **kwargs):
+            from src.execution.strategy_ranking import StrategyRanking
+            return StrategyRanking(
+                lookback_days=90, symbols=symbols, computed_for_date="2026-01-01",
+                rankings=[], top_picks=["turtle_donchian", "macd_crossover"], errors=[],
+            )
+
+        monkeypatch.setattr(server, "rank_strategies_by_recent_performance", fake_ranking)
+
+        response = client.post("/v1/autonomous/start", json={"notional_per_trade_usd": "1000", "started_by": "sumit"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["plan"]["strategy_ids"] == ["turtle_donchian", "macd_crossover"]
+        assert body["plan"]["notional_per_trade_usd"] == "1000"
+        assert body["plan"]["armed_by"] == "sumit"
+        assert "ranking" in body
+
 
 class TestKillSwitchActuallyBlocksOrders:
     """

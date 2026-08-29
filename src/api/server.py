@@ -28,6 +28,7 @@ from src.execution.autonomous_positions import AutonomousPositionService
 from src.execution.autonomous_trader import autonomous_cycle_once, run_autonomous_loop
 from src.execution.daily_plan import DailyPlanService
 from src.execution.strategy_ranking import rank_strategies_by_recent_performance
+from src.execution.strategy_rotation import rotate_once, run_strategy_rotation_loop
 from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
 from src.execution.ep_edge_earnings_adapter import (
     ExternalSignalIngestRequest as EarningsIngestRequest,
@@ -45,7 +46,7 @@ from src.execution.strategy_signals import SignalStatus, StrategySignalService
 from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.integrations.edge_tf_client import EdgeTFGatewayError
 from src.logging_config import configure_logging, get_logger
-from src.models.daily_plan_api import ArmPlanRequest, DisarmPlanRequest, RankStrategiesRequest
+from src.models.daily_plan_api import ArmPlanRequest, DisarmPlanRequest, RankStrategiesRequest, StartAgentRequest
 from src.models.multi_leg_orders import MultiLegExecuteRequest, MultiLegPreviewRequest
 from src.models.orders import (
     TradeProposal,
@@ -108,6 +109,8 @@ _edge_tf_connector_stop_event: Optional[asyncio.Event] = None
 _edge_tf_connector_task: Optional[asyncio.Task] = None
 _autonomous_trader_stop_event: Optional[asyncio.Event] = None
 _autonomous_trader_task: Optional[asyncio.Task] = None
+_strategy_rotation_stop_event: Optional[asyncio.Event] = None
+_strategy_rotation_task: Optional[asyncio.Task] = None
 
 
 @app.on_event("startup")
@@ -118,6 +121,7 @@ async def startup_event():
 
     global _scanner_stop_event, _scanner_task, _edge_tf_connector_stop_event, _edge_tf_connector_task
     global _autonomous_trader_stop_event, _autonomous_trader_task
+    global _strategy_rotation_stop_event, _strategy_rotation_task
     _scanner_stop_event = asyncio.Event()
     _scanner_task = asyncio.create_task(run_scanner_loop(SessionLocal, get_settings, _scanner_stop_event))
 
@@ -131,12 +135,17 @@ async def startup_event():
         run_autonomous_loop(SessionLocal, get_settings, _autonomous_trader_stop_event)
     )
 
+    _strategy_rotation_stop_event = asyncio.Event()
+    _strategy_rotation_task = asyncio.create_task(
+        run_strategy_rotation_loop(SessionLocal, get_settings, _strategy_rotation_stop_event)
+    )
+
     logger.info("startup_complete")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Stop the background strategy scanner, EDGE-TF connector, and autonomous trader cleanly."""
+    """Stop the background strategy scanner, EDGE-TF connector, autonomous trader, and strategy rotation loop cleanly."""
     if _scanner_stop_event is not None:
         _scanner_stop_event.set()
     if _scanner_task is not None:
@@ -151,6 +160,11 @@ async def shutdown_event():
         _autonomous_trader_stop_event.set()
     if _autonomous_trader_task is not None:
         await asyncio.wait_for(_autonomous_trader_task, timeout=10)
+
+    if _strategy_rotation_stop_event is not None:
+        _strategy_rotation_stop_event.set()
+    if _strategy_rotation_task is not None:
+        await asyncio.wait_for(_strategy_rotation_task, timeout=10)
 
 
 @app.get("/v1/health")
@@ -1146,6 +1160,16 @@ async def list_autonomous_positions(
     return {"positions": [r.to_dict() for r in records]}
 
 
+def _validate_daily_bar_strategy_ids(strategy_ids: list[str]) -> None:
+    """Shared by /arm and /start — every strategy_id must be a real, daily-bar strategy in the catalog. An intraday one (ORB, VWAP Reversion) can't be armed since this system never backtests or ranks those against daily data."""
+    unknown = [s for s in strategy_ids if s not in STRATEGIES]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy_id(s): {unknown}")
+    non_daily = [s for s in strategy_ids if STRATEGIES[s].bar_interval != "daily"]
+    if non_daily:
+        raise HTTPException(status_code=400, detail=f"Only daily-bar strategies can be armed here: {non_daily}")
+
+
 @app.post("/v1/autonomous/rank-strategies", dependencies=[Depends(verify_admin_key)])
 async def rank_strategies(
     request: RankStrategiesRequest,
@@ -1156,10 +1180,10 @@ async def rank_strategies(
     rolling window (see src/execution/strategy_ranking.py for exactly how
     — real network data per symbol, so this can take up to a minute).
     Read-only: computes and returns a ranking plus a suggested top_n
-    picks, does not arm or execute anything. The dashboard's "arm for
-    today" flow calls this first, shows the numbers to a human, and only
-    then calls POST /v1/autonomous/arm with whatever they actually chose
-    (not necessarily identical to top_picks).
+    picks, does not arm or execute anything. Most callers want
+    POST /v1/autonomous/start instead, which does this and arms the
+    result in one step; this exists separately for inspecting the
+    ranking on its own.
     """
     symbols = request.symbols or settings.autonomous_watchlist
     try:
@@ -1177,35 +1201,55 @@ async def rank_strategies(
         raise HTTPException(status_code=502, detail=f"Ranking failed: {e}")
 
 
+@app.post("/v1/autonomous/start", dependencies=[Depends(verify_admin_key)])
+async def start_agent(
+    request: StartAgentRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    The one-time "take this money and trade it until I say stop" action:
+    ranks recent performance, arms the top picks at
+    request.notional_per_trade_usd, and from then on requires no further
+    confirmation — src/execution/strategy_rotation.py's background loop
+    keeps the strategy selection current on its own. Replaces any
+    previously active plan. To actually stop: POST /v1/autonomous/disarm
+    (positions already open keep being managed either way).
+    """
+    symbols = request.symbols or settings.autonomous_watchlist
+    try:
+        ranking = await rank_strategies_by_recent_performance(
+            symbols,
+            notional_per_trade_usd=request.notional_per_trade_usd,
+        )
+    except Exception as e:
+        logger.error("start_agent_ranking_error", error=str(e))
+        raise HTTPException(status_code=502, detail=f"Could not rank strategies: {e}")
+
+    if not ranking.top_picks:
+        raise HTTPException(
+            status_code=422,
+            detail="No strategy fired on your watchlist in the last 90 days — nothing to start with. Try again another day, or arm a specific strategy directly via /v1/autonomous/arm.",
+        )
+
+    plan = DailyPlanService(db).arm(ranking.top_picks, request.notional_per_trade_usd, request.started_by)
+    return {"plan": plan.to_dict(), "ranking": ranking.to_dict()}
+
+
 @app.post("/v1/autonomous/arm", dependencies=[Depends(verify_admin_key)])
 async def arm_daily_plan(
     request: ArmPlanRequest,
     db: Session = Depends(get_db),
 ):
     """
-    Arms today's autonomous trading plan — the strategies in
-    request.strategy_ids become the only ones scan_for_entries() will act
-    on, sized at request.notional_per_trade_usd per trade, until disarmed
-    (POST /v1/autonomous/disarm) or ttl_hours passes (default 24h).
-    Replaces any previously active plan; does not touch positions already
-    open. Every strategy_id must be a real, daily-bar strategy in the
-    catalog — an intraday one (ORB, VWAP Reversion) can't be armed here
-    since this system never backtests or ranks those against daily data.
+    Lower-level than /start: arms an explicit strategy_ids list directly
+    (skips ranking). Runs until disarmed (POST /v1/autonomous/disarm) —
+    no expiry. Replaces any previously active plan; does not touch
+    positions already open.
     """
-    unknown = [s for s in request.strategy_ids if s not in STRATEGIES]
-    if unknown:
-        raise HTTPException(status_code=400, detail=f"Unknown strategy_id(s): {unknown}")
-    non_daily = [s for s in request.strategy_ids if STRATEGIES[s].bar_interval != "daily"]
-    if non_daily:
-        raise HTTPException(status_code=400, detail=f"Only daily-bar strategies can be armed here: {non_daily}")
-
+    _validate_daily_bar_strategy_ids(request.strategy_ids)
     try:
-        plan = DailyPlanService(db).arm(
-            request.strategy_ids,
-            request.notional_per_trade_usd,
-            request.armed_by,
-            ttl_hours=request.ttl_hours,
-        )
+        plan = DailyPlanService(db).arm(request.strategy_ids, request.notional_per_trade_usd, request.armed_by)
         return plan.to_dict()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1223,9 +1267,29 @@ async def disarm_daily_plan(
 
 @app.get("/v1/autonomous/plan", dependencies=[Depends(verify_admin_key)])
 async def get_daily_plan(db: Session = Depends(get_db)):
-    """The currently active daily plan, or null if not armed (or expired)."""
+    """The currently active plan, or null if not armed."""
     plan = DailyPlanService(db).get_active_plan()
     return {"active_plan": plan.to_dict() if plan else None}
+
+
+@app.post("/v1/autonomous/rotate-now", dependencies=[Depends(verify_admin_key)])
+async def rotate_strategies_now(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Triggers one immediate strategy rotation instead of waiting for the
+    next daily tick (src/execution/strategy_rotation.py) — for
+    testing/demo. A no-op (rotated=false) when nothing is currently
+    armed; there's nothing to rotate.
+    """
+    try:
+        rotated = await rotate_once(db, settings)
+    except Exception as e:
+        logger.error("rotate_now_error", error=str(e))
+        raise HTTPException(status_code=502, detail=f"Rotation failed: {e}")
+    plan = DailyPlanService(db).get_active_plan()
+    return {"rotated": rotated, "plan": plan.to_dict() if plan else None}
 
 
 if __name__ == "__main__":
