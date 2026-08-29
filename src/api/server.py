@@ -4,14 +4,14 @@ External contract for EDGE-TF integration.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 import uuid
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Path, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from sqlmodel import select
 
@@ -447,30 +447,78 @@ async def execute_multi_leg(
 async def list_orders(
     account: Optional[str] = None,
     agent_id: Optional[str] = None,
+    status: Optional[str] = None,
+    symbol: Optional[str] = None,
+    instruction: Optional[str] = None,
+    strategy_id: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db),
 ):
     """
-    Recent orders, most recent first — read-only, no side effects (unlike
-    /v1/reconciliation/positions, which can trip the kill switch). Backs an
-    activity feed / dashboard rather than a single decision_id lookup.
+    Every order this system has ever previewed/executed, most recent
+    first, filterable enough to actually serve as a real transaction
+    history rather than just the last few for a live activity feed —
+    read-only, no side effects (unlike /v1/reconciliation/positions,
+    which can trip the kill switch).
+
+    Deliberately one unified list rather than splitting "order book" vs
+    "trade book" the way some broker UIs do: this system doesn't model
+    partial fills as separate trade rows distinct from their parent
+    order (filled_quantity/average_fill_price live on the order itself),
+    so there's nothing a second endpoint would show that this one
+    doesn't already have. status alone (PREVIEWED/SUBMITTED/FILLED/
+    REJECTED/...) tells you whether an order actually executed.
+
+    start_date/end_date bound created_at (inclusive, UTC calendar days).
+    "total" in the response is the full filtered count, independent of
+    limit/offset, so a caller can page through everything rather than
+    just knowing whether this one page filled up.
     """
     limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
     stmt = select(OrderRecord)
-    if account:
-        stmt = stmt.where(OrderRecord.account == account)
-    if agent_id:
-        stmt = stmt.where(OrderRecord.agent_id == agent_id)
-    stmt = stmt.order_by(OrderRecord.created_at.desc()).limit(limit)
+    count_stmt = select(func.count()).select_from(OrderRecord)
+
+    def _apply_filters(s):
+        if account:
+            s = s.where(OrderRecord.account == account)
+        if agent_id:
+            s = s.where(OrderRecord.agent_id == agent_id)
+        if status:
+            s = s.where(OrderRecord.status == status.upper())
+        if symbol:
+            s = s.where(OrderRecord.symbol == symbol.upper())
+        if instruction:
+            s = s.where(OrderRecord.instruction == instruction.upper())
+        if strategy_id:
+            s = s.where(OrderRecord.strategy_id == strategy_id)
+        if start_date:
+            s = s.where(OrderRecord.created_at >= datetime.combine(start_date, datetime.min.time()))
+        if end_date:
+            s = s.where(OrderRecord.created_at < datetime.combine(end_date, datetime.min.time()) + timedelta(days=1))
+        return s
+
+    stmt = _apply_filters(stmt).order_by(OrderRecord.created_at.desc()).limit(limit).offset(offset)
+    count_stmt = _apply_filters(count_stmt)
 
     orders = db.exec(stmt).all()
+    total = db.exec(count_stmt).one()
+
     return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
         "orders": [
             {
                 "decision_id": o.decision_id,
                 "agent_id": o.agent_id,
                 "account": o.account,
                 "symbol": o.symbol,
+                "asset_type": o.asset_type,
                 "instruction": o.instruction,
                 "quantity": o.quantity,
                 "order_type": o.order_type,
@@ -480,10 +528,15 @@ async def list_orders(
                 "risk_approved": o.risk_approved,
                 "estimated_notional_usd": o.estimated_notional_usd,
                 "filled_quantity": o.filled_quantity,
+                "average_fill_price": o.average_fill_price,
+                "execution_id": o.execution_id,
                 "broker_status": o.broker_status,
+                "broker_message": o.broker_message,
                 "strategy_id": o.strategy_id,
                 "strategy_stop_loss_price": o.strategy_stop_loss_price,
                 "strategy_take_profit_price": o.strategy_take_profit_price,
+                "algo_duration_minutes": o.algo_duration_minutes,
+                "algo_slices": o.algo_slices,
                 "created_at": o.created_at,
                 "updated_at": o.updated_at,
             }

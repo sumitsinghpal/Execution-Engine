@@ -757,6 +757,119 @@ class TestReadOnlyAccountEndpoints:
         assert all(o["agent_id"] == "list-orders-probe-agent" for o in orders)
 
 
+class TestListOrdersHistory:
+    """
+    GET /v1/orders as a real transaction history — filterable by status,
+    symbol, instruction, strategy_id, and date range, with a real total
+    count independent of the page (limit/offset) returned. Every test
+    uses its own agent_id to isolate its rows from every other test's
+    orders in the same shared-DB test session.
+    """
+
+    def _preview(self, client, sample_trade_proposal, **overrides):
+        proposal = sample_trade_proposal.model_copy(update=overrides)
+        resp = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json"))
+        assert resp.status_code == 200
+        return proposal
+
+    def test_filters_by_status(self, client, sample_trade_proposal):
+        agent = "history-status-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-status-1", agent_id=agent)
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "status": "previewed"})  # lowercase — must be case-insensitive
+
+        orders = resp.json()["orders"]
+        assert len(orders) == 1
+        assert orders[0]["status"] == "PREVIEWED"
+
+    def test_status_filter_excludes_non_matching_orders(self, client, sample_trade_proposal):
+        agent = "history-status-exclude-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-status-2", agent_id=agent)
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "status": "FILLED"})
+
+        assert resp.json()["orders"] == []
+        assert resp.json()["total"] == 0
+
+    def test_filters_by_symbol(self, client, sample_trade_proposal):
+        agent = "history-symbol-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-sym-1", agent_id=agent, symbol="QQQ")
+        self._preview(client, sample_trade_proposal, decision_id="hist-sym-2", agent_id=agent, symbol="SPY")
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "symbol": "spy"})  # lowercase — must be case-insensitive
+
+        orders = resp.json()["orders"]
+        assert len(orders) == 1
+        assert orders[0]["symbol"] == "SPY"
+
+    def test_filters_by_instruction(self, client, sample_trade_proposal):
+        agent = "history-instruction-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-instr-1", agent_id=agent, instruction="BUY")
+        self._preview(client, sample_trade_proposal, decision_id="hist-instr-2", agent_id=agent, instruction="SELL")
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "instruction": "SELL"})
+
+        orders = resp.json()["orders"]
+        assert len(orders) == 1
+        assert orders[0]["instruction"] == "SELL"
+
+    def test_total_reflects_the_full_filtered_count_not_just_this_page(self, client, sample_trade_proposal):
+        agent = "history-total-probe"
+        for i in range(3):
+            self._preview(client, sample_trade_proposal, decision_id=f"hist-total-{i}", agent_id=agent)
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "limit": 2})
+
+        body = resp.json()
+        assert len(body["orders"]) == 2  # page capped at limit
+        assert body["total"] == 3  # but total reports the real count across all pages
+
+    def test_offset_pages_through_results(self, client, sample_trade_proposal):
+        agent = "history-offset-probe"
+        for i in range(3):
+            self._preview(client, sample_trade_proposal, decision_id=f"hist-offset-{i}", agent_id=agent)
+
+        first_page = client.get("/v1/orders", params={"agent_id": agent, "limit": 2, "offset": 0}).json()["orders"]
+        second_page = client.get("/v1/orders", params={"agent_id": agent, "limit": 2, "offset": 2}).json()["orders"]
+
+        first_ids = {o["decision_id"] for o in first_page}
+        second_ids = {o["decision_id"] for o in second_page}
+        assert len(first_page) == 2
+        assert len(second_page) == 1
+        assert first_ids.isdisjoint(second_ids)  # no overlap between pages
+
+    def test_date_range_excludes_orders_outside_it(self, client, sample_trade_proposal):
+        agent = "history-date-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-date-1", agent_id=agent)
+        tomorrow = (datetime.utcnow().date() + timedelta(days=1)).isoformat()
+        day_after = (datetime.utcnow().date() + timedelta(days=2)).isoformat()
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "start_date": tomorrow, "end_date": day_after})
+
+        assert resp.json()["orders"] == []
+
+    def test_date_range_includes_orders_placed_today(self, client, sample_trade_proposal):
+        agent = "history-date-today-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-date-today", agent_id=agent)
+        today = datetime.utcnow().date().isoformat()  # created_at is stored in UTC — must compare against the UTC calendar date, not the test machine's local one
+
+        resp = client.get("/v1/orders", params={"agent_id": agent, "start_date": today, "end_date": today})
+
+        orders = resp.json()["orders"]
+        assert len(orders) == 1
+        assert orders[0]["decision_id"] == "hist-date-today"
+
+    def test_response_includes_execution_detail_fields(self, client, sample_trade_proposal):
+        agent = "history-fields-probe"
+        self._preview(client, sample_trade_proposal, decision_id="hist-fields-1", agent_id=agent)
+
+        resp = client.get("/v1/orders", params={"agent_id": agent})
+
+        order = resp.json()["orders"][0]
+        for field in ["asset_type", "average_fill_price", "execution_id", "broker_message", "algo_duration_minutes", "algo_slices"]:
+            assert field in order
+
+
 class TestStrategyEndpoints:
     """
     Test the strategy catalog, on-demand scan, and signal review endpoints.

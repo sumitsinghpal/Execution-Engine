@@ -362,6 +362,27 @@
 
   /* Live updates card */
   .live-updates-card { margin-top: 18px; }
+
+  /* Transaction history */
+  .history-card { margin-top: 18px; }
+  .history-filters { display: flex; flex-wrap: wrap; gap: 10px 12px; margin-bottom: 6px; align-items: flex-end; }
+  .history-filters .field { margin-top: 0; flex: 1 1 110px; min-width: 0; }
+  .history-filters .field input, .history-filters .field select { text-transform: none; }
+  .history-filters .field-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+  .history-filters .btn { margin-top: 0; width: auto; padding: 11px 16px; white-space: nowrap; }
+  .history-summary { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); margin: 16px 0 6px; }
+  .history-row { padding: 12px 4px; border-bottom: 1px solid var(--border); cursor: pointer; border-radius: 8px; transition: background .1s; }
+  .history-row:hover { background: var(--surface-2); }
+  .history-row:last-child { border-bottom: none; }
+  .history-row-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .history-row-sub { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 3px; }
+  .history-row-detail { display: none; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 9px 18px; padding: 12px 14px; margin-top: 10px; background: var(--surface-2); border-radius: 9px; font-family: var(--font-mono); font-size: 11.5px; }
+  .history-row-detail.show { display: grid; }
+  .history-row-detail dt { color: var(--ink-faint); text-transform: uppercase; letter-spacing: .03em; font-size: 10px; margin-bottom: 2px; }
+  .history-row-detail dd { margin: 0; color: var(--ink); }
+  .history-pagination { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--ink-faint); font-family: var(--font-mono); flex-wrap: wrap; gap: 10px; }
+  .history-pagination .btn { width: auto; margin-top: 0; padding: 8px 16px; font-size: 12.5px; }
+  .history-pagination .btn:disabled { opacity: .35; }
   .lu-meta { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); margin-bottom: 14px; }
   .lu-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 14px; margin-bottom: 18px; }
   .lu-stat-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; margin-bottom: 4px; }
@@ -579,6 +600,53 @@
     <div class="lu-meta" id="liveUpdatesMeta">Loading…</div>
     <div id="liveUpdatesBody"></div>
     <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Update now</button>
+  </div>
+
+  <div class="card history-card">
+    <h2>Transaction history <span class="hint">every order you've ever placed, searchable</span></h2>
+    <div class="history-filters">
+      <div class="field">
+        <label for="histSymbol">Symbol</label>
+        <input id="histSymbol" placeholder="e.g. QQQ" style="text-transform:uppercase" maxlength="6">
+      </div>
+      <div class="field">
+        <label for="histSide">Side</label>
+        <select id="histSide">
+          <option value="">All</option>
+          <option value="BUY">Buy</option>
+          <option value="SELL">Sell</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="histStatus">Status</label>
+        <select id="histStatus">
+          <option value="">All</option>
+          <option value="PREVIEWED">Reviewed, not placed</option>
+          <option value="SUBMITTED">Submitted</option>
+          <option value="ACKNOWLEDGED">Acknowledged</option>
+          <option value="PARTIAL_FILL">Partially filled</option>
+          <option value="FILLED">Filled</option>
+          <option value="CANCELED">Canceled</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="FAILED">Failed</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="histFrom">From</label>
+        <input id="histFrom" type="date">
+      </div>
+      <div class="field">
+        <label for="histTo">To</label>
+        <input id="histTo" type="date">
+      </div>
+      <div class="field-actions">
+        <button class="btn btn-primary" id="histApplyBtn">Filter</button>
+        <button class="btn btn-ghost" id="histResetBtn">Reset</button>
+      </div>
+    </div>
+    <div class="history-summary" id="historySummary"></div>
+    <div id="historyList"><div class="empty-note">Loading…</div></div>
+    <div class="history-pagination" id="historyPagination"></div>
   </div>
 </div>
 
@@ -957,6 +1025,129 @@
     }
   }
 
+  // ---- Transaction history: every order ever placed, filterable — the
+  // full record behind the abbreviated "Activity" glance above. Loaded
+  // once at startup and on filter/page changes only, never on the 15s
+  // refreshAll() tick — that would blow away an expanded row or a
+  // half-typed filter out from under someone reading it.
+  const STATUS_LABELS = {
+    PREVIEWED: 'Reviewed, not placed', APPROVED: 'Approved', SUBMITTED: 'Submitted',
+    ACKNOWLEDGED: 'Acknowledged', PARTIAL_FILL: 'Partially filled', FILLED: 'Filled',
+    CANCELED: 'Canceled', REJECTED: 'Rejected', FAILED: 'Failed',
+  };
+  const HISTORY_PAGE_SIZE = 20;
+  let historyOffset = 0;
+  let historyTotal = 0;
+
+  function historyFilterParams() {
+    const params = { account: account(), limit: HISTORY_PAGE_SIZE, offset: historyOffset };
+    const symbol = $('histSymbol').value.trim().toUpperCase();
+    const side = $('histSide').value;
+    const status = $('histStatus').value;
+    const from = $('histFrom').value;
+    const to = $('histTo').value;
+    if (symbol) params.symbol = symbol;
+    if (side) params.instruction = side;
+    if (status) params.status = status;
+    if (from) params.start_date = from;
+    if (to) params.end_date = to;
+    return params;
+  }
+
+  async function refreshHistory(resetPage) {
+    if (resetPage) historyOffset = 0;
+    const el = $('historyList');
+    el.innerHTML = `
+      <div class="skel-row"><div class="skel-lines"><div class="skel-bar" style="width:40%"></div><div class="skel-bar" style="width:25%"></div></div></div>
+      <div class="skel-row"><div class="skel-lines"><div class="skel-bar" style="width:50%"></div><div class="skel-bar" style="width:30%"></div></div></div>
+    `;
+    try {
+      const params = historyFilterParams();
+      const query = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+      const r = await api(`/v1/orders?${query}`);
+      historyTotal = r.total ?? (r.orders || []).length;
+      renderHistory(r.orders || []);
+      renderHistoryPagination();
+    } catch (e) {
+      el.innerHTML = `<div class="empty-note">Could not load transaction history: ${e.message}</div>`;
+      $('historyPagination').innerHTML = '';
+    }
+  }
+
+  function renderHistory(orders) {
+    const el = $('historyList');
+    if (!orders.length) {
+      el.innerHTML = '<div class="empty-note">No orders match these filters.</div>';
+      $('historySummary').textContent = '';
+      return;
+    }
+    $('historySummary').textContent = `Showing ${historyOffset + 1}–${Math.min(historyOffset + orders.length, historyTotal)} of ${historyTotal}`;
+
+    el.innerHTML = orders.map((o, i) => {
+      const side = (o.instruction || '').toUpperCase() === 'SELL' ? 'sell' : 'buy';
+      const statusClass = 'st-' + (o.status || 'previewed').toLowerCase();
+      const notional = o.estimated_notional_usd ? money(o.estimated_notional_usd) : '—';
+      const when = new Date(o.created_at + (o.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+      const strategyLabel = o.strategy_id ? (STRATEGY_NAMES[o.strategy_id] || o.strategy_id) : null;
+      return `
+        <div class="history-row" data-row="${i}">
+          <div class="history-row-top">
+            <div class="feed-left">
+              <span class="side-chip ${side}">${side === 'buy' ? 'BUY' : 'SELL'}</span>
+              <div class="feed-meta">
+                <div class="feed-symbol">${formatSymbol(o.symbol)} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">×${o.quantity}</span></div>
+                <div class="history-row-sub">${when}${strategyLabel ? ' · ' + strategyLabel : ''}</div>
+              </div>
+            </div>
+            <span class="status-chip ${statusClass}">${o.status}</span>
+          </div>
+          <dl class="history-row-detail" id="hist-detail-${i}">
+            <div><dt>Order type</dt><dd>${o.order_type}${o.limit_price ? ' @ ' + money(o.limit_price) : ''}</dd></div>
+            <div><dt>Estimated amount</dt><dd>${notional}</dd></div>
+            <div><dt>Filled</dt><dd>${o.filled_quantity ?? 0} of ${o.quantity}${o.average_fill_price ? ' @ avg ' + money(o.average_fill_price) : ''}</dd></div>
+            <div><dt>Status</dt><dd>${STATUS_LABELS[o.status] || o.status}</dd></div>
+            ${o.stop_price ? `<div><dt>Stop price</dt><dd>${money(o.stop_price)}</dd></div>` : ''}
+            ${o.strategy_stop_loss_price ? `<div><dt>Strategy stop</dt><dd>${money(o.strategy_stop_loss_price)}</dd></div>` : ''}
+            ${o.strategy_take_profit_price ? `<div><dt>Strategy target</dt><dd>${money(o.strategy_take_profit_price)}</dd></div>` : ''}
+            ${o.execution_id ? `<div><dt>Confirmation ID</dt><dd>${o.execution_id}</dd></div>` : ''}
+            ${o.broker_message ? `<div><dt>Broker note</dt><dd>${o.broker_message}</dd></div>` : ''}
+            <div><dt>Order ID</dt><dd>${o.decision_id}</dd></div>
+          </dl>
+        </div>`;
+    }).join('');
+
+    el.querySelectorAll('.history-row').forEach(row => {
+      row.addEventListener('click', () => {
+        $(`hist-detail-${row.dataset.row}`).classList.toggle('show');
+      });
+    });
+  }
+
+  function renderHistoryPagination() {
+    const el = $('historyPagination');
+    if (!historyTotal) { el.innerHTML = ''; return; }
+    const hasPrev = historyOffset > 0;
+    const hasNext = historyOffset + HISTORY_PAGE_SIZE < historyTotal;
+    el.innerHTML = `
+      <button class="btn btn-ghost" id="histPrevBtn" ${hasPrev ? '' : 'disabled'}>← Newer</button>
+      <span>Page ${Math.floor(historyOffset / HISTORY_PAGE_SIZE) + 1} of ${Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE))}</span>
+      <button class="btn btn-ghost" id="histNextBtn" ${hasNext ? '' : 'disabled'}>Older →</button>
+    `;
+    if (hasPrev) $('histPrevBtn').addEventListener('click', () => { historyOffset = Math.max(0, historyOffset - HISTORY_PAGE_SIZE); refreshHistory(false); });
+    if (hasNext) $('histNextBtn').addEventListener('click', () => { historyOffset += HISTORY_PAGE_SIZE; refreshHistory(false); });
+  }
+
+  $('histApplyBtn').addEventListener('click', () => refreshHistory(true));
+  $('histResetBtn').addEventListener('click', () => {
+    $('histSymbol').value = ''; $('histSide').value = ''; $('histStatus').value = '';
+    $('histFrom').value = ''; $('histTo').value = '';
+    refreshHistory(true);
+  });
+  // Enter key in any filter field applies immediately, same as the Filter button.
+  ['histSymbol', 'histFrom', 'histTo'].forEach(id => {
+    $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refreshHistory(true); });
+  });
+
   // ---- Kill switch ----
   async function refreshKillSwitch() {
     try {
@@ -1011,7 +1202,7 @@
     openAdminModal('Enter your access code', async () => {
       refreshUnlockPill();
       toast('Account unlocked');
-      refreshAll(); loadStrategies(); refreshLiveUpdates(true);
+      refreshAll(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
     });
   });
   refreshUnlockPill();
@@ -1155,7 +1346,7 @@
       $('approvalOverlay').classList.remove('show');
       $('verdictBox').innerHTML = '';
       activePlan = null; renderPlanBanner();
-      refreshFeed(); refreshPositions(); refreshBalance();
+      refreshFeed(); refreshPositions(); refreshBalance(); refreshHistory(true);
     } catch (e) {
       toast('Could not place order: ' + e.message);
     } finally {
@@ -1710,6 +1901,7 @@
   loadStrategies();
   initChart();
   refreshLiveUpdates(false);
+  refreshHistory(true);
   loadFxRates();
   setInterval(refreshAll, 15000);
 })();
