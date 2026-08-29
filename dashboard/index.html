@@ -129,6 +129,7 @@
   .mode-banner {
     display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-radius: var(--radius-md);
     font-size: 13px; font-weight: 600; margin-bottom: 18px; border: 1px solid transparent;
+    transition: background .2s, border-color .2s, color .2s;
   }
   .mode-banner.practice { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
   .mode-banner.live { background: var(--sell-soft); color: var(--sell); border-color: color-mix(in srgb, var(--sell) 30%, transparent); }
@@ -152,6 +153,27 @@
   button.pill { font-family: var(--font-mono); cursor: pointer; -webkit-appearance: none; appearance: none; }
   button.pill.set { color: var(--buy); border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
 
+  /* Skeleton loading — a shimmer sweep instead of bare "Loading…" text,
+     used for the handful of cards with real data-shaped content (rows
+     with an avatar + two lines) rather than a one-line status message. */
+  @keyframes shimmer { 0% { background-position: -300px 0; } 100% { background-position: 300px 0; } }
+  .skel-bar {
+    height: 11px; border-radius: 6px;
+    background: linear-gradient(90deg, var(--surface-2) 22%, var(--border-strong) 40%, var(--surface-2) 58%);
+    background-size: 300px 100%; animation: shimmer 1.5s ease-in-out infinite;
+  }
+  .skel-row { display: flex; align-items: center; gap: 11px; padding: 11px 0; }
+  .skel-row:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .skel-avatar {
+    width: 36px; height: 36px; border-radius: 10px; flex: none;
+    background: linear-gradient(90deg, var(--surface-2) 22%, var(--border-strong) 40%, var(--surface-2) 58%);
+    background-size: 300px 100%; animation: shimmer 1.5s ease-in-out infinite;
+  }
+  .skel-lines { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+  @media (prefers-reduced-motion: reduce) {
+    .skel-bar, .skel-avatar { animation: none; }
+  }
+
   /* Layout */
   .grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; min-width: 0; }
   @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
@@ -163,7 +185,7 @@
   }
   .card h2 {
     font-family: var(--font-display); font-size: 14px; font-weight: 700; margin: 0 0 16px;
-    letter-spacing: 0.01em; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    letter-spacing: 0.01em; display: flex; align-items: baseline; justify-content: space-between; gap: 6px 10px; flex-wrap: wrap;
   }
   .card h2 .hint { font-family: var(--font-body); font-weight: 500; font-size: 12px; color: var(--ink-faint); }
 
@@ -273,6 +295,7 @@
   .rr-badge {
     font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; padding: 3px 8px;
     border-radius: 999px; background: var(--accent-soft); color: var(--accent); flex: none;
+    max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default;
   }
 
   /* Strategy plan banner (order ticket, when loaded from a signal) */
@@ -291,8 +314,9 @@
   .strategy-column-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
   .strategy-card {
     background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
-    padding: 13px 14px; margin-bottom: 10px;
+    padding: 13px 14px; margin-bottom: 10px; transition: border-color .15s, transform .15s, box-shadow .15s;
   }
+  .strategy-card:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: 0 4px 14px -8px rgba(16,18,26,.18); }
   .strategy-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
   .strategy-name { font-weight: 700; font-size: 13.5px; }
   .strategy-famous { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
@@ -363,7 +387,7 @@
   .lu-cost-note { font-size: 11px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 4px; }
 
   /* Automate card */
-  .plan-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); }
+  .plan-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); flex-wrap: wrap; transition: background .2s, border-color .2s; }
   .plan-status.armed { border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
   .plan-status .t1 { font-weight: 700; font-size: 13.5px; }
   .plan-status .t2 { font-size: 12px; color: var(--ink-faint); margin-top: 3px; }
@@ -441,12 +465,18 @@
 
       <div class="card">
         <h2>Positions <span class="hint" id="positionsHint"></span></h2>
-        <div id="positionsList"><div class="empty-note">Loading…</div></div>
+        <div id="positionsList">
+          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:45%"></div><div class="skel-bar" style="width:30%"></div></div></div>
+          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:55%"></div><div class="skel-bar" style="width:25%"></div></div></div>
+        </div>
       </div>
 
       <div class="card">
         <h2>Activity <span class="hint">most recent first</span></h2>
-        <div id="feedList"><div class="empty-note">Loading…</div></div>
+        <div id="feedList">
+          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:60%"></div><div class="skel-bar" style="width:35%"></div></div></div>
+          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:50%"></div><div class="skel-bar" style="width:40%"></div></div></div>
+        </div>
       </div>
 
     </div>
@@ -466,7 +496,7 @@
 
       <div class="card">
         <h2>My trading agent <span class="hint">hand it money, it trades your best strategies until you stop it</span></h2>
-        <div id="planStatus"><div class="empty-note">Loading…</div></div>
+        <div id="planStatus"><div class="skel-bar" style="width:100%;height:52px;border-radius:9px"></div></div>
         <div id="startAgentForm">
           <div class="field">
             <label for="agentNotional">Amount per trade (USD)</label>
@@ -478,7 +508,9 @@
 
       <div class="card">
         <h2>Suggested trades <span class="hint" id="signalsHint">found automatically, waiting for your review</span></h2>
-        <div id="signalsList"><div class="empty-note">Loading…</div></div>
+        <div id="signalsList">
+          <div class="skel-row"><div class="skel-lines"><div class="skel-bar" style="width:35%"></div><div class="skel-bar" style="width:60%"></div></div></div>
+        </div>
       </div>
 
       <div class="card">
@@ -762,6 +794,26 @@
     }
   }
   function pct(v) { const n = Number(v); return isFinite(n) ? (n * 100).toFixed(2) + '%' : '—'; }
+
+  const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  // A plain ETF/stock ticker (e.g. "QQQ") displays as-is. A 21-char OCC
+  // option symbol (root, 6-digit YYMMDD expiration, C/P, 8-digit strike
+  // in thousandths — see src/models/occ_symbol.py, the one place this
+  // format is authoritative) gets parsed into what a customer actually
+  // reads, e.g. "QQQ $410 Call · Oct 12" — nobody outside this codebase
+  // should ever see the raw 21-char string.
+  function formatSymbol(raw) {
+    if (!raw || raw.length !== 21) return raw;
+    const root = raw.slice(0, 6).trim();
+    const datePart = raw.slice(6, 12);
+    const right = raw.slice(12, 13);
+    const strikePart = raw.slice(13);
+    if (!/^\d{6}$/.test(datePart) || (right !== 'C' && right !== 'P') || !/^\d{8}$/.test(strikePart)) return raw;
+    const strike = Number(strikePart) / 1000;
+    const mm = Number(datePart.slice(2, 4)), dd = Number(datePart.slice(4, 6));
+    const monthLabel = MONTH_ABBR[mm - 1] || '';
+    return `${root} $${strike % 1 === 0 ? strike : strike.toFixed(2)} ${right === 'C' ? 'Call' : 'Put'} · ${monthLabel} ${dd}`;
+  }
   function timeAgo(iso) {
     const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z'));
     const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
@@ -863,11 +915,12 @@
       if (!positions.length) { el.innerHTML = '<div class="empty-note">No open positions for this account.</div>'; return; }
       el.innerHTML = positions.map(p => {
         const instrument = p.instrument || {};
-        const symbol = instrument.symbol || p.symbol || '—';
+        const rawSymbol = instrument.symbol || p.symbol || '—';
+        const symbol = formatSymbol(rawSymbol);
         const qty = (p.longQuantity ?? p.quantity ?? 0) - (p.shortQuantity ?? 0);
         return `<div class="pos-row">
           <div class="pos-left">
-            <div class="sym-badge">${symbol.slice(0,4)}</div>
+            <div class="sym-badge">${rawSymbol.slice(0,4).trim()}</div>
             <div><div class="pos-symbol">${symbol}</div><div class="pos-qty">${qty} shares</div></div>
           </div>
         </div>`;
@@ -892,7 +945,7 @@
           <div class="feed-left">
             <span class="side-chip ${side}">${side === 'buy' ? 'BUY' : 'SELL'}</span>
             <div class="feed-meta">
-              <div class="feed-symbol">${o.symbol} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">×${o.quantity}</span></div>
+              <div class="feed-symbol">${formatSymbol(o.symbol)} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">×${o.quantity}</span></div>
               <div class="feed-sub">${notional} · ${timeAgo(o.created_at)}</div>
             </div>
           </div>
@@ -1133,7 +1186,7 @@
                   <div class="strategy-name">${s.name}</div>
                   <div class="strategy-famous">${s.famous_for}</div>
                 </div>
-                <span class="rr-badge">${s.risk_reward_label}</span>
+                <span class="rr-badge" title="${s.risk_reward_label}">${s.risk_reward_label}</span>
               </div>
               <div class="strategy-desc">${s.description}</div>
               <div class="strategy-rules">Stop: ${s.stop_rule}<br>Target: ${s.target_rule}</div>
@@ -1584,7 +1637,7 @@
           <div class="feed-left">
             <span class="side-chip buy">${p.status}</span>
             <div class="feed-meta">
-              <div class="feed-symbol">${p.symbol} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">${p.strategy_id}</span></div>
+              <div class="feed-symbol">${formatSymbol(p.symbol)} <span style="color:var(--ink-faint);font-weight:500;font-size:12px">${STRATEGY_NAMES[p.strategy_id] || p.strategy_id}</span></div>
               <div class="feed-sub">entry ${money(p.entry_price)} · ${timeAgo(p.opened_at)}</div>
             </div>
           </div>
@@ -1619,7 +1672,12 @@
 
     if (!cached || force) {
       $('liveUpdatesMeta').textContent = 'Testing your strategies against 3 years of real market data — this can take up to a minute…';
-      $('liveUpdatesBody').innerHTML = '<div class="empty-note">Loading…</div>';
+      $('liveUpdatesBody').innerHTML = `
+        <div class="lu-stats">
+          ${Array.from({ length: 6 }).map(() => '<div><div class="skel-bar" style="width:60%;height:9px;margin-bottom:8px"></div><div class="skel-bar" style="width:80%;height:16px"></div></div>').join('')}
+        </div>
+        <div class="skel-bar" style="width:100%;height:180px;border-radius:12px;margin-top:8px"></div>
+      `;
     }
 
     try {
