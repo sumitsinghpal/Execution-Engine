@@ -29,6 +29,9 @@ PROTECTED_GET_ROUTES = [
     "/v1/autonomous/status",
     "/v1/autonomous/positions",
     "/v1/autonomous/plan",
+    "/v1/quotes?symbols=QQQ",
+    "/v1/watchlists",
+    "/v1/alerts",
 ]
 
 PROTECTED_POST_ROUTES = [
@@ -53,6 +56,15 @@ PROTECTED_POST_ROUTES = [
     "/v1/autonomous/arm",
     "/v1/autonomous/disarm",
     "/v1/autonomous/rotate-now",
+    "/v1/watchlists/Tech/items",
+    "/v1/alerts",
+    "/v1/alerts/check-now",
+]
+
+PROTECTED_DELETE_ROUTES = [
+    "/v1/watchlists/Tech/items/QQQ",
+    "/v1/watchlists/Tech",
+    "/v1/alerts/1",
 ]
 
 PUBLIC_ROUTES = ["/v1/health", "/v1/strategies", "/v1/market-status"]
@@ -67,6 +79,11 @@ class TestProtectedRoutesRejectUnauthenticated:
     @pytest.mark.parametrize("path", PROTECTED_POST_ROUTES)
     def test_post_requires_admin_key(self, anon_client, path):
         response = anon_client.post(path, json={})
+        assert response.status_code == 403, f"{path} should require the admin key"
+
+    @pytest.mark.parametrize("path", PROTECTED_DELETE_ROUTES)
+    def test_delete_requires_admin_key(self, anon_client, path):
+        response = anon_client.delete(path)
         assert response.status_code == 403, f"{path} should require the admin key"
 
 

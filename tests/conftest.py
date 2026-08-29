@@ -27,6 +27,8 @@ from src.execution.strategy_signals import StrategySignalRecord
 from src.execution.external_signals import ExternalSignalRecord
 from src.execution.autonomous_positions import AutonomousPositionRecord
 from src.execution.daily_plan import DailyPlanRecord
+from src.execution.watchlists import WatchlistItemRecord
+from src.execution.price_alerts import PriceAlertRecord
 from src.audit.ledger import AuditLedger
 
 from src.config import Settings

@@ -870,6 +870,85 @@ class TestListOrdersHistory:
             assert field in order
 
 
+class TestWatchlistEndpoints:
+    def test_add_then_list_shows_the_symbol(self, client):
+        client.post("/v1/watchlists/API-Test-List/items", json={"symbol": "qqq"})
+
+        resp = client.get("/v1/watchlists")
+
+        assert resp.status_code == 200
+        assert resp.json()["watchlists"]["API-Test-List"] == ["QQQ"]
+
+    def test_remove_symbol(self, client):
+        client.post("/v1/watchlists/API-Remove-List/items", json={"symbol": "SPY"})
+
+        resp = client.delete("/v1/watchlists/API-Remove-List/items/SPY")
+
+        assert resp.status_code == 200
+        assert client.get("/v1/watchlists").json()["watchlists"].get("API-Remove-List") is None
+
+    def test_remove_symbol_not_on_list_is_404(self, client):
+        resp = client.delete("/v1/watchlists/Never-Created/items/QQQ")
+        assert resp.status_code == 404
+
+    def test_delete_list(self, client):
+        client.post("/v1/watchlists/API-Delete-List/items", json={"symbol": "IWM"})
+
+        resp = client.delete("/v1/watchlists/API-Delete-List")
+
+        assert resp.status_code == 200
+        assert resp.json()["removed_symbols"] == 1
+
+
+class TestQuotesEndpoint:
+    def test_returns_a_quote_per_symbol(self, client):
+        resp = client.get("/v1/quotes", params={"symbols": "QQQ,SPY"})
+
+        assert resp.status_code == 200
+        quotes = resp.json()["quotes"]
+        assert len(quotes) == 2
+        assert {q["symbol"] for q in quotes} == {"QQQ", "SPY"}
+        assert all("last" in q for q in quotes)
+
+    def test_rejects_empty_symbols(self, client):
+        resp = client.get("/v1/quotes", params={"symbols": "  ,  "})
+        assert resp.status_code == 400
+
+
+class TestPriceAlertEndpoints:
+    def test_create_then_list(self, client):
+        resp = client.post("/v1/alerts", json={"symbol": "qqq", "condition": "above", "target_price": 700, "created_by": "sumit"})
+        assert resp.status_code == 200
+        alert = resp.json()
+        assert alert["symbol"] == "QQQ"
+        assert alert["active"] is True
+
+        list_resp = client.get("/v1/alerts", params={"active_only": "true"})
+        ids = [a["id"] for a in list_resp.json()["alerts"]]
+        assert alert["id"] in ids
+
+    def test_create_rejects_bad_condition(self, client):
+        resp = client.post("/v1/alerts", json={"symbol": "QQQ", "condition": "SIDEWAYS", "target_price": 700, "created_by": "sumit"})
+        assert resp.status_code == 400
+
+    def test_cancel_alert(self, client):
+        created = client.post("/v1/alerts", json={"symbol": "SPY", "condition": "below", "target_price": 400, "created_by": "sumit"}).json()
+
+        resp = client.delete(f"/v1/alerts/{created['id']}")
+
+        assert resp.status_code == 200
+        assert resp.json()["active"] is False
+
+    def test_cancel_unknown_alert_is_404(self, client):
+        resp = client.delete("/v1/alerts/999999")
+        assert resp.status_code == 404
+
+    def test_check_now_runs_without_error(self, client):
+        resp = client.post("/v1/alerts/check-now")
+        assert resp.status_code == 200
+        assert "fired" in resp.json()
+
+
 class TestStrategyEndpoints:
     """
     Test the strategy catalog, on-demand scan, and signal review endpoints.

@@ -29,6 +29,8 @@ from src.execution.autonomous_trader import autonomous_cycle_once, run_autonomou
 from src.execution.daily_plan import DailyPlanService
 from src.execution.strategy_ranking import rank_strategies_by_recent_performance
 from src.execution.strategy_rotation import rotate_once, run_strategy_rotation_loop
+from src.execution.price_alerts import PriceAlertService, check_alerts_once, run_price_alert_loop
+from src.execution.watchlists import WatchlistService
 from src.execution.edge_tf_connector import SOURCE as EDGE_TF_SOURCE, claim_upstream, poll_once as edge_tf_poll_once, report_upstream, run_connector_loop
 from src.execution.ep_edge_earnings_adapter import (
     ExternalSignalIngestRequest as EarningsIngestRequest,
@@ -47,6 +49,8 @@ from src.execution.symbol_coordination import SymbolCoordinationGuard
 from src.integrations.edge_tf_client import EdgeTFGatewayError
 from src.logging_config import configure_logging, get_logger
 from src.models.daily_plan_api import ArmPlanRequest, DisarmPlanRequest, RankStrategiesRequest, StartAgentRequest
+from src.models.price_alert_api import CreatePriceAlertRequest
+from src.models.watchlist_api import AddWatchlistSymbolRequest
 from src.models.multi_leg_orders import MultiLegExecuteRequest, MultiLegPreviewRequest
 from src.models.orders import (
     TradeProposal,
@@ -111,6 +115,8 @@ _autonomous_trader_stop_event: Optional[asyncio.Event] = None
 _autonomous_trader_task: Optional[asyncio.Task] = None
 _strategy_rotation_stop_event: Optional[asyncio.Event] = None
 _strategy_rotation_task: Optional[asyncio.Task] = None
+_price_alert_stop_event: Optional[asyncio.Event] = None
+_price_alert_task: Optional[asyncio.Task] = None
 
 
 @app.on_event("startup")
@@ -121,7 +127,7 @@ async def startup_event():
 
     global _scanner_stop_event, _scanner_task, _edge_tf_connector_stop_event, _edge_tf_connector_task
     global _autonomous_trader_stop_event, _autonomous_trader_task
-    global _strategy_rotation_stop_event, _strategy_rotation_task
+    global _strategy_rotation_stop_event, _strategy_rotation_task, _price_alert_stop_event, _price_alert_task
     _scanner_stop_event = asyncio.Event()
     _scanner_task = asyncio.create_task(run_scanner_loop(SessionLocal, get_settings, _scanner_stop_event))
 
@@ -138,6 +144,11 @@ async def startup_event():
     _strategy_rotation_stop_event = asyncio.Event()
     _strategy_rotation_task = asyncio.create_task(
         run_strategy_rotation_loop(SessionLocal, get_settings, _strategy_rotation_stop_event)
+    )
+
+    _price_alert_stop_event = asyncio.Event()
+    _price_alert_task = asyncio.create_task(
+        run_price_alert_loop(SessionLocal, get_settings, _price_alert_stop_event)
     )
 
     logger.info("startup_complete")
@@ -165,6 +176,11 @@ async def shutdown_event():
         _strategy_rotation_stop_event.set()
     if _strategy_rotation_task is not None:
         await asyncio.wait_for(_strategy_rotation_task, timeout=10)
+
+    if _price_alert_stop_event is not None:
+        _price_alert_stop_event.set()
+    if _price_alert_task is not None:
+        await asyncio.wait_for(_price_alert_task, timeout=10)
 
 
 @app.get("/v1/health")
@@ -587,6 +603,114 @@ async def get_account_positions(
     except Exception as e:
         logger.error("positions_query_error", account=account, error=str(e))
         raise HTTPException(status_code=502, detail=f"Could not fetch positions: {e}")
+
+
+@app.get("/v1/quotes", dependencies=[Depends(verify_admin_key)])
+async def get_quotes(
+    symbols: str = Query(..., description="Comma-separated tickers, e.g. QQQ,SPY,IWM"),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Batch live quotes — one broker call per symbol (whichever broker
+    current settings select; see src/brokers/factory.py), gathered
+    concurrently. Backs watchlists and price alerts, both of which need
+    "current price for N symbols" on a timer. One symbol failing (bad
+    ticker, a transient broker hiccup) doesn't fail the others — it comes
+    back with an "error" field instead of a quote, same "one failure
+    doesn't abort the rest" pattern used throughout this codebase's
+    batch operations.
+    """
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not tickers:
+        raise HTTPException(status_code=400, detail="symbols must not be empty")
+    if len(tickers) > 50:
+        raise HTTPException(status_code=400, detail="At most 50 symbols per request")
+
+    broker = build_broker_adapter(settings)
+
+    async def _one(symbol: str) -> dict:
+        try:
+            return {"symbol": symbol, **await broker.get_quote(symbol)}
+        except Exception as e:
+            return {"symbol": symbol, "error": str(e)}
+
+    results = await asyncio.gather(*[_one(s) for s in tickers])
+    return {"quotes": results}
+
+
+@app.get("/v1/watchlists", dependencies=[Depends(verify_admin_key)])
+async def get_watchlists(db: Session = Depends(get_db)):
+    """Every watchlist and its symbols in one call — {list_name: [symbol, ...]}."""
+    return {"watchlists": WatchlistService(db).all_lists()}
+
+
+@app.post("/v1/watchlists/{list_name}/items", dependencies=[Depends(verify_admin_key)])
+async def add_watchlist_symbol(
+    list_name: str,
+    request: AddWatchlistSymbolRequest,
+    db: Session = Depends(get_db),
+):
+    """Adds a symbol to a list — the list is created implicitly the first time a symbol is added to a new name. Adding an already-present symbol is a harmless no-op."""
+    try:
+        item = WatchlistService(db).add_symbol(list_name, request.symbol)
+        return item.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/v1/watchlists/{list_name}/items/{symbol}", dependencies=[Depends(verify_admin_key)])
+async def remove_watchlist_symbol(list_name: str, symbol: str, db: Session = Depends(get_db)):
+    """Removes one symbol from one list. The list itself disappears once its last symbol is gone — see WatchlistService's own docstring."""
+    removed = WatchlistService(db).remove_symbol(list_name, symbol)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"{symbol} is not on the '{list_name}' list")
+    return {"removed": True}
+
+
+@app.delete("/v1/watchlists/{list_name}", dependencies=[Depends(verify_admin_key)])
+async def delete_watchlist(list_name: str, db: Session = Depends(get_db)):
+    """Deletes an entire list (every symbol on it)."""
+    removed_count = WatchlistService(db).delete_list(list_name)
+    return {"removed_symbols": removed_count}
+
+
+@app.post("/v1/alerts", dependencies=[Depends(verify_admin_key)])
+async def create_price_alert(request: CreatePriceAlertRequest, db: Session = Depends(get_db)):
+    """
+    Creates a one-shot price alert: fires an outbound webhook
+    notification (src/notifications/webhook.py) the next time the
+    background check (src/execution/price_alerts.py, ~60s interval)
+    sees the symbol cross target_price, then deactivates itself.
+    """
+    try:
+        alert = PriceAlertService(db).create(request.symbol, request.condition, request.target_price, request.created_by)
+        return alert.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/v1/alerts", dependencies=[Depends(verify_admin_key)])
+async def list_price_alerts(active_only: bool = False, db: Session = Depends(get_db)):
+    """Every alert, most recent first — pass active_only=true for just the ones still watching."""
+    alerts = PriceAlertService(db).list_all(active_only=active_only)
+    return {"alerts": [a.to_dict() for a in alerts]}
+
+
+@app.delete("/v1/alerts/{alert_id}", dependencies=[Depends(verify_admin_key)])
+async def cancel_price_alert(alert_id: int, db: Session = Depends(get_db)):
+    """Cancels an alert before it fires. Already-fired or already-canceled alerts return 404 — nothing left to cancel."""
+    alert = PriceAlertService(db).cancel(alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found or no longer active")
+    return alert.to_dict()
+
+
+@app.post("/v1/alerts/check-now", dependencies=[Depends(verify_admin_key)])
+async def check_price_alerts_now(db: Session = Depends(get_db), settings: Settings = Depends(get_settings_dep)):
+    """Triggers one immediate alert check instead of waiting for the next ~60s background tick — for testing/demo."""
+    broker = build_broker_adapter(settings)
+    fired = await check_alerts_once(db, settings, broker)
+    return {"fired": fired}
 
 
 @app.get("/v1/orders/{decision_id}", response_model=OrderStatus_Model, dependencies=[Depends(verify_admin_key)])
