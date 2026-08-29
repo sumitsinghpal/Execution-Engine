@@ -7,6 +7,7 @@ import pytest
 
 from src.agents.profiles import AgentRiskProfile
 from src.models.occ_symbol import format_occ_symbol
+from src.models.futures_symbol import format_futures_symbol
 from src.models.orders import TradeProposal, AssetType, Instruction, OrderType
 from src.risk.limits import RiskChecker
 
@@ -345,3 +346,63 @@ class TestOptionRiskChecks:
         verdict = checker.evaluate(sample_trade_proposal, kill_switch_on=False, quote=sample_quote)
         expected = sample_trade_proposal.limit_price * sample_trade_proposal.quantity
         assert verdict.notional_usd == expected
+
+
+class TestFutureRiskChecks:
+    """RiskChecker's futures-specific behavior: root-based allowlist and the per-product contract multiplier (src/models/futures_symbol.py)."""
+
+    @staticmethod
+    def _future_proposal(root="ES", month="Z", year=2026, limit_price="5000", quantity=2):
+        symbol = format_futures_symbol(root, month, year)
+        return TradeProposal(
+            decision_id=f"edge-future-risk-{root}-{year}",
+            account="primary",
+            symbol=symbol,
+            asset_type=AssetType.FUTURE,
+            instruction=Instruction.BUY,
+            quantity=quantity,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal(limit_price),
+        )
+
+    @staticmethod
+    def _quote_for(proposal):
+        return {
+            "symbol": proposal.symbol,
+            "bid": proposal.limit_price,
+            "ask": proposal.limit_price,
+            "last": proposal.limit_price,
+            "quote_time": datetime.now(UTC).isoformat(),
+            "mode": "PAPER",
+        }
+
+    def test_future_root_not_on_the_allowlist_is_rejected(self):
+        proposal = self._future_proposal(root="ES")  # not in the default fleet-wide allowlist
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert not verdict.approved
+        assert not verdict.checks["symbol_allowed"]
+
+    def test_future_notional_uses_the_product_contract_multiplier(self):
+        """2 ES contracts at $5000 is really $500,000 notional (2 * 50 * $5000), not $10,000."""
+        proposal = self._future_proposal(root="ES", limit_price="5000", quantity=2)
+        checker = RiskChecker()
+        checker.settings.max_order_notional_usd = Decimal("100000")  # below $500,000
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert not verdict.checks["notional_limit"]
+        assert verdict.notional_usd == Decimal("500000")
+
+    def test_future_on_an_unlisted_product_has_no_verifiable_notional(self):
+        """No multiplier on file for a product means it can't be priced — fails closed, not silently 1x."""
+        proposal = self._future_proposal(root="ZZZ", limit_price="100", quantity=1)
+        checker = RiskChecker()
+
+        verdict = checker.evaluate(proposal, kill_switch_on=False, quote=self._quote_for(proposal))
+
+        assert verdict.notional_usd is None
+        assert not verdict.checks["notional_limit"]
+        assert not verdict.approved

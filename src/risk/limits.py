@@ -11,6 +11,7 @@ from typing import Any, Optional
 from src.config import get_settings
 from src.logging_config import get_logger
 from src.models.occ_symbol import parse_occ_symbol
+from src.models.futures_symbol import get_contract_multiplier, parse_futures_symbol
 from src.models.orders import AssetType, Instruction, OrderType, TradeProposal
 
 # An option contract represents 100 shares of the underlying — its
@@ -253,9 +254,21 @@ class RiskChecker:
 
         An option contract represents 100 shares of the underlying — the
         real dollar risk is premium x 100 x contracts, not premium x
-        contracts, which would understate it 100-fold.
+        contracts, which would understate it 100-fold. A futures contract
+        is the same problem with a per-product multiplier instead of a
+        flat 100 (see src/models/futures_symbol.py); an unlisted product
+        (no multiplier on file) can't be priced at all, so this returns
+        None rather than silently pricing it as 1x.
         """
-        multiplier = _OPTION_CONTRACT_MULTIPLIER if proposal.asset_type == AssetType.OPTION else Decimal(1)
+        if proposal.asset_type == AssetType.OPTION:
+            multiplier = _OPTION_CONTRACT_MULTIPLIER
+        elif proposal.asset_type == AssetType.FUTURE:
+            try:
+                multiplier = Decimal(get_contract_multiplier(parse_futures_symbol(proposal.symbol).root))
+            except ValueError:
+                return None
+        else:
+            multiplier = Decimal(1)
 
         if proposal.limit_price:
             return proposal.limit_price * Decimal(proposal.quantity) * multiplier

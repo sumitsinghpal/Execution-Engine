@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.models.occ_symbol import format_occ_symbol
+from src.models.futures_symbol import format_futures_symbol
 from src.models.orders import (
     AssetType,
     Instruction,
@@ -225,6 +226,71 @@ class TestOptionTradeProposal:
                 symbol="NOTAVALIDOCCSYMBOLXX",  # 20 chars, wrong length
                 asset_type=AssetType.OPTION,
                 instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+
+class TestFutureTradeProposal:
+    """TradeProposal for asset_type=FUTURE uses a root+month-code+year symbol instead of a plain ticker."""
+
+    def test_valid_future_proposal(self):
+        proposal = TradeProposal(
+            decision_id="edge-future-001",
+            account="primary",
+            symbol=format_futures_symbol("ES", "Z", 2026),
+            asset_type=AssetType.FUTURE,
+            instruction=Instruction.BUY,
+            quantity=1,
+            order_type=OrderType.MARKET,
+        )
+        assert proposal.asset_type == AssetType.FUTURE
+        assert proposal.symbol == "ESZ26"
+
+    def test_underlying_symbol_extracts_the_product_root(self):
+        proposal = TradeProposal(
+            decision_id="edge-future-002",
+            account="primary",
+            symbol=format_futures_symbol("RTY", "H", 2027),
+            asset_type=AssetType.FUTURE,
+            instruction=Instruction.SELL,
+            quantity=1,
+            order_type=OrderType.MARKET,
+        )
+        assert proposal.underlying_symbol == "RTY"
+
+    def test_future_asset_type_rejects_a_plain_ticker(self):
+        with pytest.raises(ValidationError, match="Invalid futures symbol"):
+            TradeProposal(
+                decision_id="edge-future-003",
+                account="primary",
+                symbol="QQQ",
+                asset_type=AssetType.FUTURE,
+                instruction=Instruction.BUY,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_equity_asset_type_rejects_a_futures_symbol(self):
+        with pytest.raises(ValidationError):
+            TradeProposal(
+                decision_id="edge-future-004",
+                account="primary",
+                symbol=format_futures_symbol("ES", "Z", 2026),
+                asset_type=AssetType.ETF,
+                instruction=Instruction.BUY,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_malformed_futures_symbol_is_rejected(self):
+        with pytest.raises(ValidationError):
+            TradeProposal(
+                decision_id="edge-future-005",
+                account="primary",
+                symbol="ESA26",  # 'A' is not a real CME month code
+                asset_type=AssetType.FUTURE,
+                instruction=Instruction.BUY,
                 quantity=1,
                 order_type=OrderType.MARKET,
             )

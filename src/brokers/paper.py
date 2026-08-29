@@ -9,6 +9,7 @@ from typing import Any
 from src.accounts.profiles import AccountProfile
 from src.brokers.base import BrokerAdapter
 from src.models.occ_symbol import is_occ_symbol_shape, parse_occ_symbol
+from src.models.futures_symbol import get_contract_multiplier, parse_futures_symbol
 
 
 class PaperBrokerAdapter(BrokerAdapter):
@@ -175,12 +176,22 @@ class PaperBrokerAdapter(BrokerAdapter):
             # silently reporting a $0 estimated investment.
             quote = await self.get_quote(order_spec.get("symbol", ""))
             limit_price = quote["last"]
-        # An option contract represents 100 shares of the underlying — the
-        # real dollar amount at stake is premium x 100 x contracts, same
-        # multiplier RiskChecker applies. Without this, the "estimated
-        # cost" shown to whoever is reviewing the order would understate
-        # an option trade's actual size 100-fold.
-        multiplier = 100 if order_spec.get("assetType") == "OPTION" else 1
+        # An option contract represents 100 shares of the underlying, and a
+        # futures contract its own per-product multiple — the real dollar
+        # amount at stake is price x multiplier x contracts, the same
+        # multiplier RiskChecker applies (src/risk/limits.py). Without this,
+        # the "estimated cost" shown to whoever is reviewing the order
+        # would understate an option or futures trade's actual size.
+        asset_type = order_spec.get("assetType")
+        if asset_type == "OPTION":
+            multiplier = 100
+        elif asset_type == "FUTURE":
+            try:
+                multiplier = get_contract_multiplier(parse_futures_symbol(order_spec.get("symbol", "")).root)
+            except ValueError:
+                multiplier = 1  # unlisted product — best-effort estimate only, RiskChecker's own notional check fails closed on this
+        else:
+            multiplier = 1
         return {
             "orderId": f"paper-preview-{order_spec['orderId']}",
             "estimatedCommission": 0.0,

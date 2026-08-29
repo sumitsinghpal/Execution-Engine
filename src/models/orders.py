@@ -14,6 +14,7 @@ from typing import Optional, Any
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, field_serializer
 
 from src.models.occ_symbol import OCC_SYMBOL_LENGTH, parse_occ_symbol
+from src.models.futures_symbol import parse_futures_symbol
 
 
 class AssetType(str, Enum):
@@ -22,6 +23,7 @@ class AssetType(str, Enum):
     ETF = "ETF"
     OPTION = "OPTION"
     BOND = "BOND"
+    FUTURE = "FUTURE"
 
 
 class Instruction(str, Enum):
@@ -79,8 +81,9 @@ class TradeProposal(BaseModel):
         ...,
         max_length=OCC_SYMBOL_LENGTH,
         description=(
-            "Equity/ETF ticker (uppercase, max 5 chars) when asset_type is EQUITY/ETF/BOND, or a full "
-            "21-character OCC option symbol (e.g. 'NVDA  280121C00120000') when asset_type is OPTION."
+            "Equity/ETF ticker (uppercase, max 5 chars) when asset_type is EQUITY/ETF/BOND, a full "
+            "21-character OCC option symbol (e.g. 'NVDA  280121C00120000') when asset_type is OPTION, "
+            "or a root+month-code+year futures symbol (e.g. 'ESZ26') when asset_type is FUTURE."
         ),
     )
     asset_type: AssetType = Field(..., description="Type of asset being traded")
@@ -133,15 +136,22 @@ class TradeProposal(BaseModel):
                 parse_occ_symbol(self.symbol)
             except ValueError as exc:
                 raise ValueError(f"Invalid OCC option symbol for OPTION asset_type: {exc}") from exc
+        elif self.asset_type == AssetType.FUTURE:
+            try:
+                parse_futures_symbol(self.symbol)
+            except ValueError as exc:
+                raise ValueError(f"Invalid futures symbol for FUTURE asset_type: {exc}") from exc
         elif not re.fullmatch(r"[A-Z]{1,5}", self.symbol):
             raise ValueError(f"symbol must be 1-5 uppercase letters for asset_type={self.asset_type.value}")
         return self
 
     @property
     def underlying_symbol(self) -> str:
-        """The equity ticker this proposal is ultimately about — itself for equities, the OCC root for options. Used for allowlist/denylist checks."""
+        """The equity/product ticker this proposal is ultimately about — itself for equities, the OCC root for options, the product root for futures. Used for allowlist/denylist checks."""
         if self.asset_type == AssetType.OPTION:
             return parse_occ_symbol(self.symbol).underlying
+        if self.asset_type == AssetType.FUTURE:
+            return parse_futures_symbol(self.symbol).root
         return self.symbol
 
     @field_validator("agent_id")
