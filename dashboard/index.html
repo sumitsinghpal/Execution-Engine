@@ -383,6 +383,30 @@
   .history-pagination { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--ink-faint); font-family: var(--font-mono); flex-wrap: wrap; gap: 10px; }
   .history-pagination .btn { width: auto; margin-top: 0; padding: 8px 16px; font-size: 12.5px; }
   .history-pagination .btn:disabled { opacity: .35; }
+
+  /* Watchlists */
+  .watchlist-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .watchlist-tab {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-muted); cursor: pointer;
+  }
+  .watchlist-tab.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .watchlist-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px; }
+  .watchlist-row:last-child { border-bottom: none; }
+  .watchlist-row .wl-symbol { font-weight: 700; font-size: 13.5px; }
+  .watchlist-row .wl-price { font-family: var(--font-mono); font-size: 13px; text-align: right; }
+  .watchlist-row .wl-chg { font-family: var(--font-mono); font-size: 11px; }
+  .watchlist-row .wl-remove { background: none; border: none; color: var(--ink-faint); cursor: pointer; font-size: 15px; padding: 2px 6px; flex: none; }
+  .watchlist-row .wl-remove:hover { color: var(--sell); }
+
+  /* Price alerts */
+  .alert-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px; }
+  .alert-row:last-child { border-bottom: none; }
+  .alert-row .alert-desc { font-size: 13px; font-weight: 600; }
+  .alert-row .alert-desc b { font-family: var(--font-mono); }
+  .alert-row .alert-meta { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 2px; }
+  .alert-row .wl-remove { background: none; border: none; color: var(--ink-faint); cursor: pointer; font-size: 15px; padding: 2px 6px; flex: none; }
+  .alert-row .wl-remove:hover { color: var(--sell); }
   .lu-meta { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); margin-bottom: 14px; }
   .lu-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 14px; margin-bottom: 18px; }
   .lu-stat-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; margin-bottom: 4px; }
@@ -500,6 +524,23 @@
         </div>
       </div>
 
+      <div class="card">
+        <h2>Watchlists <span class="hint">save the symbols you actually track</span></h2>
+        <div class="watchlist-tabs" id="watchlistTabs"></div>
+        <div id="watchlistBody"><div class="empty-note">Loading…</div></div>
+        <div class="field-row" style="margin-top:14px">
+          <div class="field" style="margin-top:0">
+            <label for="wlNewSymbol">Add symbol</label>
+            <input id="wlNewSymbol" placeholder="e.g. NVDA" style="text-transform:uppercase" maxlength="6">
+          </div>
+          <div class="field" style="margin-top:0">
+            <label for="wlNewList">List name</label>
+            <input id="wlNewList" placeholder="Watchlist" maxlength="24">
+          </div>
+        </div>
+        <button class="btn btn-ghost" id="wlAddBtn">Add to list</button>
+      </div>
+
     </div>
 
     <div class="col">
@@ -532,6 +573,29 @@
         <div id="signalsList">
           <div class="skel-row"><div class="skel-lines"><div class="skel-bar" style="width:35%"></div><div class="skel-bar" style="width:60%"></div></div></div>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>Price alerts <span class="hint">get notified when a symbol crosses a price</span></h2>
+        <div id="alertsList"><div class="empty-note">Loading…</div></div>
+        <div class="field-row">
+          <div class="field">
+            <label for="alertSymbol">Symbol</label>
+            <input id="alertSymbol" placeholder="e.g. QQQ" style="text-transform:uppercase" maxlength="6">
+          </div>
+          <div class="field">
+            <label for="alertCondition">When price is</label>
+            <select id="alertCondition">
+              <option value="ABOVE">Above</option>
+              <option value="BELOW">Below</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="alertPrice">Target price (USD)</label>
+          <input id="alertPrice" type="number" step="0.01" placeholder="700.00">
+        </div>
+        <button class="btn btn-ghost" id="alertAddBtn">Set alert</button>
       </div>
 
       <div class="card">
@@ -1147,6 +1211,133 @@
   ['histSymbol', 'histFrom', 'histTo'].forEach(id => {
     $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refreshHistory(true); });
   });
+
+  // ---- Watchlists (src/execution/watchlists.py) ----
+  let watchlistData = {}; // { listName: [symbol, ...] }
+  let activeWatchlistName = null;
+
+  async function refreshWatchlists() {
+    try {
+      const r = await api('/v1/watchlists');
+      watchlistData = r.watchlists || {};
+      const names = Object.keys(watchlistData);
+      if (!activeWatchlistName || !names.includes(activeWatchlistName)) {
+        activeWatchlistName = names[0] || null;
+      }
+      renderWatchlistTabs();
+      await renderWatchlistBody();
+    } catch (e) {
+      $('watchlistBody').innerHTML = `<div class="empty-note">Could not load watchlists: ${e.message}</div>`;
+    }
+  }
+
+  function renderWatchlistTabs() {
+    const names = Object.keys(watchlistData);
+    const el = $('watchlistTabs');
+    if (!names.length) { el.innerHTML = ''; return; }
+    el.innerHTML = names.map(name =>
+      `<button type="button" class="watchlist-tab ${name === activeWatchlistName ? 'active' : ''}" data-list="${name}">${name}</button>`
+    ).join('');
+    el.querySelectorAll('.watchlist-tab').forEach(btn => {
+      btn.addEventListener('click', () => { activeWatchlistName = btn.dataset.list; renderWatchlistTabs(); renderWatchlistBody(); });
+    });
+  }
+
+  async function renderWatchlistBody() {
+    const el = $('watchlistBody');
+    const symbols = watchlistData[activeWatchlistName] || [];
+    if (!activeWatchlistName || !symbols.length) {
+      el.innerHTML = '<div class="empty-note">No symbols yet — add one below to start a list.</div>';
+      return;
+    }
+    el.innerHTML = symbols.map(s => `
+      <div class="watchlist-row" data-symbol="${s}">
+        <span class="wl-symbol">${s}</span>
+        <span class="wl-price num" data-wl-price="${s}">…</span>
+        <button class="wl-remove" data-remove="${s}" title="Remove from list">✕</button>
+      </div>`).join('');
+
+    el.querySelectorAll('[data-remove]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await api(`/v1/watchlists/${encodeURIComponent(activeWatchlistName)}/items/${encodeURIComponent(btn.dataset.remove)}`, { method: 'DELETE' });
+        refreshWatchlists();
+      });
+    });
+
+    try {
+      const r = await api(`/v1/quotes?symbols=${encodeURIComponent(symbols.join(','))}`);
+      (r.quotes || []).forEach(q => {
+        const priceEl = el.querySelector(`[data-wl-price="${q.symbol}"]`);
+        if (!priceEl) return;
+        if (q.error) { priceEl.textContent = '—'; return; }
+        const pctChg = q.bid && q.ask ? null : null; // no day-change field from get_quote — show last price only, honestly
+        priceEl.innerHTML = `${money(q.last)}`;
+      });
+    } catch (e) { /* quotes are a nice-to-have here — a failure leaves the "…" placeholder, not an error state */ }
+  }
+
+  $('wlAddBtn').addEventListener('click', async () => {
+    const symbol = $('wlNewSymbol').value.trim().toUpperCase();
+    const listName = $('wlNewList').value.trim() || activeWatchlistName || 'Watchlist';
+    if (!symbol) { toast('Enter a symbol'); return; }
+    try {
+      await api(`/v1/watchlists/${encodeURIComponent(listName)}/items`, { method: 'POST', body: JSON.stringify({ symbol }) });
+      $('wlNewSymbol').value = '';
+      activeWatchlistName = listName;
+      toast(`${symbol} added to ${listName}`);
+      refreshWatchlists();
+    } catch (e) {
+      toast('Could not add symbol: ' + e.message);
+    }
+  });
+  $('wlNewSymbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('wlAddBtn').click(); });
+
+  // ---- Price alerts (src/execution/price_alerts.py) ----
+  async function refreshAlerts() {
+    const el = $('alertsList');
+    try {
+      const r = await api('/v1/alerts?active_only=true');
+      const alerts = r.alerts || [];
+      if (!alerts.length) {
+        el.innerHTML = '<div class="empty-note">No active alerts. Set one below and we\'ll notify you when it hits.</div>';
+        return;
+      }
+      el.innerHTML = alerts.map(a => `
+        <div class="alert-row">
+          <div>
+            <div class="alert-desc">${a.symbol} <span style="color:var(--ink-faint);font-weight:500">${a.condition === 'ABOVE' ? 'above' : 'below'}</span> <b>${money(a.target_price)}</b></div>
+            <div class="alert-meta">set by ${a.created_by} · ${timeAgo(a.created_at)}</div>
+          </div>
+          <button class="wl-remove" data-cancel-alert="${a.id}" title="Cancel this alert">✕</button>
+        </div>`).join('');
+      el.querySelectorAll('[data-cancel-alert]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          await api(`/v1/alerts/${btn.dataset.cancelAlert}`, { method: 'DELETE' });
+          refreshAlerts();
+        });
+      });
+    } catch (e) {
+      el.innerHTML = `<div class="empty-note">Could not load alerts: ${e.message}</div>`;
+    }
+  }
+
+  $('alertAddBtn').addEventListener('click', async () => {
+    const symbol = $('alertSymbol').value.trim().toUpperCase();
+    const condition = $('alertCondition').value;
+    const price = $('alertPrice').value;
+    if (!symbol) { toast('Enter a symbol'); return; }
+    if (!price || Number(price) <= 0) { toast('Enter a target price'); return; }
+    const createdBy = store.get('edge.approver', 'you');
+    try {
+      await api('/v1/alerts', { method: 'POST', body: JSON.stringify({ symbol, condition, target_price: Number(price), created_by: createdBy }) });
+      $('alertSymbol').value = ''; $('alertPrice').value = '';
+      toast(`Alert set — we'll notify you when ${symbol} goes ${condition === 'ABOVE' ? 'above' : 'below'} ${money(price)}`);
+      refreshAlerts();
+    } catch (e) {
+      toast('Could not set alert: ' + e.message);
+    }
+  });
+  $('alertPrice').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('alertAddBtn').click(); });
 
   // ---- Kill switch ----
   async function refreshKillSwitch() {
@@ -1896,6 +2087,7 @@
   function refreshAll() {
     refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
     refreshPositions(); refreshFeed(); refreshKillSwitch(); refreshSignals(); refreshDailyPlan();
+    refreshWatchlists(); refreshAlerts();
   }
   refreshAll();
   loadStrategies();
