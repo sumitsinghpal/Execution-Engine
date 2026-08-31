@@ -38,6 +38,7 @@ from src.execution.ep_edge_earnings_adapter import (
     SOURCE as EpEdgeSource,
     record_batch as ep_edge_record_batch,
 )
+from src.execution.hedge_engine_adapter import SOURCE as HedgeSource, record_batch as hedge_record_batch
 from src.execution.executor import Executor, OrderRecord
 from src.execution.external_signals import ExternalSignalStatus, ExternalSignalService
 from src.execution.kill_switch_state import GLOBAL_SCOPE, KillSwitchService
@@ -1294,15 +1295,19 @@ async def ingest_external_signals(
 ):
     """
     Push-based counterpart to /v1/external-signals/poll: for a source with
-    no HTTP gateway of its own to poll (today: ep-edge-earnings, a library
-    with no service and no claim/report lifecycle — see
-    src/execution/ep_edge_earnings_adapter.py), whoever runs its workflow
-    POSTs the resulting candidates here instead. Same effect either way:
-    records signals for human review in GET /v1/external-signals, places no
-    orders.
+    no HTTP gateway of its own to poll (today: ep-edge-earnings and
+    hedge-engine, both libraries with no service and no claim/report
+    lifecycle — see src/execution/ep_edge_earnings_adapter.py and
+    src/execution/hedge_engine_adapter.py), whoever runs that workflow
+    POSTs the resulting candidates/decisions here instead. Same effect
+    either way: records signals for human review in GET
+    /v1/external-signals, places no orders.
     """
     if request.source == EpEdgeSource:
         new_count = ep_edge_record_batch(db, request.candidates)
+        return {"new_signals": new_count, "source": request.source}
+    if request.source == HedgeSource:
+        new_count = hedge_record_batch(db, request.candidates)
         return {"new_signals": new_count, "source": request.source}
     raise HTTPException(status_code=400, detail=f"Unknown or unsupported ingestion source: {request.source}")
 
