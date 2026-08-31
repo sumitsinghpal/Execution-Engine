@@ -50,6 +50,7 @@ class TestRecordDecision:
         assert record.source == "hedge-engine"
         assert record.quantity is None  # not sized by the source
         assert "ev_net" in record.rationale
+        assert record.confidence == 0.82  # quant_checks.p_confidence, carried through as structured data
 
     def test_non_viable_decision_is_skipped(self, test_db_engine_and_session):
         _, session = test_db_engine_and_session

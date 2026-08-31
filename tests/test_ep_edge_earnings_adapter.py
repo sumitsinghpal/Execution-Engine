@@ -35,6 +35,7 @@ class TestRecordCandidate:
         assert record.symbol == "MU"
         assert record.source == "ep-edge-earnings"
         assert record.quantity is None  # not sized by the source
+        assert record.confidence == 0.8  # the candidate's own confidence, carried through as structured data
 
     def test_bearish_candidate_becomes_a_sell_signal(self, test_db_engine_and_session):
         _, session = test_db_engine_and_session

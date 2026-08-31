@@ -109,6 +109,7 @@ def record_candidate(session: Session, candidate: dict[str, Any]) -> Optional[Ex
         "order_type": "MARKET",  # no price/level in a TradeCandidate — see module docstring
         "thesis_id": parsed.ticker,
         "strategy_module": "workflows.earnings_event",
+        "confidence": parsed.confidence,
         "rationale": (
             f"{parsed.thesis} (expected_value={parsed.expected_value:.4f}, "
             f"confidence={parsed.confidence:.2f}, market_awareness={parsed.market_awareness:.2f})"

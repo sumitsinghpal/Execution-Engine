@@ -90,6 +90,16 @@ class ExternalSignalRecord(SQLModel, table=True):
     thesis_id: str
     strategy_module: str
     rationale: Optional[str] = None
+    # The source's own confidence in this thesis (0..1), as a structured,
+    # comparable number — not just buried in the free-text rationale
+    # string. None for a source with no such concept (edge-tf: a
+    # fully-approved, already-committed order instruction, not a
+    # probabilistic thesis — see edge_tf_connector.py). Populated by
+    # ep-edge-earnings (TradeCandidate.confidence) and hedge-engine
+    # (quant_checks.p_confidence). Read-only display data — never used to
+    # gate execution; that stays entirely inside preview -> risk-checks
+    # -> human-approval.
+    confidence: Optional[float] = None
 
     # edge-tf only: needed to report back accurately and to know when a
     # stale instruction should be re-polled. None for any source without an
@@ -118,6 +128,7 @@ class ExternalSignalRecord(SQLModel, table=True):
             "thesis_id": self.thesis_id,
             "strategy_module": self.strategy_module,
             "rationale": self.rationale,
+            "confidence": self.confidence,
             "approval_expires_at": self.approval_expires_at,
             "status": self.status,
             "created_at": self.created_at,
@@ -202,6 +213,7 @@ class ExternalSignalService:
             thesis_id=instruction["thesis_id"],
             strategy_module=instruction["strategy_module"],
             rationale=instruction.get("rationale"),
+            confidence=instruction.get("confidence"),
             intent_hash=instruction.get("intent_hash"),
             approved_fingerprint=instruction.get("approved_fingerprint"),
             approval_expires_at=_parse_datetime(expires_at) if expires_at is not None else None,

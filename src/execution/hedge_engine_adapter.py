@@ -135,6 +135,7 @@ def record_decision(session: Session, decision: dict[str, Any]) -> Optional[Exte
         "order_type": "MARKET",  # no price/level in a Decision Record
         "thesis_id": parsed.decision_id,
         "strategy_module": _STRATEGY_MODULE,
+        "confidence": parsed.quant_checks.p_confidence,
         "rationale": rationale,
     }
     return ExternalSignalService(session).record_if_new(SOURCE, instruction)
