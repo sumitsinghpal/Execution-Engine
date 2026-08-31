@@ -86,6 +86,45 @@ async def test_paper_adapter_simulates_preview_and_submission() -> None:
     assert receipt["orderId"] == "paper-order-decision-1"
 
 
+class TestPaperAdapterReportsAnImmediateFill:
+    """
+    Paper mode has no order book — every order fills completely,
+    instantly, at submission (see PaperBrokerAdapter.submit_order()'s own
+    docstring). Regression coverage for a real bug: submit_order() used
+    to report status="ACCEPTED" with no fill data at all, which meant
+    PositionReconciliationService's local-position computation (which
+    only counts FILLED/PARTIAL_FILL orders with filled_quantity > 0)
+    silently saw every paper trade as if it had never happened —
+    GET /v1/reconciliation/positions reported "matched": true with an
+    empty local_positions dict regardless of how many trades had actually
+    executed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_submit_reports_status_filled_and_the_full_quantity(self):
+        adapter = PaperBrokerAdapter()
+        profile = AccountProfile(broker=BrokerName.PAPER)
+        order = {"orderId": "fill-test-1", "quantity": 10, "limitPrice": "50", "symbol": "QQQ"}
+
+        receipt = await adapter.submit_order(profile, order)
+
+        assert receipt["status"] == "FILLED"
+        assert receipt["filledQuantity"] == 10
+        assert receipt["averageFillPrice"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_a_market_order_fills_at_the_live_quote_not_zero(self):
+        adapter = PaperBrokerAdapter()
+        profile = AccountProfile(broker=BrokerName.PAPER)
+        order = {"orderId": "fill-test-2", "quantity": 5, "symbol": "QQQ"}  # no limitPrice = MARKET
+
+        receipt = await adapter.submit_order(profile, order)
+        quote = await adapter.get_quote("QQQ")
+
+        assert receipt["filledQuantity"] == 5
+        assert receipt["averageFillPrice"] == round(quote["last"], 4)
+
+
 @pytest.mark.asyncio
 async def test_paper_adapter_quote_is_stable_and_fresh() -> None:
     """

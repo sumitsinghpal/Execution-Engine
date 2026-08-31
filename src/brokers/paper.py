@@ -208,16 +208,50 @@ class PaperBrokerAdapter(BrokerAdapter):
         }
 
     async def submit_order(self, profile: AccountProfile, order_spec: dict[str, Any]) -> dict[str, Any]:
+        """
+        Paper mode has no real order book or matching engine — every order
+        fills completely, instantly, at submission (same "deterministic
+        simulation" philosophy as get_quote()/preview_order()). Reports
+        that fill directly in this response (status "FILLED" +
+        filledQuantity + averageFillPrice, same price basis
+        preview_order() estimates against) rather than leaving Executor to
+        assume SUBMITTED and wait for a separate reconciliation poll that
+        would never actually run for this broker — see
+        Executor.execute_order(), which reads these fields when present.
+
+        Real brokers (Schwab) don't get this treatment: SchwabBrokerAdapter
+        .submit_order() is hard-blocked regardless (LiveTradingDisabledError),
+        so this only ever changes PAPER-mode behavior.
+        """
+        quantity = order_spec.get("quantity", 0)
+        fill_price = float(order_spec.get("limitPrice") or 0)
+        if not fill_price:
+            quote = await self.get_quote(order_spec.get("symbol", ""))
+            fill_price = quote["last"]
+
         return {
             "orderId": f"paper-order-{order_spec['orderId']}",
-            "status": "ACCEPTED",
+            "status": "FILLED",
             "symbol": order_spec.get("symbol"),
-            "quantity": order_spec.get("quantity"),
+            "quantity": quantity,
+            "filledQuantity": quantity,
+            "averageFillPrice": round(fill_price, 4),
             "enteredTime": datetime.now(UTC).isoformat(),
             "mode": "PAPER",
         }
 
     async def get_order_status(self, profile: AccountProfile, order_id: str) -> dict[str, Any]:
+        """
+        Kept for interface compatibility (ReconciliationService's
+        per-order poller) — not actually needed for a fill to be recorded
+        in PAPER mode any more, since submit_order() above already
+        reports the (always-immediate) fill directly. filledQuantity is
+        honestly 0 here because this method has no way to know what was
+        ordered from an opaque order_id alone (PaperBrokerAdapter is
+        deliberately stateless — see class docstring); it was never
+        actually wired into anything that reads this method's output for
+        paper orders (only submit_order()'s response is).
+        """
         return {"orderId": order_id, "status": "FILLED", "filledQuantity": 0, "mode": "PAPER"}
 
     async def list_accounts(self) -> list[dict[str, Any]]:

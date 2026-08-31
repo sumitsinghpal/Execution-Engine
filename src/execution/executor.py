@@ -376,13 +376,38 @@ class Executor:
         order.updated_at = datetime.utcnow()
         order.broker_status = broker_response.get("status")
 
+        # A broker that fills synchronously (today: PaperBrokerAdapter —
+        # see its submit_order() docstring) reports the fill directly in
+        # this same response rather than requiring a separate
+        # reconciliation poll afterward. Only advance past SUBMITTED when
+        # the broker actually said so; a real async broker's response
+        # (no filledQuantity key) leaves this exactly as it was before —
+        # SUBMITTED, waiting for reconciliation to catch up later, same
+        # as always. Without this, PositionReconciliationService's
+        # local-position computation (which only counts FILLED/
+        # PARTIAL_FILL orders with filled_quantity > 0) silently sees
+        # every paper trade as if it never happened.
+        filled_quantity = broker_response.get("filledQuantity")
+        if filled_quantity is not None and filled_quantity > 0:
+            order.filled_quantity = filled_quantity
+            if broker_response.get("averageFillPrice") is not None:
+                order.average_fill_price = str(broker_response["averageFillPrice"])
+            order.status = (
+                OrderStatus.FILLED.value if filled_quantity >= order.quantity else OrderStatus.PARTIAL_FILL.value
+            )
+
         self.session.add(order)
         self.session.commit()
 
         receipt = ExecutionReceipt(
             decision_id=decision_id,
             execution_id=execution_id,
-            status=OrderStatus.SUBMITTED,
+            # Reflects the order record's actual resulting status (FILLED
+            # for a broker that fills synchronously, SUBMITTED otherwise —
+            # see the filled_quantity handling just above), not a
+            # hardcoded SUBMITTED that would silently lie to the caller
+            # about an order that already filled.
+            status=OrderStatus(order.status),
             submitted_at=datetime.utcnow(),
             broker_response=broker_response,
         )
@@ -420,6 +445,7 @@ class Executor:
             created_at=order.created_at,
             updated_at=order.updated_at,
             filled_quantity=order.filled_quantity,
+            average_fill_price=Decimal(order.average_fill_price) if order.average_fill_price is not None else None,
             broker_status=order.broker_status,
             broker_message=order.broker_message,
         )

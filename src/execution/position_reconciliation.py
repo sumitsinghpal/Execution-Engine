@@ -10,6 +10,14 @@ checks: two orders could each individually reconcile to FILLED correctly
 and the account could still be out of sync (a manual trade placed directly
 with the broker outside this system, a corporate action, a missed fill
 event, a bug). Nothing in this codebase asked that question before this.
+
+In PAPER mode, only the "what do we believe we hold" half of that question
+is answerable — PaperBrokerAdapter has no independent position ledger to
+compare against (see PositionReconciliationService.reconcile()'s
+docstring), so a mismatch there can never be a real drift signal and never
+trips the kill switch. This check earns its keep once a real broker
+(Schwab) is connected, where get_positions() reflects a genuinely
+independent source of truth.
 """
 
 from dataclasses import dataclass, field
@@ -117,22 +125,41 @@ class PositionReconciliationService:
         Runs the comparison and returns a full report. Does not itself
         decide what to do about a mismatch — see reconcile_or_halt below for
         the pre-session gate that actually acts on this.
+
+        PaperBrokerAdapter is a deliberate special case: it has no
+        independent position ledger of its own (get_positions() always
+        returns [] — see its docstring; a real position simulation would
+        need to make it stateful, a bigger change than this check needs)
+        while local_positions is now genuinely populated from real fills
+        (see Executor.execute_order()). Comparing "what we believe we
+        hold" against a broker that structurally cannot report anything
+        would flag every single paper trade as a "mismatch" and
+        auto-halt the kill switch on the very first one — not a real
+        drift signal, just an artifact of what this broker adapter can
+        answer. local_positions is still computed and reported (useful
+        on its own — "here's what this account currently holds"); it's
+        only compared against broker_positions, and only capable of
+        tripping the kill switch, for a broker with a genuine ledger to
+        check against.
         """
         profile = self.settings.get_account_profile(account)
         raw_broker_positions = await self.broker.get_positions(profile)
         broker_positions = self._parse_broker_positions(raw_broker_positions)
         local_positions = self._compute_local_positions(account)
 
-        all_symbols = sorted(set(local_positions) | set(broker_positions))
-        mismatches = [
-            PositionMismatch(
-                symbol=symbol,
-                local_quantity=local_positions.get(symbol, 0),
-                broker_quantity=broker_positions.get(symbol, 0),
-            )
-            for symbol in all_symbols
-            if local_positions.get(symbol, 0) != broker_positions.get(symbol, 0)
-        ]
+        if isinstance(self.broker, PaperBrokerAdapter):
+            mismatches: List[PositionMismatch] = []
+        else:
+            all_symbols = sorted(set(local_positions) | set(broker_positions))
+            mismatches = [
+                PositionMismatch(
+                    symbol=symbol,
+                    local_quantity=local_positions.get(symbol, 0),
+                    broker_quantity=broker_positions.get(symbol, 0),
+                )
+                for symbol in all_symbols
+                if local_positions.get(symbol, 0) != broker_positions.get(symbol, 0)
+            ]
 
         report = PositionReconciliationReport(
             account=account,

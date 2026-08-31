@@ -122,7 +122,10 @@ class TestExecuteEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["decision_id"] == proposal.decision_id
-        assert data["status"] == "SUBMITTED"
+        # PaperBrokerAdapter fills synchronously at submission (see its
+        # submit_order() docstring) — the receipt reflects that real
+        # resulting status, not a hardcoded SUBMITTED.
+        assert data["status"] == "FILLED"
         assert "execution_id" in data
 
     def test_execute_rejects_empty_attestation(self, client, sample_trade_proposal):
@@ -195,6 +198,73 @@ class TestExecuteEndpoint:
         second = client.post("/v1/orders/execute", json=payload)
         assert second.status_code == 200
         assert second.json()["execution_id"] == first.json()["execution_id"]
+
+
+class TestPaperOrderFillReachesReconciliation:
+    """
+    Regression coverage for a real bug: PaperBrokerAdapter.submit_order()
+    used to report status="ACCEPTED" with no fill data, so an order never
+    progressed past OrderRecord.status="SUBMITTED" — which meant
+    PositionReconciliationService's local-position computation (only
+    FILLED/PARTIAL_FILL orders with filled_quantity > 0 count) silently
+    saw every paper trade as if it had never happened.
+    POST /v1/reconciliation/positions reported "matched": true with an
+    empty local_positions dict regardless of how many trades had actually
+    executed — a false-clean pre-session safety check. This traces the
+    full path: execute -> GET order status -> reconciliation, through the
+    real running API, not just the broker adapter in isolation.
+    """
+
+    def test_an_executed_order_reaches_filled_with_a_real_fill_price(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(update={"decision_id": f"{sample_trade_proposal.decision_id}-fill-chain"})
+        preview = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json")).json()
+
+        client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview["preview_id"],
+                "approval": {
+                    "preview_id": preview["preview_id"],
+                    "approved_by": "test_operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "Approved for fill-chain integration test",
+                    "idempotency_key": f"{proposal.decision_id}:exec:fill-chain",
+                },
+            },
+        )
+
+        status = client.get(f"/v1/orders/{proposal.decision_id}").json()
+
+        assert status["status"] == "FILLED"
+        assert status["filled_quantity"] == proposal.quantity
+        assert status["average_fill_price"] is not None
+
+    def test_the_fill_is_visible_to_position_reconciliation(self, client, sample_trade_proposal):
+        """The end-to-end point of the fix: a real executed order must actually count toward this account's believed position."""
+        proposal = sample_trade_proposal.model_copy(update={"decision_id": f"{sample_trade_proposal.decision_id}-recon-chain"})
+        preview = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json")).json()
+        client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview["preview_id"],
+                "approval": {
+                    "preview_id": preview["preview_id"],
+                    "approved_by": "test_operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "Approved for reconciliation-chain integration test",
+                    "idempotency_key": f"{proposal.decision_id}:exec:recon-chain",
+                },
+            },
+        )
+
+        # The paper broker's own get_positions() always returns [] (see its
+        # class docstring) — this asserts the LOCAL side, the actual
+        # regression, not the (separately simplistic) broker side.
+        report = client.post("/v1/reconciliation/positions", params={"account": proposal.account}).json()
+
+        assert report["local_positions"].get(proposal.symbol, 0) >= proposal.quantity
 
 
 class TestMultiLegEndpoints:

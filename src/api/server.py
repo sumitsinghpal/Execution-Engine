@@ -749,7 +749,11 @@ async def attach_bracket_order(
     order = db.exec(stmt).first()
     if order is None:
         raise HTTPException(status_code=404, detail=f"Order {request.entry_decision_id} not found")
-    if order.status != "SUBMITTED":
+    # SUBMITTED (an async real broker, still awaiting reconciliation),
+    # PARTIAL_FILL, or FILLED (PaperBrokerAdapter's instant-fill response —
+    # see its submit_order() docstring) all mean the order has genuinely
+    # reached the broker; anything else (PREVIEWED, REJECTED, ...) hasn't.
+    if order.status not in ("SUBMITTED", "PARTIAL_FILL", "FILLED"):
         raise HTTPException(status_code=400, detail=f"Order {request.entry_decision_id} has not been executed (status: {order.status})")
     if order.instruction != "BUY":
         raise HTTPException(status_code=400, detail="A bracket can only be attached to a BUY entry — it manages a long position's exit")
