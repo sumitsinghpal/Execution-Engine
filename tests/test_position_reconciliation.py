@@ -227,3 +227,43 @@ class TestPaperBrokerNeverFalselyMismatches:
         assert report.matched is False
         assert len(report.mismatches) >= 1
         assert any(m.symbol == "GLD" for m in report.mismatches)
+
+
+class TestGetLocalPositions:
+    """
+    get_local_positions() — the public, no-broker-call accessor added for
+    external read-only callers (e.g. signal-integrity-layer's portfolio-
+    impact check). Must never touch self.broker at all, unlike
+    reconcile()/reconcile_or_halt().
+    """
+
+    def test_returns_the_same_data_reconcile_computes_locally(self, test_db_engine_and_session):
+        _, session = test_db_engine_and_session
+        _make_filled_order(session, "local-pos-test", "TLT", "BUY", 12)
+
+        # A broker whose get_positions() would raise if ever called —
+        # proves this method genuinely never reaches out to the broker.
+        class ExplodingBroker:
+            async def get_positions(self, profile):
+                raise AssertionError("get_local_positions() must never call the broker")
+
+        service = PositionReconciliationService(session=session, broker=ExplodingBroker())
+
+        positions = service.get_local_positions("local-pos-test")
+
+        assert positions == {"TLT": 12}
+
+    def test_a_sell_after_a_buy_nets_out_correctly(self, test_db_engine_and_session):
+        _, session = test_db_engine_and_session
+        account = "local-pos-net-test"
+        _make_filled_order(session, account, "EEM", "BUY", 20)
+        _make_filled_order(session, account, "EEM", "SELL", 8)
+
+        positions = PositionReconciliationService(session=session).get_local_positions(account)
+
+        assert positions == {"EEM": 12}
+
+    def test_no_orders_for_the_account_returns_an_empty_dict(self, test_db_engine_and_session):
+        _, session = test_db_engine_and_session
+        positions = PositionReconciliationService(session=session).get_local_positions("never-traded-account")
+        assert positions == {}

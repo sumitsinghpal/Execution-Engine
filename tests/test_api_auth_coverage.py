@@ -33,6 +33,7 @@ PROTECTED_GET_ROUTES = [
     "/v1/watchlists",
     "/v1/alerts",
     "/v1/orders/bracket",
+    "/v1/positions/local",
 ]
 
 PROTECTED_POST_ROUTES = [

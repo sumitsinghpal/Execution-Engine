@@ -83,6 +83,19 @@ class PositionReconciliationService:
         self.settings = get_settings()
         self.broker = broker or PaperBrokerAdapter()
 
+    def get_local_positions(self, account: str) -> Dict[str, int]:
+        """
+        Public, read-only accessor for this system's own believed
+        positions — no broker call, no kill-switch side effects. Unlike
+        reconcile()/reconcile_or_halt(), this never talks to the broker
+        at all, so it's safe for any purely-read-only caller (e.g. an
+        external analysis service, like signal-integrity-layer's
+        portfolio-impact check) that just wants "what do we currently
+        hold" without risking the broker-comparison/auto-halt behavior
+        those methods carry for a real, non-paper broker.
+        """
+        return self._compute_local_positions(account)
+
     def _compute_local_positions(self, account: str) -> Dict[str, int]:
         """
         Sums filled/partially-filled order quantities for the account,

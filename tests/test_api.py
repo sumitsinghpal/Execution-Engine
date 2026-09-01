@@ -827,6 +827,46 @@ class TestReadOnlyAccountEndpoints:
         assert all(o["agent_id"] == "list-orders-probe-agent" for o in orders)
 
 
+class TestLocalPositionsEndpoint:
+    """GET /v1/positions/local — the no-broker-call, purely read-only positions accessor."""
+
+    def test_reflects_a_real_executed_order(self, client, sample_trade_proposal):
+        proposal = sample_trade_proposal.model_copy(update={"decision_id": f"{sample_trade_proposal.decision_id}-local-pos"})
+        preview = client.post("/v1/orders/preview", json=proposal.model_dump(mode="json")).json()
+        client.post(
+            "/v1/orders/execute",
+            json={
+                "decision_id": proposal.decision_id,
+                "preview_id": preview["preview_id"],
+                "approval": {
+                    "preview_id": preview["preview_id"],
+                    "approved_by": "test_operator",
+                    "approved_at": datetime.utcnow().isoformat(),
+                    "attestation": "Approved for local-positions integration test",
+                    "idempotency_key": f"{proposal.decision_id}:exec:local-pos",
+                },
+            },
+        )
+
+        resp = client.get("/v1/positions/local", params={"account": proposal.account})
+
+        assert resp.status_code == 200
+        assert resp.json()["account"] == proposal.account
+        assert resp.json()["positions"].get(proposal.symbol, 0) >= proposal.quantity
+
+    def test_an_account_with_no_orders_returns_an_empty_dict(self, client):
+        resp = client.get("/v1/positions/local", params={"account": "never-traded-local-positions-account"})
+
+        assert resp.status_code == 200
+        assert resp.json()["positions"] == {}
+
+    def test_defaults_to_the_primary_account(self, client):
+        resp = client.get("/v1/positions/local")
+
+        assert resp.status_code == 200
+        assert resp.json()["account"] == "primary"
+
+
 class TestListOrdersHistory:
     """
     GET /v1/orders as a real transaction history — filterable by status,

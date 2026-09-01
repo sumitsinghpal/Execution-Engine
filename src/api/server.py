@@ -1046,6 +1046,24 @@ async def reconcile_positions(
         raise HTTPException(status_code=500, detail=f"Position reconciliation failed: {e}")
 
 
+@app.get("/v1/positions/local", dependencies=[Depends(verify_admin_key)])
+async def get_local_positions(
+    account: str = "primary",
+    db: Session = Depends(get_db),
+):
+    """
+    This system's own believed positions for an account (summed from
+    filled order history) — no broker call, no kill-switch side effects.
+    Unlike POST /v1/reconciliation/positions, this never talks to the
+    broker at all, so it's safe for a purely-read-only caller (e.g. an
+    external analysis service) that only wants "what do we currently
+    hold" without risking that endpoint's broker-comparison/auto-halt
+    behavior for a real, non-paper broker.
+    """
+    positions = PositionReconciliationService(session=db).get_local_positions(account)
+    return {"account": account, "positions": positions}
+
+
 @app.post("/v1/risk/drawdown-check", dependencies=[Depends(verify_admin_key)])
 async def check_drawdown(
     account: str = "primary",
