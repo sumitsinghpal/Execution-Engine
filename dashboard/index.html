@@ -384,6 +384,18 @@
   .history-pagination .btn { width: auto; margin-top: 0; padding: 8px 16px; font-size: 12.5px; }
   .history-pagination .btn:disabled { opacity: .35; }
 
+  /* Signal integrity */
+  .sig-integrity-card { margin-top: 18px; }
+  .sig-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+  .sig-badge.unanimous { background: var(--buy-soft); color: var(--buy); }
+  .sig-badge.split { background: var(--crit-soft); color: var(--crit); }
+  .sig-badge.single-source { background: var(--surface-2); color: var(--ink-faint); }
+  .sig-badge.stale, .sig-badge.low-conf { background: var(--warn-soft); color: var(--warn); }
+  .sig-badge.conflict { background: var(--crit-soft); color: var(--crit); }
+  .sig-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .sig-detail-block { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+  .sig-detail-block:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+
   /* Watchlists */
   .watchlist-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .watchlist-tab {
@@ -488,6 +500,10 @@
       <div class="settings-field">
         <label for="accountSelect">Account</label>
         <select class="account-select" id="accountSelect" title="Account alias"></select>
+      </div>
+      <div class="settings-field">
+        <label for="sigIntegrityUrl">Signal integrity server (optional)</label>
+        <input class="base-url" id="sigIntegrityUrl" spellcheck="false" title="signal-integrity-layer API base URL — leave blank to hide that section" placeholder="e.g. http://localhost:8100">
       </div>
     </div>
   </div>
@@ -699,6 +715,12 @@
     </div>
   </div>
 
+  <div class="card sig-integrity-card" id="sigIntegrityCard" style="display:none">
+    <h2>Signal integrity <span class="hint">checks whether your AI agents agree, and whether they're up to date</span></h2>
+    <div class="history-summary" id="sigIntegritySummary">Loading…</div>
+    <div id="sigIntegrityList"></div>
+  </div>
+
   <div class="card strategies-card">
     <h2>
       Strategies you can follow
@@ -828,6 +850,13 @@
   });
   accountSelect.value = store.get('edge.account', 'primary');
   accountSelect.addEventListener('change', () => { store.set('edge.account', accountSelect.value); refreshAll(); });
+
+  const sigIntegrityUrlInput = $('sigIntegrityUrl');
+  sigIntegrityUrlInput.value = store.get('edge.sigIntegrityUrl', '');
+  sigIntegrityUrlInput.addEventListener('change', () => {
+    store.set('edge.sigIntegrityUrl', sigIntegrityUrlInput.value.trim());
+    refreshSignalIntegrity();
+  });
 
   // Technical connection details (server address, account alias) are
   // tucked behind a gear icon rather than shown up front — a customer
@@ -1260,6 +1289,84 @@
   ['histSymbol', 'histFrom', 'histTo'].forEach(id => {
     $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refreshHistory(true); });
   });
+
+  // ---- Signal integrity (signal-integrity-layer — a separate service, optional) ----
+  // Unauthenticated, read-only, and not part of Execution-Engine's own
+  // admin-key-gated API — this deliberately does NOT use the api()
+  // helper above (wrong base URL, and no key needed). Entirely
+  // optional: hidden whenever no server address is configured, and a
+  // fetch failure degrades to a quiet message in the card rather than a
+  // toast, since this section is supplementary, not core trading
+  // functionality.
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str == null ? '' : String(str);
+    return div.innerHTML;
+  }
+
+  function sigBadge(agreement) {
+    const label = { unanimous: 'Agree', split: 'Disagree', 'single-source': '1 source' }[agreement] || agreement;
+    return `<span class="sig-badge ${agreement}">${label}</span>`;
+  }
+
+  async function refreshSignalIntegrity() {
+    const url = sigIntegrityUrlInput.value.trim();
+    const card = $('sigIntegrityCard');
+    if (!url) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    try {
+      const resp = await fetch(url.replace(/\/$/, '') + '/v1/compare');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      renderSignalIntegrity(data.symbols || []);
+    } catch (e) {
+      $('sigIntegritySummary').textContent = `Could not reach ${url}: ${e.message}`;
+      $('sigIntegrityList').innerHTML = '';
+    }
+  }
+
+  function renderSignalIntegrity(symbols) {
+    const summary = $('sigIntegritySummary');
+    const list = $('sigIntegrityList');
+    if (!symbols.length) {
+      summary.textContent = 'No agent currently has a pending opinion on anything.';
+      list.innerHTML = '';
+      return;
+    }
+    const split = symbols.filter(s => s.agreement === 'split').length;
+    const stale = symbols.filter(s => s.has_stale_signal).length;
+    const lowConf = symbols.filter(s => s.has_low_confidence_signal).length;
+    const conflict = symbols.filter(s => s.has_portfolio_conflict).length;
+    summary.textContent = `${symbols.length} symbol${symbols.length === 1 ? '' : 's'} under consideration · `
+      + `${split} disagreeing · ${stale} stale · ${lowConf} low confidence · ${conflict} portfolio conflict`;
+
+    list.innerHTML = symbols.map((s, i) => {
+      const badges = [sigBadge(s.agreement)];
+      if (s.has_stale_signal) badges.push('<span class="sig-badge stale">Stale</span>');
+      if (s.has_low_confidence_signal) badges.push('<span class="sig-badge low-conf">Low confidence</span>');
+      if (s.has_portfolio_conflict) badges.push('<span class="sig-badge conflict">Portfolio conflict</span>');
+      return `
+        <div class="history-row" data-sig-idx="${i}">
+          <div class="history-row-top">
+            <span><b>${formatSymbol(s.symbol)}</b> <span class="history-row-sub">${escapeHtml(s.sources.join(' · '))}</span></span>
+            <span class="sig-badges">${badges.join('')}</span>
+          </div>
+          <dl class="history-row-detail" id="sigDetail-${i}">
+            ${s.signals.map(sig => `
+              <div class="sig-detail-block">
+                <dt>${escapeHtml(sig.source)} · ${sig.side}</dt>
+                <dd>${escapeHtml(sig.rationale || '—')}</dd>
+              </div>`).join('')}
+          </dl>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.history-row').forEach(row => {
+      row.addEventListener('click', () => {
+        row.querySelector('.history-row-detail').classList.toggle('show');
+      });
+    });
+  }
 
   // ---- Watchlists (src/execution/watchlists.py) ----
   let watchlistData = {}; // { listName: [symbol, ...] }
@@ -2221,7 +2328,7 @@
   function refreshAll() {
     refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
     refreshPositions(); refreshFeed(); refreshKillSwitch(); refreshSignals(); refreshDailyPlan();
-    refreshWatchlists(); refreshAlerts(); refreshBracketOrders();
+    refreshWatchlists(); refreshAlerts(); refreshBracketOrders(); refreshSignalIntegrity();
   }
   refreshAll();
   loadStrategies();
