@@ -231,6 +231,140 @@ class TestOptionTradeProposal:
             )
 
 
+class TestStructuredOptionFields:
+    """
+    OPTION's symbol no longer has to be a hand-packed 21-char OCC string —
+    option_underlying/option_expiration/option_right/option_strike build
+    the same symbol via format_occ_symbol(). Was previously untestable from
+    the outside: format_occ_symbol existed and was already trusted by this
+    test file's own _occ() helper above, but nothing wired it into the
+    schema a real caller actually submits.
+    """
+
+    def _expiration(self, days_out=45):
+        return date.today() + timedelta(days=days_out)
+
+    def test_structured_fields_build_the_occ_symbol(self):
+        expiration = self._expiration()
+        proposal = TradeProposal(
+            decision_id="edge-option-struct-001",
+            account="primary",
+            asset_type=AssetType.OPTION,
+            option_underlying="NVDA",
+            option_expiration=expiration,
+            option_right="C",
+            option_strike=Decimal("120"),
+            instruction=Instruction.SELL,
+            quantity=2,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("2.50"),
+        )
+        assert proposal.symbol == format_occ_symbol("NVDA", expiration, "C", Decimal("120"))
+        assert proposal.underlying_symbol == "NVDA"
+
+    def test_structured_fields_must_all_be_provided_together(self):
+        with pytest.raises(ValidationError, match="must all be provided together"):
+            TradeProposal(
+                decision_id="edge-option-struct-002",
+                account="primary",
+                asset_type=AssetType.OPTION,
+                option_underlying="NVDA",
+                option_expiration=self._expiration(),
+                # option_right and option_strike missing
+                instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_neither_symbol_nor_structured_fields_is_rejected(self):
+        with pytest.raises(ValidationError, match="requires either symbol"):
+            TradeProposal(
+                decision_id="edge-option-struct-003",
+                account="primary",
+                asset_type=AssetType.OPTION,
+                instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_symbol_and_structured_fields_must_agree(self):
+        expiration = self._expiration()
+        with pytest.raises(ValidationError, match="does not match the OCC symbol"):
+            TradeProposal(
+                decision_id="edge-option-struct-004",
+                account="primary",
+                symbol=format_occ_symbol("NVDA", expiration, "C", Decimal("120")),
+                asset_type=AssetType.OPTION,
+                option_underlying="NVDA",
+                option_expiration=expiration,
+                option_right="C",
+                option_strike=Decimal("150"),  # disagrees with symbol's strike
+                instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_symbol_and_matching_structured_fields_both_given_is_fine(self):
+        expiration = self._expiration()
+        proposal = TradeProposal(
+            decision_id="edge-option-struct-005",
+            account="primary",
+            symbol=format_occ_symbol("NVDA", expiration, "C", Decimal("120")),
+            asset_type=AssetType.OPTION,
+            option_underlying="NVDA",
+            option_expiration=expiration,
+            option_right="C",
+            option_strike=Decimal("120"),
+            instruction=Instruction.SELL,
+            quantity=1,
+            order_type=OrderType.MARKET,
+        )
+        assert proposal.underlying_symbol == "NVDA"
+
+    def test_structured_fields_only_apply_to_option(self):
+        with pytest.raises(ValidationError, match="only apply to asset_type=OPTION"):
+            TradeProposal(
+                decision_id="edge-option-struct-006",
+                account="primary",
+                symbol="QQQ",
+                asset_type=AssetType.ETF,
+                option_underlying="NVDA",
+                option_expiration=self._expiration(),
+                option_right="C",
+                option_strike=Decimal("120"),
+                instruction=Instruction.BUY,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_invalid_structured_fields_are_rejected(self):
+        with pytest.raises(ValidationError, match="Invalid structured OPTION fields"):
+            TradeProposal(
+                decision_id="edge-option-struct-007",
+                account="primary",
+                asset_type=AssetType.OPTION,
+                option_underlying="NVDA",
+                option_expiration=self._expiration(),
+                option_right="X",  # not C or P
+                option_strike=Decimal("120"),
+                instruction=Instruction.SELL,
+                quantity=1,
+                order_type=OrderType.MARKET,
+            )
+
+    def test_non_option_symbol_is_still_required(self):
+        with pytest.raises(ValidationError, match="symbol is required"):
+            TradeProposal(
+                decision_id="edge-option-struct-008",
+                account="primary",
+                asset_type=AssetType.ETF,
+                instruction=Instruction.BUY,
+                quantity=1,
+                order_type=OrderType.MARKET,
+                # symbol omitted entirely
+            )
+
+
 class TestFutureTradeProposal:
     """TradeProposal for asset_type=FUTURE uses a root+month-code+year symbol instead of a plain ticker."""
 

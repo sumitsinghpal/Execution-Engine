@@ -6,14 +6,14 @@ All price/quantity handling uses Decimal to avoid floating-point precision issue
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Optional, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, field_serializer
 
-from src.models.occ_symbol import OCC_SYMBOL_LENGTH, parse_occ_symbol
+from src.models.occ_symbol import OCC_SYMBOL_LENGTH, format_occ_symbol, parse_occ_symbol
 from src.models.futures_symbol import parse_futures_symbol
 
 
@@ -77,16 +77,34 @@ class TradeProposal(BaseModel):
         ),
     )
     account: str = Field(..., description="Target account identifier")
-    symbol: str = Field(
-        ...,
+    symbol: Optional[str] = Field(
+        default=None,
         max_length=OCC_SYMBOL_LENGTH,
         description=(
             "Equity/ETF ticker (uppercase, max 5 chars) when asset_type is EQUITY/ETF/BOND, a full "
             "21-character OCC option symbol (e.g. 'NVDA  280121C00120000') when asset_type is OPTION, "
-            "or a root+month-code+year futures symbol (e.g. 'ESZ26') when asset_type is FUTURE."
+            "or a root+month-code+year futures symbol (e.g. 'ESZ26') when asset_type is FUTURE. "
+            "For OPTION, this may be omitted in favor of the structured option_underlying/"
+            "option_expiration/option_right/option_strike fields below — this system builds the "
+            "OCC symbol for you. Required (non-null) for every other asset_type."
         ),
     )
     asset_type: AssetType = Field(..., description="Type of asset being traded")
+
+    # OPTION only: a structured alternative to hand-building the packed
+    # 21-char OCC symbol above. format_occ_symbol() (src/models/occ_symbol.py)
+    # already existed and was already trusted by this codebase's own test
+    # suite as the correct way to build one — nothing wired it up for a real
+    # caller, so every upstream agent had to replicate that packing logic
+    # (root space-padded to 6 chars, date as YYMMDD, strike as 8-digit
+    # thousandths) by hand to submit an option order at all. Provide all
+    # four together, or provide the full OCC `symbol` above directly — not
+    # both (see validate_symbol_matches_asset_type for the cross-check when
+    # both are given).
+    option_underlying: Optional[str] = Field(default=None, description="OPTION only: underlying ticker, e.g. 'NVDA'")
+    option_expiration: Optional[date] = Field(default=None, description="OPTION only: contract expiration date")
+    option_right: Optional[str] = Field(default=None, description="OPTION only: 'C' for call, 'P' for put")
+    option_strike: Optional[Decimal] = Field(default=None, description="OPTION only: strike price in dollars")
     instruction: Instruction = Field(..., description="BUY or SELL")
     quantity: int = Field(..., gt=0, description="Quantity to trade (positive integer)")
     order_type: OrderType = Field(..., description="Order type (MARKET, LIMIT, STOP, STOP_LIMIT)")
@@ -109,14 +127,19 @@ class TradeProposal(BaseModel):
 
     model_config = ConfigDict(extra="forbid")  # Reject unknown fields
 
-    @field_serializer("limit_price", "stop_price", "strategy_stop_loss_price", "strategy_take_profit_price", when_used="json")
+    @field_serializer(
+        "limit_price", "stop_price", "strategy_stop_loss_price", "strategy_take_profit_price", "option_strike",
+        when_used="json",
+    )
     def serialize_decimal(self, value: Optional[Decimal]) -> Optional[str]:
         """Convert Decimal to string for JSON serialization."""
         return str(value) if value is not None else None
-    
+
     @field_validator("symbol")
     @classmethod
-    def validate_symbol_uppercase(cls, v: str) -> str:
+    def validate_symbol_uppercase(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         if not v.isupper():
             raise ValueError("Symbol must be uppercase")
         return v
@@ -129,9 +152,63 @@ class TradeProposal(BaseModel):
         well-formed) rather than a shape-only regex — a malformed OCC
         symbol is exactly the kind of input that must fail loudly here,
         not reach the broker as a mangled order. Every other asset type
-        keeps the plain-ticker shape this system has always required.
+        keeps the plain-ticker shape this system has always required, with
+        symbol simply required outright (this validator is also where that
+        requirement is enforced now that the field itself is Optional to
+        make room for OPTION's structured alternative below).
+
+        OPTION accepts either the packed symbol directly, or all four
+        option_underlying/option_expiration/option_right/option_strike
+        fields — built into the same OCC symbol via format_occ_symbol(),
+        the exact inverse of the parse_occ_symbol() call this always runs.
+        Supplying both is fine only if they agree; that's a caller error
+        worth catching here rather than silently trusting one over the
+        other.
         """
+        option_fields = {
+            "option_underlying": self.option_underlying,
+            "option_expiration": self.option_expiration,
+            "option_right": self.option_right,
+            "option_strike": self.option_strike,
+        }
+        structured_given = {name: v for name, v in option_fields.items() if v is not None}
+
+        if self.asset_type != AssetType.OPTION:
+            if structured_given:
+                raise ValueError(
+                    f"{', '.join(sorted(structured_given))} only apply to asset_type=OPTION, "
+                    f"got asset_type={self.asset_type.value}"
+                )
+            if self.symbol is None:
+                raise ValueError(f"symbol is required for asset_type={self.asset_type.value}")
+
         if self.asset_type == AssetType.OPTION:
+            if structured_given and len(structured_given) < len(option_fields):
+                missing = sorted(set(option_fields) - set(structured_given))
+                raise ValueError(f"OPTION structured fields must all be provided together; missing {missing}")
+
+            built_symbol: Optional[str] = None
+            if structured_given:
+                try:
+                    built_symbol = format_occ_symbol(
+                        self.option_underlying, self.option_expiration, self.option_right, self.option_strike
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"Invalid structured OPTION fields: {exc}") from exc
+
+            if self.symbol is None and built_symbol is None:
+                raise ValueError(
+                    "OPTION asset_type requires either symbol (a full 21-char OCC symbol) or all of "
+                    "option_underlying/option_expiration/option_right/option_strike"
+                )
+            if self.symbol is not None and built_symbol is not None and self.symbol != built_symbol:
+                raise ValueError(
+                    f"symbol {self.symbol!r} does not match the OCC symbol built from the structured "
+                    f"option_* fields ({built_symbol!r}) — provide only one, or make sure they agree"
+                )
+            if self.symbol is None:
+                self.symbol = built_symbol
+
             try:
                 parse_occ_symbol(self.symbol)
             except ValueError as exc:
