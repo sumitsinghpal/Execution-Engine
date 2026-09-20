@@ -13,8 +13,20 @@ positions) even once Schwab was fully configured and Executor itself was
 correctly using it, because nothing told them to check. See
 src/api/server.py for the endpoints that now build a broker via this
 factory and pass it in explicitly instead of relying on that default.
+
+The Schwab adapter is CACHED per process. About twenty call sites (every
+API endpoint and every background loop) call build_broker_adapter(), and
+each used to get a brand-new SchwabBrokerAdapter with a brand-new
+SchwabOAuthClient. Against live Schwab that meant: no access token reuse (the
+first request of nearly every call went to the token endpoint first), the
+resolved account hash forgotten every time (an extra /accounts/accountNumbers
+call before nearly every account operation), and — decisively — a rate limiter
+that reset on every call and so limited nothing. One shared adapter shares the
+token, the account hash, and the limiter, which is what "120 calls/minute per
+app" needs. Paper mode is stateless and is not cached.
 """
 
+import threading
 from typing import Optional
 
 from src.accounts.profiles import BrokerName
@@ -23,6 +35,31 @@ from src.brokers.paper import PaperBrokerAdapter
 from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab.auth import SchwabOAuthClient
 from src.config import Settings
+
+_schwab_cache: dict[tuple, SchwabBrokerAdapter] = {}
+_schwab_cache_lock = threading.Lock()
+
+
+def clear_broker_cache() -> None:
+    """Drop every cached Schwab adapter (tests; also the way to pick up a rotated refresh token in-process)."""
+    with _schwab_cache_lock:
+        _schwab_cache.clear()
+
+
+def _cache_key(settings: Settings) -> tuple:
+    """Everything that changes what the adapter would be. A different refresh token is a different adapter."""
+    return (
+        settings.schwab_app_key,
+        settings.schwab_app_secret,
+        settings.schwab_redirect_uri,
+        settings.schwab_refresh_token,
+        settings.schwab_account_number,
+        settings.schwab_api_timeout_sec,
+        settings.schwab_retry_max_attempts,
+        settings.schwab_retry_backoff_sec,
+        settings.schwab_rate_limit_per_minute,
+        settings.schwab_max_retry_after_sec,
+    )
 
 
 def build_broker_adapter(settings: Settings, mock_broker: bool = False) -> BrokerAdapter:
@@ -37,20 +74,28 @@ def build_broker_adapter(settings: Settings, mock_broker: bool = False) -> Broke
     if not all([settings.schwab_app_key, settings.schwab_app_secret, settings.schwab_redirect_uri]):
         raise ValueError("Schwab mode requires configured OAuth app key, app secret, and redirect URI")
 
-    oauth = SchwabOAuthClient(
-        app_key=settings.schwab_app_key,
-        app_secret=settings.schwab_app_secret,
-        redirect_uri=settings.schwab_redirect_uri,
-        refresh_token=settings.schwab_refresh_token,
-        timeout_sec=settings.schwab_api_timeout_sec,
-    )
-    return SchwabBrokerAdapter(
-        oauth,
-        timeout_sec=settings.schwab_api_timeout_sec,
-        retry_max_attempts=settings.schwab_retry_max_attempts,
-        retry_backoff_sec=settings.schwab_retry_backoff_sec,
-        account_number=settings.schwab_account_number,
-    )
+    key = _cache_key(settings)
+    with _schwab_cache_lock:
+        adapter: Optional[SchwabBrokerAdapter] = _schwab_cache.get(key)
+        if adapter is None:
+            oauth = SchwabOAuthClient(
+                app_key=settings.schwab_app_key,
+                app_secret=settings.schwab_app_secret,
+                redirect_uri=settings.schwab_redirect_uri,
+                refresh_token=settings.schwab_refresh_token,
+                timeout_sec=settings.schwab_api_timeout_sec,
+            )
+            adapter = SchwabBrokerAdapter(
+                oauth,
+                timeout_sec=settings.schwab_api_timeout_sec,
+                retry_max_attempts=settings.schwab_retry_max_attempts,
+                retry_backoff_sec=settings.schwab_retry_backoff_sec,
+                account_number=settings.schwab_account_number,
+                rate_limit_per_minute=settings.schwab_rate_limit_per_minute,
+                max_retry_after_sec=settings.schwab_max_retry_after_sec,
+            )
+            _schwab_cache[key] = adapter
+    return adapter
 
 
-__all__ = ["build_broker_adapter"]
+__all__ = ["build_broker_adapter", "clear_broker_cache"]

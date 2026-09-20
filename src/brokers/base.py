@@ -24,6 +24,21 @@ class BrokerAPIOutageError(BrokerError):
     """
 
 
+class BrokerRateLimitError(BrokerAPIOutageError):
+    """
+    The broker kept answering HTTP 429 after every retry. A subclass of
+    BrokerAPIOutageError on purpose: it is the same class of problem from a
+    caller's point of view — transient, already retried, resolves by itself,
+    must NOT trip the kill switch — so every existing "try again shortly"
+    handler treats it correctly without change. `retry_after` is the broker's
+    own hint (seconds) when it gave one.
+    """
+
+    def __init__(self, message: str, retry_after: "float | None" = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class BrokerAuthenticationError(BrokerError):
     """
     Raised specifically when the broker rejects our credentials — an expired

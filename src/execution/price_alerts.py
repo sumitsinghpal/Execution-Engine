@@ -21,6 +21,7 @@ from sqlmodel import Field, Session, SQLModel, select
 
 from src.brokers.base import BrokerAdapter
 from src.brokers.factory import build_broker_adapter
+from src.brokers.quotes import fetch_quotes
 from src.config import Settings
 from src.logging_config import get_logger
 from src.notifications.webhook import notify_sync
@@ -122,12 +123,15 @@ async def check_alerts_once(session: Session, settings, broker: BrokerAdapter) -
 
     symbols = sorted({a.symbol for a in active})
     prices: dict[str, float] = {}
+    # One batched call where the broker supports it: this loop runs on a timer, and
+    # one call per distinct symbol every tick is what eats Schwab's 120/minute.
+    quotes = await fetch_quotes(broker, symbols)
     for symbol in symbols:
         try:
-            quote = await broker.get_quote(symbol)
+            quote = quotes[symbol]
             prices[symbol] = float(quote["last"])
         except Exception as exc:
-            logger.warning("price_alert_quote_failed", symbol=symbol, error=str(exc))
+            logger.warning("price_alert_quote_failed", symbol=symbol, error=str(quotes.get(symbol, exc)))
 
     fired = 0
     for alert in active:

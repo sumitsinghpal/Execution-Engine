@@ -17,6 +17,7 @@ from sqlmodel import select
 
 from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError
 from src.brokers.factory import build_broker_adapter
+from src.brokers.quotes import fetch_quotes
 from src.config import get_settings, Settings
 from src.database import SessionLocal, init_db
 from src.execution.agent_exposure_guard import AgentExposureGuard
@@ -644,14 +645,10 @@ async def get_quotes(
 
     broker = build_broker_adapter(settings)
 
-    async def _one(symbol: str) -> dict:
-        try:
-            return {"symbol": symbol, **await broker.get_quote(symbol)}
-        except Exception as e:
-            return {"symbol": symbol, "error": str(e)}
-
-    results = await asyncio.gather(*[_one(s) for s in tickers])
-    return {"quotes": results}
+    # One batched broker call where the broker has one (Schwab: a single request for
+    # every symbol, not one per symbol); per-symbol errors stay per-symbol.
+    quotes = await fetch_quotes(broker, tickers)
+    return {"quotes": [{"symbol": symbol, **quotes[symbol]} for symbol in tickers]}
 
 
 @app.get("/v1/watchlists", dependencies=[Depends(verify_admin_key)])

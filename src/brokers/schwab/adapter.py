@@ -13,9 +13,16 @@ from urllib.parse import quote as url_quote
 import httpx
 
 from src.accounts.profiles import AccountProfile
-from src.brokers.base import BrokerAdapter, BrokerAPIOutageError, BrokerError, LiveTradingDisabledError
+from src.brokers.base import (
+    BrokerAdapter,
+    BrokerAPIOutageError,
+    BrokerError,
+    BrokerRateLimitError,
+    LiveTradingDisabledError,
+)
 from src.brokers.schwab.auth import SchwabOAuthClient
 from src.brokers.schwab.order_translation import extract_order_value, normalize_preview, to_schwab_order
+from src.brokers.schwab.rate_limit import RateLimiter
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -41,12 +48,21 @@ class SchwabBrokerAdapter(BrokerAdapter):
         retry_max_attempts: int = 3,
         retry_backoff_sec: float = 1.0,
         account_number: Optional[str] = None,
+        rate_limit_per_minute: int = 120,
+        max_retry_after_sec: float = 30.0,
+        limiter: Optional[RateLimiter] = None,
     ) -> None:
         self.oauth = oauth
         self.transport = transport
         self.timeout_sec = timeout_sec
         self.retry_max_attempts = max(retry_max_attempts, 1)
         self.retry_backoff_sec = retry_backoff_sec
+        # Schwab's published limit is 120 calls/minute per app. Every HTTP attempt —
+        # including a retry — takes a slot, so a burst waits instead of tripping a 429.
+        # Only meaningful if this adapter is long-lived and shared: see factory.py.
+        self._limiter = limiter or RateLimiter(max_calls=max(rate_limit_per_minute, 1))
+        # Cap on how long a broker-supplied Retry-After may make us sleep in-line.
+        self.max_retry_after_sec = max_retry_after_sec
         # The raw Schwab account number to auto-resolve into a hash on first
         # use, for a profile that was registered (e.g. via
         # Settings.schwab_account_number) without a pre-resolved
@@ -136,6 +152,10 @@ class SchwabBrokerAdapter(BrokerAdapter):
         # Schwab nests the quote under the symbol key; unwrap defensively
         # since sandbox/live payload shapes have been known to drift.
         payload = response.get(symbol, response) if isinstance(response, dict) else {}
+        return self._parse_quote(symbol, payload)
+
+    @staticmethod
+    def _parse_quote(symbol: str, payload: dict[str, Any]) -> dict[str, Any]:
         quote_data = payload.get("quote", payload)
 
         quote_time_ms = quote_data.get("quoteTime") or quote_data.get("tradeTime")
@@ -153,6 +173,38 @@ class SchwabBrokerAdapter(BrokerAdapter):
             "quote_time": quote_time,
             "mode": "LIVE",
         }
+
+    QUOTE_BATCH_SIZE = 50
+
+    async def get_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        """
+        Many symbols in ONE call (GET /quotes?symbols=A,B,C) instead of one call per
+        symbol — the difference between one dashboard refresh costing 1 of the 120
+        calls/minute and costing up to 50. Returns {symbol: quote}, or
+        {symbol: {"error": ...}} for any symbol Schwab did not return (an invalid
+        ticker is one symbol's problem, never the batch's). A broker-level failure
+        (outage, rate limit) raises, since it affects every symbol equally.
+
+        Not yet exercised against live Schwab: the batch response shape and the
+        `errors.invalidSymbols` field follow Schwab's documentation.
+        """
+        unique = list(dict.fromkeys(symbol for symbol in symbols if symbol))
+        result: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(unique), self.QUOTE_BATCH_SIZE):
+            chunk = unique[start : start + self.QUOTE_BATCH_SIZE]
+            response = await self._request(
+                "GET", "/quotes", base_url=self.MARKET_DATA_BASE_URL, params={"symbols": ",".join(chunk)}
+            )
+            payload = response if isinstance(response, dict) else {}
+            invalid = set(((payload.get("errors") or {}).get("invalidSymbols")) or [])
+            for symbol in chunk:
+                entry = payload.get(symbol)
+                if isinstance(entry, dict) and symbol not in invalid:
+                    result[symbol] = self._parse_quote(symbol, entry)
+                else:
+                    reason = "invalid symbol" if symbol in invalid else "not in Schwab's response"
+                    result[symbol] = {"error": f"Schwab returned no quote for {symbol} ({reason})"}
+        return result
 
     async def get_price_history(self, symbol: str, bar_interval: str, lookback_days: int) -> list[dict[str, Any]]:
         """
@@ -221,6 +273,17 @@ class SchwabBrokerAdapter(BrokerAdapter):
         self._resolved_account_hash = await self.resolve_account_hash(self.account_number)
         return self._resolved_account_hash
 
+    def _retry_after_seconds(self, response: httpx.Response) -> Optional[float]:
+        """Schwab's own Retry-After hint in seconds, clamped to [0, max_retry_after_sec]; None if absent or not a number."""
+        raw = response.headers.get("Retry-After")
+        try:
+            seconds = float(raw) if raw is not None else None
+        except ValueError:
+            return None  # an HTTP-date form: rare, and not worth a date parser — fall back to backoff
+        if seconds is None or seconds < 0:
+            return None
+        return min(seconds, self.max_retry_after_sec)
+
     async def _request(
         self, method: str, path: str, base_url: Optional[str] = None, **kwargs: Any
     ) -> dict[str, Any] | list[dict[str, Any]]:
@@ -232,12 +295,24 @@ class SchwabBrokerAdapter(BrokerAdapter):
         raises immediately. All retries exhausted raises
         BrokerAPIOutageError so callers (Executor) can distinguish "Schwab
         is down" from a normal request-shaped error.
+
+        HTTP 429 is the exception to "4xx is never retried": it means "too fast",
+        not "wrong request". It is retried, sleeping for Schwab's own Retry-After
+        (capped at max_retry_after_sec) when given, else the exponential backoff;
+        if it never clears, BrokerRateLimitError (a BrokerAPIOutageError, so the
+        existing "try again shortly" handling applies and the kill switch is NOT
+        tripped). Every attempt first takes a slot from the shared rate limiter, and
+        the access token is re-checked per attempt so one that expires during a
+        long backoff is refreshed rather than reused.
         """
-        token = await self.oauth.get_access_token()
         url = f"{base_url or self.BASE_URL}{path}"
         last_exc: Optional[Exception] = None
+        last_was_rate_limit = False
+        last_retry_after: Optional[float] = None
 
         for attempt in range(1, self.retry_max_attempts + 1):
+            await self._limiter.acquire()
+            token = await self.oauth.get_access_token()
             try:
                 async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout_sec) as client:
                     response = await client.request(
@@ -247,6 +322,28 @@ class SchwabBrokerAdapter(BrokerAdapter):
                         **kwargs,
                     )
 
+                if response.status_code == 429:
+                    last_was_rate_limit = True
+                    last_retry_after = self._retry_after_seconds(response)
+                    last_exc = httpx.HTTPStatusError("Schwab returned 429", request=response.request, response=response)
+                    if attempt < self.retry_max_attempts:
+                        delay = (
+                            last_retry_after
+                            if last_retry_after is not None
+                            else self.retry_backoff_sec * (2 ** (attempt - 1))
+                        )
+                        logger.warning(
+                            "schwab_rate_limited",
+                            method=method,
+                            path=path,
+                            attempt=attempt,
+                            max_attempts=self.retry_max_attempts,
+                            wait_sec=delay,
+                        )
+                        await asyncio.sleep(delay)
+                    continue
+
+                last_was_rate_limit = False
                 if response.status_code >= 500:
                     raise httpx.HTTPStatusError(
                         f"Schwab returned {response.status_code}", request=response.request, response=response
@@ -263,6 +360,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
                     raise BrokerError(f"Schwab rejected the request ({method} {path}): {exc}") from exc
 
                 last_exc = exc
+                last_was_rate_limit = False  # this failure is a timeout/network/5xx, not a 429
                 if attempt < self.retry_max_attempts:
                     backoff = self.retry_backoff_sec * (2 ** (attempt - 1))
                     logger.warning(
@@ -276,6 +374,12 @@ class SchwabBrokerAdapter(BrokerAdapter):
                     )
                     await asyncio.sleep(backoff)
 
+        if last_was_rate_limit:
+            logger.error("schwab_rate_limit_exhausted", method=method, path=path, attempts=self.retry_max_attempts)
+            raise BrokerRateLimitError(
+                f"Schwab kept rate-limiting us (HTTP 429) after {self.retry_max_attempts} attempts ({method} {path})",
+                retry_after=last_retry_after,
+            )
         logger.critical(
             "schwab_api_outage",
             method=method,

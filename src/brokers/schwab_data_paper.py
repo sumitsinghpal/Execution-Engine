@@ -45,6 +45,28 @@ class SchwabDataPaperBroker(PaperBrokerAdapter):
             logger.warning("schwab_data_paper_quote_failed_falling_back_to_synthetic", symbol=symbol, error=str(exc))
         return await super().get_quote(symbol)
 
+    async def get_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        """
+        One batched Schwab call for real quotes; any symbol Schwab did not return (or
+        the whole batch, if Schwab is down or rate-limiting) falls back to the
+        synthetic quote, exactly as get_quote() does — same "a market-data hiccup must
+        never stop the loop" rule, at one call instead of one per symbol.
+        """
+        unique = list(dict.fromkeys(symbols))
+        try:
+            real = await self._schwab.get_quotes(unique)
+        except Exception as exc:
+            logger.warning("schwab_data_paper_batch_quotes_failed_falling_back_to_synthetic", error=str(exc))
+            real = {}
+        result: dict[str, dict[str, Any]] = {}
+        for symbol in unique:
+            quote = real.get(symbol)
+            if quote and "error" not in quote and quote.get("last") is not None:
+                result[symbol] = quote
+            else:
+                result[symbol] = await super().get_quote(symbol)
+        return result
+
     async def get_price_history(self, symbol: str, bar_interval: str, lookback_days: int) -> list[dict[str, Any]]:
         try:
             bars = await self._schwab.get_price_history(symbol, bar_interval, lookback_days)

@@ -236,6 +236,11 @@ class Settings(BaseSettings):
     schwab_preview_expiry_min: int = 5
     schwab_retry_max_attempts: int = 3
     schwab_retry_backoff_sec: float = 1.0
+    # Schwab publishes 120 calls/minute per app. Enforced per PROCESS (see
+    # src/brokers/schwab/rate_limit.py): with N server workers set this to 120 / N.
+    schwab_rate_limit_per_minute: int = 120
+    # Longest we will sleep in-line on a broker-supplied Retry-After.
+    schwab_max_retry_after_sec: float = 30.0
 
     @model_validator(mode="after")
     def _register_schwab_account_alias(self) -> "Settings":

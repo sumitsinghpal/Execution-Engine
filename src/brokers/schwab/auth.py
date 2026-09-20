@@ -1,5 +1,6 @@
 """OAuth authorization-code and refresh-token support for Schwab."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -34,6 +35,7 @@ class SchwabOAuthClient:
         self.timeout_sec = timeout_sec
         self.access_token: Optional[str] = None
         self.access_token_expires_at: Optional[datetime] = None
+        self._refresh_lock: Optional[asyncio.Lock] = None
 
     def authorization_url(self, state: str) -> str:
         """Return the initial user authorization URL for the OAuth bootstrap flow."""
@@ -49,15 +51,30 @@ class SchwabOAuthClient:
         self._store_token_response(data)
         return data
 
+    def _access_token_is_valid(self) -> bool:
+        return bool(
+            self.access_token and self.access_token_expires_at and datetime.now(UTC) < self.access_token_expires_at
+        )
+
     async def get_access_token(self) -> str:
-        """Return a valid access token, refreshing it when necessary."""
-        if self.access_token and self.access_token_expires_at and datetime.now(UTC) < self.access_token_expires_at:
-            return self.access_token
-        if not self.refresh_token:
-            raise BrokerAuthenticationError("Schwab refresh token is required for authenticated API calls")
-        data = await self._request_token({"grant_type": "refresh_token", "refresh_token": self.refresh_token})
-        self._store_token_response(data)
-        return self.access_token or ""
+        """
+        Return a valid access token, refreshing it when necessary. Serialized: this
+        client is now shared process-wide (see factory.py), so several tasks can find
+        the token expired at the same moment — without the lock each would call the
+        token endpoint. The first refreshes; the rest wait and reuse its result.
+        """
+        if self._access_token_is_valid():
+            return self.access_token or ""
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        async with self._refresh_lock:
+            if self._access_token_is_valid():  # someone else refreshed while we waited
+                return self.access_token or ""
+            if not self.refresh_token:
+                raise BrokerAuthenticationError("Schwab refresh token is required for authenticated API calls")
+            data = await self._request_token({"grant_type": "refresh_token", "refresh_token": self.refresh_token})
+            self._store_token_response(data)
+            return self.access_token or ""
 
     async def _request_token(self, payload: dict[str, str]) -> dict[str, Any]:
         async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout_sec) as client:
