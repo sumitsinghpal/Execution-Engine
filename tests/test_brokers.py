@@ -16,13 +16,21 @@ def schwab_transport(request: httpx.Request) -> httpx.Response:
     """Return deterministic Schwab responses without a network connection."""
     if request.url.path == "/v1/oauth/token":
         return httpx.Response(200, json={"access_token": "access-token", "expires_in": 1800})
+    if request.url.path == "/trader/v1/accounts/accountNumbers":
+        # Where Schwab actually publishes the hash: NOT on GET /accounts.
+        return httpx.Response(200, json=[{"accountNumber": "1234", "hashValue": "account-hash"}])
     if request.url.path == "/trader/v1/accounts":
+        return httpx.Response(200, json=[{"securitiesAccount": {"accountNumber": "1234"}}])
+    if request.url.path == "/trader/v1/accounts/account-hash/previewOrder":
+        # Schwab's real previewOrder shape (not the paper broker's flat one).
         return httpx.Response(
             200,
-            json=[{"securitiesAccount": {"accountNumber": "1234", "hashValue": "account-hash"}}],
+            json={
+                "orderStrategy": {"status": "ACCEPTED", "orderBalance": {"orderValue": 270.0}},
+                "orderValidationResult": {"accepts": [{"message": "ok"}], "rejects": []},
+                "commissionAndFee": {"commission": {"commissionLegs": [{"commissionValues": [{"value": 0.0, "type": "COMMISSION"}]}]}},
+            },
         )
-    if request.url.path == "/trader/v1/accounts/account-hash/previewOrder":
-        return httpx.Response(200, json={"status": "OK", "estimatedCommission": 0, "estimatedTotalInvestment": 10})
     if request.url.path == "/trader/v1/accounts/account-hash":
         fields = request.url.params.get("fields")
         if fields == "positions":
@@ -345,12 +353,17 @@ async def test_schwab_read_only_calls_and_preview_use_account_hash(
 ) -> None:
     """Schwab requests use the documented Trader API account-hash paths."""
     assert await schwab_adapter.resolve_account_hash("1234") == "account-hash"
-    preview = await schwab_adapter.preview_order(schwab_profile, {"orderId": "decision-1"})
+    preview = await schwab_adapter.preview_order(
+        schwab_profile,
+        {"orderId": "decision-1", "symbol": "QQQ", "assetType": "ETF", "quantity": 1, "instruction": "BUY",
+         "orderType": "LIMIT", "limitPrice": "270"},
+    )
     positions = await schwab_adapter.get_positions(schwab_profile)
     balances = await schwab_adapter.get_balances(schwab_profile)
     status = await schwab_adapter.get_order_status(schwab_profile, "42")
 
     assert preview["status"] == "OK"
+    assert preview["estimatedTotalInvestment"] == 270.0
     assert positions == [{"symbol": "QQQ"}]
     assert balances["cashAvailableForTrading"] == 1000
     assert status["status"] == "WORKING"
@@ -414,7 +427,7 @@ class TestSchwabAccountHashAutoResolution:
 
     @pytest.mark.asyncio
     async def test_resolved_hash_is_cached_after_first_use(self, unresolved_profile) -> None:
-        """A second call must not re-hit the /accounts endpoint to re-resolve the same hash."""
+        """A second call must not re-hit /accounts/accountNumbers to re-resolve the same hash."""
         adapter = self._adapter()
         await adapter.get_balances(unresolved_profile)
         assert adapter._resolved_account_hash == "account-hash"
@@ -422,14 +435,14 @@ class TestSchwabAccountHashAutoResolution:
         call_count = {"accounts": 0}
 
         def counting_transport(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/trader/v1/accounts":
+            if request.url.path == "/trader/v1/accounts/accountNumbers":
                 call_count["accounts"] += 1
             return schwab_transport(request)
 
         adapter.transport = httpx.MockTransport(counting_transport)
         await adapter.get_positions(unresolved_profile)
 
-        assert call_count["accounts"] == 0, "a cached resolved hash must not re-query /accounts"
+        assert call_count["accounts"] == 0, "a cached resolved hash must not re-query /accounts/accountNumbers"
 
     @pytest.mark.asyncio
     async def test_profiles_own_account_hash_always_wins_over_resolution(self, schwab_profile) -> None:

@@ -174,7 +174,18 @@ class Executor:
         except BrokerAuthenticationError as exc:
             self._shutdown_on_auth_failure(exc)
             raise
-        
+
+        # If the broker's own preview rejected the order (Schwab lists these under
+        # orderValidationResult.rejects; the adapter surfaces them as `rejects`),
+        # that is a hard no. Before this, a broker rejection was dropped on the
+        # floor and the human saw "APPROVED". This can only make a verdict stricter,
+        # never looser — and the paper broker never returns any.
+        broker_rejects = broker_response.get("rejects") or []
+        if broker_rejects:
+            verdict.approved = False
+            verdict.checks["broker_preview_ok"] = False
+            verdict.rejections.append("Broker preview rejected this order: " + "; ".join(str(item) for item in broker_rejects))
+
         # Generate preview ID
         preview_id = f"preview-{uuid.uuid4()}"
 

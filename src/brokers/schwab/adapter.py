@@ -6,6 +6,7 @@ order submission is blocked until a separately reviewed release enables it.
 
 import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Optional
 from urllib.parse import quote as url_quote
 
@@ -14,6 +15,7 @@ import httpx
 from src.accounts.profiles import AccountProfile
 from src.brokers.base import BrokerAdapter, BrokerAPIOutageError, BrokerError, LiveTradingDisabledError
 from src.brokers.schwab.auth import SchwabOAuthClient
+from src.brokers.schwab.order_translation import extract_order_value, normalize_preview, to_schwab_order
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -59,18 +61,45 @@ class SchwabBrokerAdapter(BrokerAdapter):
         return response if isinstance(response, list) else response.get("accounts", [])
 
     async def resolve_account_hash(self, account_number: str) -> str:
-        """Resolve an account number through the Schwab accounts endpoint."""
-        for account in await self.list_accounts():
-            securities_account = account.get("securitiesAccount", account)
-            if securities_account.get("accountNumber") == account_number:
-                account_hash = securities_account.get("hashValue") or securities_account.get("accountHash")
-                if account_hash:
-                    return account_hash
+        """
+        Resolve an account number to its hash via GET /accounts/accountNumbers,
+        which is where Schwab publishes the {accountNumber, hashValue} pairs. (This
+        used to scan GET /accounts for a `hashValue`, a field that endpoint does not
+        carry, so resolution would have failed on the first real call.)
+        """
+        numbers = await self._request("GET", "/accounts/accountNumbers")
+        for entry in numbers if isinstance(numbers, list) else []:
+            if str(entry.get("accountNumber")) == str(account_number) and entry.get("hashValue"):
+                return entry["hashValue"]
         raise BrokerError("No accessible Schwab account matches the configured account number")
 
     async def preview_order(self, profile: AccountProfile, order_spec: dict[str, Any]) -> dict[str, Any]:
+        """
+        Translate the broker-neutral spec into Schwab's nested order format (fail
+        closed on anything untranslatable), ask Schwab to preview it, and reshape
+        the answer into the keys Executor reads — including surfacing anything
+        Schwab rejected so it cannot be shown to a human as "approved".
+        """
+        schwab_order = to_schwab_order(order_spec)
         account_hash = await self._resolve_account_hash(profile)
-        return await self._request("POST", f"/accounts/{account_hash}/previewOrder", json=order_spec)
+        response = await self._request("POST", f"/accounts/{account_hash}/previewOrder", json=schwab_order)
+        value = extract_order_value(response)
+        source = "schwab"
+        if value is None:
+            value, source = await self._local_estimate(order_spec), "local_estimate"
+        return normalize_preview(response, value, source)
+
+    async def _local_estimate(self, order_spec: dict[str, Any]) -> float:
+        """Price x quantity x multiplier, used only when Schwab's preview carries no order value — never a silent $0."""
+        price = order_spec.get("limitPrice") or order_spec.get("stopPrice")
+        if price in (None, ""):
+            quote = await self.get_quote(order_spec["symbol"])
+            side_price = quote.get("ask") if order_spec.get("instruction") == "BUY" else quote.get("bid")
+            price = side_price or quote.get("last")
+        if not price:
+            raise BrokerError("Cannot estimate the order value: Schwab's preview had none and no price is available")
+        multiplier = 100 if order_spec.get("assetType") == "OPTION" else 1
+        return float(Decimal(str(price)) * Decimal(order_spec["quantity"]) * multiplier)
 
     async def submit_order(self, profile: AccountProfile, order_spec: dict[str, Any]) -> dict[str, Any]:
         raise LiveTradingDisabledError(
