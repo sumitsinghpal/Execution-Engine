@@ -153,6 +153,23 @@
   button.pill { font-family: var(--font-mono); cursor: pointer; -webkit-appearance: none; appearance: none; }
   button.pill.set { color: var(--buy); border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
 
+  /* Sandbox demo toggle + badge — sample data shown instead of a real account,
+     either by choice (the switch) or because no access code is set yet. */
+  .demo-switch {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: var(--ink-muted);
+    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2);
+    cursor: pointer; white-space: nowrap; flex: none;
+  }
+  .demo-switch input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+  button.pill.demo-badge { cursor: pointer; }
+  .pl-badge {
+    display: inline-block; font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+    padding: 2px 7px; border-radius: 999px; flex: none;
+  }
+  .pl-badge.up { color: var(--buy); background: var(--buy-soft); }
+  .pl-badge.down { color: var(--sell); background: var(--sell-soft); }
+
   /* Skeleton loading — a shimmer sweep instead of bare "Loading…" text,
      used for the handful of cards with real data-shaped content (rows
      with an avatar + two lines) rather than a one-line status message. */
@@ -487,6 +504,10 @@
       <div class="name">EDGE Trading<small>Your trading account, made simple</small></div>
     </div>
     <div class="topbar-right">
+      <label class="demo-switch" title="Show realistic sample data instead of your real account">
+        <input type="checkbox" id="demoModeToggle"> Sandbox
+      </label>
+      <button class="pill ok demo-badge" id="demoBadge" type="button" style="display:none">🟢 Sandbox Demo — Click to connect live API</button>
       <select class="currency-select" id="currencySelect" title="Display currency — your orders always execute in US dollars"></select>
       <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
       <button class="pill" id="unlockPill" type="button" title="Unlock your account to place orders or change settings">🔒 <span id="unlockPillLabel">Unlock account</span></button>
@@ -868,6 +889,115 @@
   function account() { return accountSelect.value; }
   function adminKey() { return store.get('edge.adminKey', ''); }
 
+  // ---- Sandbox demo mode ----
+  // Two ways in: someone explicitly flips the switch, or no access code is
+  // set yet (a brand-new visitor with nothing configured). Either way the
+  // dashboard should look complete and inviting, never broken — a handful of
+  // read-only endpoints below get realistic canned answers instead of a
+  // network call. Anything that would actually DO something (place an order,
+  // pause trading, add a watchlist symbol, ...) is refused with a plain
+  // message instead: faking a successful action here would be actively
+  // misleading, not a nice demo.
+  function demoModeOn() { return store.get('edge.demoMode', '0') === '1'; }
+  function setDemoMode(on) {
+    store.set('edge.demoMode', on ? '1' : '0');
+    refreshDemoUi();
+    refreshAll(); loadStrategies(); refreshLiveUpdates(true);
+  }
+  function effectiveDemo() { return demoModeOn() || !adminKey(); }
+
+  function hoursAgoIso(hours) { return new Date(Date.now() - hours * 3600 * 1000).toISOString(); }
+  const DEMO_SPY_CALL_550 = 'SPY   ' + '261219' + 'C' + '00550000'; // 21-char OCC: root padded to 6, YYMMDD, C/P, strike x1000
+
+  function demoBalances() { return { balances: { net_liquidation_value: 124850.20, mode: 'PAPER' } }; }
+  function demoDrawdown() { return { drawdown_pct: -0.034, breached: false }; } // negative = up on the day
+  function demoPositions() {
+    return { positions: [
+      { instrument: { symbol: 'NVDA', assetType: 'EQUITY' }, longQuantity: 100, shortQuantity: 0, pl_pct: 5.2 },
+      { instrument: { symbol: 'TSLA', assetType: 'EQUITY' }, longQuantity: 50, shortQuantity: 0, pl_pct: -1.1 },
+      { instrument: { symbol: DEMO_SPY_CALL_550, assetType: 'OPTION' }, longQuantity: 1, shortQuantity: 0, pl_pct: 18.4 },
+    ] };
+  }
+  function demoOrders() {
+    return { orders: [
+      { symbol: 'NVDA', instruction: 'BUY', quantity: 100, status: 'FILLED', estimated_notional_usd: 87500, created_at: hoursAgoIso(1), realized_pl_usd: 1240.50 },
+      { symbol: 'TSLA', instruction: 'SELL', quantity: 50, status: 'FILLED', estimated_notional_usd: 12250, created_at: hoursAgoIso(4), realized_pl_usd: -95.30 },
+      { symbol: DEMO_SPY_CALL_550, instruction: 'BUY_TO_OPEN', quantity: 1, status: 'FILLED', estimated_notional_usd: 3120, created_at: hoursAgoIso(22), realized_pl_usd: 482.10 },
+    ], total: 3 };
+  }
+  function demoAgents() {
+    return { agents: [{ agent_id: 'orb', halted: false }, { agent_id: 'vwap_reversion', halted: false }, { agent_id: 'rsi2_connors', halted: false }] };
+  }
+  // Real strategies, real stop/target rules (see src/strategy/catalog.py) — only the win-rate
+  // NUMBERS shown alongside them are sandbox demo data, never fabricated descriptions.
+  function demoStrategies() {
+    return { strategies: [
+      { id: 'orb', name: 'Opening Range Breakout', category: 'INTRADAY', description: "Buys a breakout above the first 30 minutes' trading range.", famous_for: 'Classic day-trading setup popularized by Toby Crabel', risk_reward_label: '1 : 2', stop_rule: 'Opposite side of the opening range', target_rule: '2× the opening range height', bar_interval: '5min' },
+      { id: 'vwap_reversion', name: 'VWAP Reversion', category: 'INTRADAY', description: 'Buys a reclaim of the session VWAP after trading below it.', famous_for: 'Staple intraday mean-reversion tactic among prop/institutional day traders', risk_reward_label: '1 : 1.5', stop_rule: 'Session low so far', target_rule: '1.5× the entry-to-stop distance', bar_interval: '5min' },
+      { id: 'golden_cross', name: 'Golden Cross (50/200 SMA)', category: 'MULTI_DAY', description: 'Buys when the 50-day moving average crosses above the 200-day.', famous_for: 'One of the most widely cited trend-following signals in technical analysis', risk_reward_label: '1 : 3', stop_rule: '2× ATR(14) below entry', target_rule: '3× the entry-to-stop distance', bar_interval: 'daily' },
+      { id: 'macd_crossover', name: 'MACD Crossover', category: 'MULTI_DAY', description: 'Buys when the MACD line crosses above its signal line.', famous_for: "Gerald Appel's MACD (12, 26, 9) — one of the most-used swing indicators", risk_reward_label: '1 : 2', stop_rule: 'Recent 10-day swing low', target_rule: '2× the entry-to-stop distance', bar_interval: 'daily' },
+      { id: 'bollinger_breakout', name: 'Bollinger Band Breakout', category: 'MULTI_DAY', description: 'Buys a close above the upper Bollinger Band (20, 2σ).', famous_for: "John Bollinger's Bollinger Bands", risk_reward_label: '1 : 2', stop_rule: '20-day SMA (the band midline)', target_rule: '2× the entry-to-stop distance', bar_interval: 'daily' },
+      { id: 'rsi2_connors', name: 'RSI(2) Pullback', category: 'MULTI_DAY', description: 'Buys a short-term oversold dip (2-period RSI < 10) while above the 200-day trend.', famous_for: "Larry Connors' 2-period RSI mean-reversion system", risk_reward_label: '1 : 1.5', stop_rule: 'Recent 5-day low', target_rule: '1.5× the entry-to-stop distance', bar_interval: 'daily' },
+      { id: 'turtle_donchian', name: 'Turtle 20-Day Breakout', category: 'OTHER', description: 'Buys a new 20-day high, the original Turtle Trading entry rule.', famous_for: "Richard Dennis & William Eckhardt's Turtle Traders (1983)", risk_reward_label: 'Trend-following (no fixed target; shown as ~1 : 4)', stop_rule: "2N stop — 2× the 20-day ATR ('N') below entry", target_rule: 'Traditionally trailed, not fixed; ~4× risk shown as a representative floor', bar_interval: 'daily' },
+      { id: 'fifty_two_week_high', name: '52-Week High Breakout', category: 'OTHER', description: 'Buys a new 52-week high with a fixed percentage stop and profit target.', famous_for: 'William O’Neil’s CANSLIM ("cut losses at 7-8%")', risk_reward_label: '~1 : 2.5', stop_rule: '8% below entry', target_rule: '20% above entry', bar_interval: 'daily' },
+    ] };
+  }
+  // Feeds "How these strategies have performed" — deliberately gives ORB and VWAP Reversion a
+  // real win-rate here (intradayStrategyIds: []) even though the live version can't backtest
+  // them against daily history; a sandbox is exactly where showing what that would look like is fine.
+  function demoLiveUpdates() {
+    const rows = [
+      { symbol: 'QQQ', strategy_id: 'golden_cross', total_trades: 22, wins: 14, win_rate: 14 / 22, profit_factor: 1.8, total_return_pct: 9.4, benchmark_return_pct: 7.1, starting_capital: 100000, ending_capital: 109400 },
+      { symbol: 'SPY', strategy_id: 'macd_crossover', total_trades: 30, wins: 19, win_rate: 19 / 30, profit_factor: 1.6, total_return_pct: 11.2, benchmark_return_pct: 8.9, starting_capital: 100000, ending_capital: 111200 },
+      { symbol: 'IWM', strategy_id: 'bollinger_breakout', total_trades: 18, wins: 10, win_rate: 10 / 18, profit_factor: 1.3, total_return_pct: 4.8, benchmark_return_pct: 6.2, starting_capital: 100000, ending_capital: 104800 },
+      { symbol: 'QQQ', strategy_id: 'rsi2_connors', total_trades: 34, wins: 24, win_rate: 24 / 34, profit_factor: 2.1, total_return_pct: 15.6, benchmark_return_pct: 7.1, starting_capital: 100000, ending_capital: 115600 },
+      { symbol: 'SPY', strategy_id: 'turtle_donchian', total_trades: 12, wins: 6, win_rate: 6 / 12, profit_factor: 1.4, total_return_pct: 6.3, benchmark_return_pct: 8.9, starting_capital: 100000, ending_capital: 106300 },
+      { symbol: 'IWM', strategy_id: 'fifty_two_week_high', total_trades: 9, wins: 5, win_rate: 5 / 9, profit_factor: 1.5, total_return_pct: 5.1, benchmark_return_pct: 6.2, starting_capital: 100000, ending_capital: 105100 },
+      { symbol: 'QQQ', strategy_id: 'orb', total_trades: 25, wins: 17, win_rate: 17 / 25, profit_factor: 1.9, total_return_pct: 8.7, benchmark_return_pct: 7.1, starting_capital: 100000, ending_capital: 108700 },
+      { symbol: 'SPY', strategy_id: 'vwap_reversion', total_trades: 25, wins: 18, win_rate: 18 / 25, profit_factor: 2.0, total_return_pct: 10.3, benchmark_return_pct: 8.9, starting_capital: 100000, ending_capital: 110300 },
+    ];
+    const totalTrades = rows.reduce((s, r) => s + r.total_trades, 0);
+    const totalWins = rows.reduce((s, r) => s + r.wins, 0);
+    const totalPnl = rows.reduce((s, r) => s + (r.ending_capital - r.starting_capital), 0);
+    let eq = 100000;
+    const equityCurve = [];
+    for (let i = 0; i < 36; i++) { eq *= 1 + (Math.sin(i / 4) * 0.004 + 0.0035); equityCurve.push({ equity: Math.round(eq) }); }
+    return {
+      backtest: {
+        results: rows,
+        summary: {
+          total_trades: totalTrades, win_rate: totalWins / totalTrades, total_pnl_usd: totalPnl,
+          pairs_run: rows.length, avg_benchmark_return_pct: 7.6,
+          combined_portfolio: { starting_capital: 100000, ending_capital: Math.round(eq), total_return_pct: (eq / 100000 - 1) * 100, max_drawdown_pct: 6.2, equity_curve: equityCurve },
+        },
+      },
+      intradayStrategyIds: [],
+      positions: [
+        { symbol: 'QQQ', strategy_id: 'rsi2_connors', status: 'OPEN', entry_price: 512.30, opened_at: hoursAgoIso(6) },
+        { symbol: 'SPY', strategy_id: 'vwap_reversion', status: 'OPEN', entry_price: 601.15, opened_at: hoursAgoIso(2) },
+      ],
+      computedAt: new Date().toISOString(),
+    };
+  }
+
+  // Only read-only, informational endpoints get faked — anything that mutates state
+  // (POST/DELETE placing orders, flipping the kill switch, adding a watchlist symbol, ...)
+  // is refused below instead, never silently "succeeded" against fake data.
+  const DEMO_RESPONSES = [
+    { match: /^\/v1\/account\/[^/]+\/balances$/, methods: ['GET'], data: demoBalances },
+    { match: /^\/v1\/account\/[^/]+\/positions$/, methods: ['GET'], data: demoPositions },
+    { match: /^\/v1\/risk\/drawdown-check$/, methods: ['POST'], data: demoDrawdown },
+    { match: /^\/v1\/agents\/status$/, methods: ['GET'], data: demoAgents },
+    { match: /^\/v1\/orders$/, methods: ['GET'], data: demoOrders },
+    { match: /^\/v1\/strategies$/, methods: ['GET'], data: demoStrategies },
+    { match: /^\/v1\/orders\/bracket$/, methods: ['GET'], data: () => ({ brackets: [] }) },
+    { match: /^\/v1\/watchlists$/, methods: ['GET'], data: () => ({ watchlists: {} }) },
+    { match: /^\/v1\/alerts$/, methods: ['GET'], data: () => ({ alerts: [] }) },
+    { match: /^\/v1\/strategies\/signals$/, methods: ['GET'], data: () => ({ signals: [] }) },
+    { match: /^\/v1\/autonomous\/plan$/, methods: ['GET'], data: () => ({ active_plan: null }) },
+    { match: /^\/v1\/kill-switch\/status$/, methods: ['GET'], data: () => ({ enabled: false }) },
+  ];
+
   // ---- Currency display (global reach) ----
   // Every dollar figure in this dashboard comes from the API in US
   // dollars — that never changes, since that's the currency orders
@@ -957,6 +1087,18 @@
   }
 
   async function api(path, opts = {}) {
+    if (effectiveDemo()) {
+      const pathname = path.split('?')[0];
+      const method = (opts.method || 'GET').toUpperCase();
+      const entry = DEMO_RESPONSES.find(e => e.methods.includes(method) && e.match.test(pathname));
+      if (entry) return entry.data();
+      if (method !== 'GET') {
+        // A real action (place an order, flip the kill switch, add a symbol, ...) was attempted
+        // in the sandbox. Never fake success against fake data — refuse plainly instead.
+        throw new Error('Sandbox Demo — connect your live API (top-right) to do this for real.');
+      }
+      // Any other GET (health, market-status, ...) is genuinely public and safe to try for real.
+    }
     // Everything except /v1/health, /v1/strategies (catalog), and
     // /v1/market-status requires the admin key now (see
     // src/api/server.py's verify_admin_key) — sent on every call rather
@@ -1128,11 +1270,14 @@
         const rawSymbol = instrument.symbol || p.symbol || '—';
         const symbol = formatSymbol(rawSymbol);
         const qty = (p.longQuantity ?? p.quantity ?? 0) - (p.shortQuantity ?? 0);
+        const plPct = p.pl_pct != null ? Number(p.pl_pct) : null;
+        const plBadge = plPct != null ? `<span class="pl-badge ${plPct >= 0 ? 'up' : 'down'}">${plPct >= 0 ? '+' : ''}${plPct.toFixed(1)}%</span>` : '';
         return `<div class="pos-row">
           <div class="pos-left">
             <div class="sym-badge">${rawSymbol.slice(0,4).trim()}</div>
             <div><div class="pos-symbol">${symbol}</div><div class="pos-qty">${qty} shares</div></div>
           </div>
+          ${plBadge}
         </div>`;
       }).join('');
     } catch (e) {
@@ -1151,6 +1296,8 @@
         const side = (o.instruction || '').toUpperCase() === 'SELL' ? 'sell' : 'buy';
         const statusClass = 'st-' + (o.status || 'previewed').toLowerCase();
         const notional = o.estimated_notional_usd ? money(o.estimated_notional_usd) : '';
+        const pl = o.realized_pl_usd != null ? Number(o.realized_pl_usd) : null;
+        const plBadge = pl != null ? `<span class="pl-badge ${pl >= 0 ? 'up' : 'down'}">${pl >= 0 ? '+' : '−'}${money(Math.abs(pl))}</span>` : '';
         return `<div class="feed-row">
           <div class="feed-left">
             <span class="side-chip ${side}">${side === 'buy' ? 'BUY' : 'SELL'}</span>
@@ -1159,7 +1306,10 @@
               <div class="feed-sub">${notional} · ${timeAgo(o.created_at)}</div>
             </div>
           </div>
-          <span class="status-chip ${statusClass}">${o.status}</span>
+          <div style="display:flex;align-items:center;gap:8px;flex:none">
+            ${plBadge}
+            <span class="status-chip ${statusClass}">${o.status}</span>
+          </div>
         </div>`;
       }).join('');
     } catch (e) {
@@ -1594,12 +1744,28 @@
   }
   $('unlockPill').addEventListener('click', () => {
     openAdminModal('Enter your access code', async () => {
-      refreshUnlockPill();
+      refreshUnlockPill(); refreshDemoUi();
       toast('Account unlocked');
       refreshAll(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
     });
   });
   refreshUnlockPill();
+
+  // ---- Sandbox demo toggle + badge ----
+  function refreshDemoUi() {
+    $('demoModeToggle').checked = demoModeOn();
+    $('demoBadge').style.display = effectiveDemo() ? '' : 'none';
+  }
+  $('demoModeToggle').addEventListener('change', () => setDemoMode($('demoModeToggle').checked));
+  $('demoBadge').addEventListener('click', () => {
+    setDemoMode(false);
+    openAdminModal('Connect your live API', async () => {
+      refreshUnlockPill(); refreshDemoUi();
+      toast('Connected — showing your real account now');
+      refreshAll(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
+    }, "Enter your access code to replace this sample data with your real account.");
+  });
+  refreshDemoUi();
 
   // ---- Order ticket ----
   let side = 'BUY';
@@ -2287,6 +2453,12 @@
   }
 
   async function refreshLiveUpdates(force) {
+    if (effectiveDemo()) {
+      renderLiveUpdates(demoLiveUpdates());
+      $('liveUpdatesMeta').textContent = "Sandbox demo data — connect your live API to see your own strategies' real performance.";
+      scheduleNextLiveUpdate();
+      return;
+    }
     const cached = readLiveUpdatesCache();
     const isStale = !cached || (Date.now() - new Date(cached.computedAt).getTime()) >= LIVE_UPDATES_INTERVAL_MS;
 
