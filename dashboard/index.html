@@ -4,63 +4,68 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EDGE Trading</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
 <style>
+  /* Dark is this product's look, full stop — like every trading terminal it takes cues
+     from, it does not follow the visitor's OS light/dark preference. data-theme="light"
+     or ="dark" on <html> is kept as a hook for a possible future manual toggle. */
   :root {
-    --bg: #f5f6f8;
-    --surface: #ffffff;
-    --surface-2: #eef0f3;
-    --raised: #ffffff;
-    --ink: #10121a;
-    --ink-muted: #5c6270;
-    --ink-faint: #8b91a0;
-    --border: #e2e4ea;
-    --border-strong: #cdd1db;
+    --bg: #0a0d14;
+    --surface: #121722;
+    --surface-2: #171d2b;
+    --raised: #1b2233;
+    --ink: #f1f4f9;
+    --ink-muted: #9aa4b8;
+    --ink-faint: #616b80;
+    --border: rgba(255,255,255,0.07);
+    --border-strong: rgba(255,255,255,0.14);
 
-    --accent: #0e9f6e;
-    --accent-ink: #ffffff;
-    --accent-soft: #e3f7ee;
-    --buy: #0e9f6e;
-    --buy-soft: #e3f7ee;
-    --sell: #d63c5e;
-    --sell-soft: #fbe6ea;
-    --warn: #b5790b;
-    --warn-soft: #faf1de;
-    --crit: #d63c5e;
-    --crit-soft: #fbe6ea;
+    --accent: #10b981;
+    --accent-ink: #04130d;
+    --accent-soft: rgba(16,185,129,0.14);
+    --buy: #10b981;
+    --buy-soft: rgba(16,185,129,0.14);
+    --sell: #ef4444;
+    --sell-soft: rgba(239,68,68,0.14);
+    --warn: #f59e0b;
+    --warn-soft: rgba(245,158,11,0.14);
+    --crit: #ef4444;
+    --crit-soft: rgba(239,68,68,0.14);
+    --system: #6366f1;
+    --system-soft: rgba(99,102,241,0.14);
 
     --radius-lg: 20px;
     --radius-md: 14px;
     --radius-sm: 9px;
-    --font-display: "Sora", system-ui, sans-serif;
-    --font-body: "Manrope", system-ui, sans-serif;
+    --font-display: "Plus Jakarta Sans", system-ui, sans-serif;
+    --font-body: "Plus Jakarta Sans", system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
-    --shadow-card: 0 1px 2px rgba(16,18,26,.04), 0 8px 24px -12px rgba(16,18,26,.12);
+    --shadow-card: 0 1px 0 rgba(255,255,255,.03) inset, 0 20px 48px -24px rgba(0,0,0,.65);
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #06070a; --surface: #0e1015; --surface-2: #14171e; --raised: #171a22;
-      --ink: #f2f3f6; --ink-muted: #9aa0ad; --ink-faint: #656b78;
-      --border: #1f232c; --border-strong: #2c3140;
-      --accent: #3ddc97; --accent-ink: #05130d; --accent-soft: #12271f;
-      --buy: #3ddc97; --buy-soft: #12271f;
-      --sell: #ff5c72; --sell-soft: #2c1620;
-      --warn: #f5b942; --warn-soft: #2c2313;
-      --crit: #ff5c72; --crit-soft: #2c1620;
-      --shadow-card: 0 1px 0 rgba(255,255,255,.02) inset, 0 12px 32px -16px rgba(0,0,0,.6);
-    }
+  :root[data-theme="light"] {
+    --bg: #f5f6f8; --surface: #ffffff; --surface-2: #eef0f3; --raised: #ffffff;
+    --ink: #10121a; --ink-muted: #5c6270; --ink-faint: #8b91a0;
+    --border: #e2e4ea; --border-strong: #cdd1db;
+    --accent: #0e9f6e; --accent-ink: #ffffff; --accent-soft: #e3f7ee;
+    --buy: #0e9f6e; --buy-soft: #e3f7ee;
+    --sell: #d63c5e; --sell-soft: #fbe6ea;
+    --warn: #b5790b; --warn-soft: #faf1de;
+    --crit: #d63c5e; --crit-soft: #fbe6ea;
+    --system: #4f46e5; --system-soft: #e8e7fc;
+    --shadow-card: 0 1px 2px rgba(16,18,26,.04), 0 8px 24px -12px rgba(16,18,26,.12);
   }
   :root[data-theme="dark"] {
-    --bg: #06070a; --surface: #0e1015; --surface-2: #14171e; --raised: #171a22;
-    --ink: #f2f3f6; --ink-muted: #9aa0ad; --ink-faint: #656b78;
-    --border: #1f232c; --border-strong: #2c3140;
-    --accent: #3ddc97; --accent-ink: #05130d; --accent-soft: #12271f;
-    --buy: #3ddc97; --buy-soft: #12271f;
-    --sell: #ff5c72; --sell-soft: #2c1620;
-    --warn: #f5b942; --warn-soft: #2c2313;
-    --crit: #ff5c72; --crit-soft: #2c1620;
-    --shadow-card: 0 1px 0 rgba(255,255,255,.02) inset, 0 12px 32px -16px rgba(0,0,0,.6);
+    --bg: #0a0d14; --surface: #121722; --surface-2: #171d2b; --raised: #1b2233;
+    --ink: #f1f4f9; --ink-muted: #9aa4b8; --ink-faint: #616b80;
+    --border: rgba(255,255,255,0.07); --border-strong: rgba(255,255,255,0.14);
+    --accent: #10b981; --accent-ink: #04130d; --accent-soft: rgba(16,185,129,0.14);
+    --buy: #10b981; --buy-soft: rgba(16,185,129,0.14);
+    --sell: #ef4444; --sell-soft: rgba(239,68,68,0.14);
+    --warn: #f59e0b; --warn-soft: rgba(245,158,11,0.14);
+    --crit: #ef4444; --crit-soft: rgba(239,68,68,0.14);
+    --system: #6366f1; --system-soft: rgba(99,102,241,0.14);
+    --shadow-card: 0 1px 0 rgba(255,255,255,.03) inset, 0 20px 48px -24px rgba(0,0,0,.65);
   }
 
   * { box-sizing: border-box; }
@@ -75,7 +80,15 @@
   }
   button, input, select { font-family: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; font-family: var(--font-mono); }
+  /* Every ticker and every raw price/quantity input reads as mono, matching the rest of the numbers on the page. */
+  .pos-symbol, .sym-badge, .feed-symbol, .wl-symbol, .brk-symbol, .signal-symbol, .lu-pair-name,
+  .pos-qty, .alert-desc, .brk-levels, .feed-sub, .history-row-sub,
+  #chartSymbol, #fSymbol, #histSymbol, #wlNewSymbol, #alertSymbol,
+  #fQty, #fLimit, #agentNotional, #fBracketStop, #fBracketTarget, #fBracketTrail,
+  #alertPrice, #histFrom, #histTo {
+    font-family: var(--font-mono);
+  }
 
   html { overflow-x: hidden; }
   body { overflow-x: hidden; }
@@ -86,7 +99,7 @@
   .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .brand .mark {
     width: 32px; height: 32px; border-radius: 9px; flex: none;
-    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #0a5c40));
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #065f46));
     display: flex; align-items: center; justify-content: center;
     font-family: var(--font-display); font-weight: 800; font-size: 15px; color: var(--accent-ink);
   }
@@ -493,6 +506,39 @@
     padding: 3px 7px; border-radius: 999px; background: var(--buy-soft); color: var(--buy); text-transform: uppercase; letter-spacing: .03em;
     margin-bottom: 8px;
   }
+
+  /* Tabbed navigation — Overview / Terminal / Strategies & Algos / Trade Journal & Logs / Risk & Settings.
+     Everything below still refreshes on its usual timer regardless of which tab is showing (nothing here
+     is lazy-loaded), so switching tabs is instant, never a fresh loading state. */
+  .tabbar {
+    display: flex; gap: 4px; padding: 4px; margin: 0 0 18px; overflow-x: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+  }
+  .tab-btn {
+    flex: 1 1 auto; white-space: nowrap; text-align: center; padding: 9px 14px; border: none; border-radius: var(--radius-sm);
+    background: transparent; color: var(--ink-muted); font-family: var(--font-display); font-weight: 600; font-size: 13px;
+    cursor: pointer; transition: background .15s, color .15s;
+  }
+  .tab-btn:hover { color: var(--ink); background: var(--surface-2); }
+  .tab-btn.active { background: var(--accent); color: var(--accent-ink); }
+  .tab-panel[hidden] { display: none; }
+
+  /* Win/loss heatmap — a GitHub-contributions-style grid, one cell per day. Colored by that
+     day's realized profit/loss when the API reports it (only Sandbox Demo does today — see
+     the module docstring above computeHeatmap()); otherwise cells stay neutral, honestly. */
+  .heatmap-wrap { overflow-x: auto; padding: 4px 0; }
+  .heatmap-grid { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 13px); gap: 3px; width: max-content; }
+  .heatmap-cell { width: 13px; height: 13px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--border); }
+  .heatmap-cell.win { background: var(--buy); border-color: var(--buy); }
+  .heatmap-cell.loss { background: var(--sell); border-color: var(--sell); }
+  .heatmap-cell.win.light { background: var(--buy-soft); border-color: color-mix(in srgb, var(--buy) 40%, var(--border)); }
+  .heatmap-cell.loss.light { background: var(--sell-soft); border-color: color-mix(in srgb, var(--sell) 40%, var(--border)); }
+  .heatmap-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-faint); margin-top: 10px; font-family: var(--font-mono); }
+  .heatmap-legend .heatmap-cell { width: 11px; height: 11px; }
+
+  /* System-metric accents (indigo) — informational counters that are neither a buy/sell nor a warning. */
+  .stat-value.system { color: var(--system); }
+  .pill.system { color: var(--system); border-color: color-mix(in srgb, var(--system) 35%, var(--border)); background: var(--system-soft); }
 </style>
 </head>
 <body>
@@ -511,299 +557,344 @@
       <select class="currency-select" id="currencySelect" title="Display currency — your orders always execute in US dollars"></select>
       <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
       <button class="pill" id="unlockPill" type="button" title="Unlock your account to place orders or change settings">🔒 <span id="unlockPillLabel">Unlock account</span></button>
-      <button class="settings-btn" id="settingsBtn" type="button" title="Connection settings">⚙</button>
-    </div>
-    <div class="settings-panel" id="settingsPanel">
-      <div class="settings-field">
-        <label for="baseUrl">Server address</label>
-        <input class="base-url" id="baseUrl" spellcheck="false" title="Execution-Engine API base URL">
-      </div>
-      <div class="settings-field">
-        <label for="accountSelect">Account</label>
-        <select class="account-select" id="accountSelect" title="Account alias"></select>
-      </div>
-      <div class="settings-field">
-        <label for="sigIntegrityUrl">Signal integrity server (optional)</label>
-        <input class="base-url" id="sigIntegrityUrl" spellcheck="false" title="signal-integrity-layer API base URL — leave blank to hide that section" placeholder="e.g. http://localhost:8100">
-      </div>
     </div>
   </div>
 
   <div class="mode-banner" id="modeBanner" style="display:none"></div>
 
-  <div class="card chart-card">
-    <h2>Chart <span class="hint">Live price chart — separate from the order form below</span></h2>
-    <div class="chart-controls">
-      <input id="chartSymbol" maxlength="6" spellcheck="false">
-      <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
-    </div>
-    <div class="tv-wrap" id="tvChartContainer"></div>
-  </div>
+  <nav class="tabbar" id="tabbar">
+    <button class="tab-btn" data-tab="overview" type="button">Overview</button>
+    <button class="tab-btn" data-tab="terminal" type="button">Terminal</button>
+    <button class="tab-btn" data-tab="strategies" type="button">Strategies &amp; Algos</button>
+    <button class="tab-btn" data-tab="journal" type="button">Trade Journal &amp; Logs</button>
+    <button class="tab-btn" data-tab="risk" type="button">Risk &amp; Settings</button>
+  </nav>
 
-  <div class="grid">
-    <div class="col">
+  <section class="tab-panel" data-tab-panel="overview">
 
-      <div class="card">
-        <div class="hero-label">Account balance</div>
-        <div class="hero-value num" id="balanceValue">—</div>
-        <div class="hero-sub">
-          <span id="balanceChg" class="chg num"></span>
-          <span id="balanceMode" class="skeleton"></span>
+    <div class="card">
+      <div class="hero-label">Account balance</div>
+      <div class="hero-value num" id="balanceValue">—</div>
+      <div class="hero-sub">
+        <span id="balanceChg" class="chg num"></span>
+        <span id="balanceMode" class="skeleton"></span>
+      </div>
+      <div class="fx-note" id="fxNote" style="display:none"></div>
+      <div class="hero-foot">
+        <div>
+          <div class="stat-label">Today's risk used</div>
+          <div class="stat-value num" id="drawdownStat">—</div>
         </div>
-        <div class="fx-note" id="fxNote" style="display:none"></div>
-        <div class="hero-foot">
-          <div>
-            <div class="stat-label">Today's risk used</div>
-            <div class="stat-value num" id="drawdownStat">—</div>
-          </div>
-          <div>
-            <div class="stat-label">Market</div>
-            <div class="stat-value" id="marketStat">—</div>
-          </div>
-          <div>
-            <div class="stat-label">Strategies active</div>
-            <div class="stat-value num" id="agentsStat">—</div>
-          </div>
+        <div>
+          <div class="stat-label">Market</div>
+          <div class="stat-value" id="marketStat">—</div>
+        </div>
+        <div>
+          <div class="stat-label">Strategies active</div>
+          <div class="stat-value num system" id="agentsStat">—</div>
         </div>
       </div>
-
-      <div class="card">
-        <h2>Positions <span class="hint" id="positionsHint"></span></h2>
-        <div id="positionsList">
-          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:45%"></div><div class="skel-bar" style="width:30%"></div></div></div>
-          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:55%"></div><div class="skel-bar" style="width:25%"></div></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>Activity <span class="hint">most recent first</span></h2>
-        <div id="feedList">
-          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:60%"></div><div class="skel-bar" style="width:35%"></div></div></div>
-          <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:50%"></div><div class="skel-bar" style="width:40%"></div></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>Watchlists <span class="hint">save the symbols you actually track</span></h2>
-        <div class="watchlist-tabs" id="watchlistTabs"></div>
-        <div id="watchlistBody"><div class="empty-note">Loading…</div></div>
-        <div class="field-row" style="margin-top:14px">
-          <div class="field" style="margin-top:0">
-            <label for="wlNewSymbol">Add symbol</label>
-            <input id="wlNewSymbol" placeholder="e.g. NVDA" style="text-transform:uppercase" maxlength="6">
-          </div>
-          <div class="field" style="margin-top:0">
-            <label for="wlNewList">List name</label>
-            <input id="wlNewList" placeholder="Watchlist" maxlength="24">
-          </div>
-        </div>
-        <button class="btn btn-ghost" id="wlAddBtn">Add to list</button>
-      </div>
-
     </div>
 
-    <div class="col">
+    <div class="card">
+      <h2>Equity curve <span class="hint">your strategies, combined — full breakdown under Strategies &amp; Algos</span></h2>
+      <div id="overviewEquityCurve"><div class="skel-bar" style="width:100%;height:180px;border-radius:12px"></div></div>
+    </div>
 
-      <div class="card">
-        <h2>Trading controls</h2>
-        <div class="ks-row">
-          <div class="ks-text">
-            <div class="t1" id="ksTitle">Trading is active</div>
-            <div class="t2" id="ksSub">New orders are allowed</div>
-          </div>
-          <button class="toggle" id="ksToggle" aria-label="Pause or resume trading"></button>
-        </div>
+    <div class="card">
+      <h2>Positions <span class="hint" id="positionsHint"></span></h2>
+      <div id="positionsList">
+        <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:45%"></div><div class="skel-bar" style="width:30%"></div></div></div>
+        <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:55%"></div><div class="skel-bar" style="width:25%"></div></div></div>
       </div>
+    </div>
 
-      <div class="card">
-        <h2>My trading agent <span class="hint">hand it money, it trades your best strategies until you stop it</span></h2>
-        <div id="planStatus"><div class="skel-bar" style="width:100%;height:52px;border-radius:9px"></div></div>
-        <div id="startAgentForm">
-          <div class="field">
-            <label for="agentNotional">Amount per trade (USD)</label>
-            <input id="agentNotional" type="number" min="1" step="1" value="1000">
-          </div>
-          <button class="btn btn-primary" id="startAgentBtn">Start trading</button>
-        </div>
+    <div class="card">
+      <h2>Activity <span class="hint">most recent first</span></h2>
+      <div id="feedList">
+        <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:60%"></div><div class="skel-bar" style="width:35%"></div></div></div>
+        <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:50%"></div><div class="skel-bar" style="width:40%"></div></div></div>
       </div>
+    </div>
 
-      <div class="card">
-        <h2>Suggested trades <span class="hint" id="signalsHint">found automatically, waiting for your review</span></h2>
-        <div id="signalsList">
-          <div class="skel-row"><div class="skel-lines"><div class="skel-bar" style="width:35%"></div><div class="skel-bar" style="width:60%"></div></div></div>
-        </div>
+  </section>
+
+  <section class="tab-panel" data-tab-panel="terminal" hidden>
+
+    <div class="card chart-card">
+      <h2>Chart <span class="hint">Live price chart — separate from the order form below</span></h2>
+      <div class="chart-controls">
+        <input id="chartSymbol" maxlength="6" spellcheck="false">
+        <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
       </div>
+      <div class="tv-wrap" id="tvChartContainer"></div>
+    </div>
 
-      <div class="card">
-        <h2>Price alerts <span class="hint">get notified when a symbol crosses a price</span></h2>
-        <div id="alertsList"><div class="empty-note">Loading…</div></div>
-        <div class="field-row">
-          <div class="field">
-            <label for="alertSymbol">Symbol</label>
-            <input id="alertSymbol" placeholder="e.g. QQQ" style="text-transform:uppercase" maxlength="6">
-          </div>
-          <div class="field">
-            <label for="alertCondition">When price is</label>
-            <select id="alertCondition">
-              <option value="ABOVE">Above</option>
-              <option value="BELOW">Below</option>
-            </select>
-          </div>
-        </div>
-        <div class="field">
-          <label for="alertPrice">Target price (USD)</label>
-          <input id="alertPrice" type="number" step="0.01" placeholder="700.00">
-        </div>
-        <button class="btn btn-ghost" id="alertAddBtn">Set alert</button>
-      </div>
+    <div class="card">
+      <h2>Level 2 / DOM <span class="hint">order book depth</span></h2>
+      <div class="empty-note">Execution-Engine's API doesn't provide order-book depth today, so there's no live bid/ask ladder to show here — this is a placeholder for when that data exists, not a simulated feed.</div>
+    </div>
 
-      <div class="card">
-        <h2>New order</h2>
-        <div id="planBanner"></div>
-        <div class="seg">
-          <button type="button" class="active buy" id="sideBuy">Buy</button>
-          <button type="button" id="sideSell">Sell</button>
-        </div>
+    <div class="grid">
+      <div class="col">
 
-        <div class="field-row">
-          <div class="field">
-            <label for="fSymbol">Symbol</label>
-            <input id="fSymbol" value="QQQ" maxlength="21" style="text-transform:uppercase">
+        <div class="card">
+          <h2>New order</h2>
+          <div id="planBanner"></div>
+          <div class="seg">
+            <button type="button" class="active buy" id="sideBuy">Buy</button>
+            <button type="button" id="sideSell">Sell</button>
           </div>
-          <div class="field">
-            <label for="fQty">Quantity</label>
-            <input id="fQty" type="number" min="1" value="10">
-          </div>
-        </div>
 
-        <div class="field-row">
-          <div class="field">
-            <label for="fType">When to fill</label>
-            <select id="fType">
-              <option value="MARKET">Now, at current price</option>
-              <option value="LIMIT" selected>Only at my price</option>
-            </select>
-          </div>
-          <div class="field" id="limitPriceField">
-            <label for="fLimit">Your price (USD)</label>
-            <input id="fLimit" type="number" step="0.01" placeholder="270.50">
-          </div>
-        </div>
-
-        <input type="hidden" id="fAgent" value="default">
-        <div class="field-row">
-          <div class="field">
-            <label for="fAssetType">Type of investment</label>
-            <select id="fAssetType">
-              <option value="ETF" selected>ETF (fund)</option>
-              <option value="EQUITY">Stock</option>
-              <option value="FUTURE">Futures contract</option>
-            </select>
-          </div>
-        </div>
-        <div class="field-hint" id="futuresHint" style="display:none">Symbol format: product root + month code + year, e.g. <b>ESZ26</b> (E-mini S&amp;P 500, Dec 2026). Supported: ES, NQ, YM, RTY, CL, NG, GC, SI, ZB, ZN, ZC, ZS, ZW.</div>
-
-        <div class="field" id="bracketToggleField">
-          <label class="checkbox-label"><input type="checkbox" id="fUseBracket"> Auto-exit this trade <span class="hint">(Buy only — closes itself when a level hits)</span></label>
-        </div>
-        <div id="bracketFields" class="bracket-fields" style="display:none">
           <div class="field-row">
             <div class="field">
-              <label for="fBracketStop">Stop loss (USD)</label>
-              <input id="fBracketStop" type="number" step="0.01" placeholder="optional">
+              <label for="fSymbol">Symbol</label>
+              <input id="fSymbol" value="QQQ" maxlength="21" style="text-transform:uppercase">
             </div>
             <div class="field">
-              <label for="fBracketTarget">Take profit (USD)</label>
-              <input id="fBracketTarget" type="number" step="0.01" placeholder="optional">
+              <label for="fQty">Quantity</label>
+              <input id="fQty" type="number" min="1" value="10">
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="fType">When to fill</label>
+              <select id="fType">
+                <option value="MARKET">Now, at current price</option>
+                <option value="LIMIT" selected>Only at my price</option>
+              </select>
+            </div>
+            <div class="field" id="limitPriceField">
+              <label for="fLimit">Your price (USD)</label>
+              <input id="fLimit" type="number" step="0.01" placeholder="270.50">
+            </div>
+          </div>
+
+          <input type="hidden" id="fAgent" value="default">
+          <div class="field-row">
+            <div class="field">
+              <label for="fAssetType">Type of investment</label>
+              <select id="fAssetType">
+                <option value="ETF" selected>ETF (fund)</option>
+                <option value="EQUITY">Stock</option>
+                <option value="FUTURE">Futures contract</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-hint" id="futuresHint" style="display:none">Symbol format: product root + month code + year, e.g. <b>ESZ26</b> (E-mini S&amp;P 500, Dec 2026). Supported: ES, NQ, YM, RTY, CL, NG, GC, SI, ZB, ZN, ZC, ZS, ZW.</div>
+
+          <div class="field" id="bracketToggleField">
+            <label class="checkbox-label"><input type="checkbox" id="fUseBracket"> Auto-exit this trade <span class="hint">(Buy only — closes itself when a level hits)</span></label>
+          </div>
+          <div id="bracketFields" class="bracket-fields" style="display:none">
+            <div class="field-row">
+              <div class="field">
+                <label for="fBracketStop">Stop loss (USD)</label>
+                <input id="fBracketStop" type="number" step="0.01" placeholder="optional">
+              </div>
+              <div class="field">
+                <label for="fBracketTarget">Take profit (USD)</label>
+                <input id="fBracketTarget" type="number" step="0.01" placeholder="optional">
+              </div>
+            </div>
+            <div class="field">
+              <label for="fBracketTrail">Or trail the stop (%)</label>
+              <input id="fBracketTrail" type="number" step="0.1" min="0.1" max="89" placeholder="e.g. 5 for 5%">
+            </div>
+          </div>
+
+          <button class="btn btn-primary" id="previewBtn">Review order</button>
+
+          <div id="verdictBox"></div>
+        </div>
+
+        <div class="card">
+          <h2>Bracket orders <span class="hint">auto-exit plans, watched and closed for you</span></h2>
+          <div id="bracketList"><div class="empty-note">Loading…</div></div>
+        </div>
+
+      </div>
+
+      <div class="col">
+
+        <div class="card">
+          <h2>Watchlists <span class="hint">save the symbols you actually track</span></h2>
+          <div class="watchlist-tabs" id="watchlistTabs"></div>
+          <div id="watchlistBody"><div class="empty-note">Loading…</div></div>
+          <div class="field-row" style="margin-top:14px">
+            <div class="field" style="margin-top:0">
+              <label for="wlNewSymbol">Add symbol</label>
+              <input id="wlNewSymbol" placeholder="e.g. NVDA" style="text-transform:uppercase" maxlength="6">
+            </div>
+            <div class="field" style="margin-top:0">
+              <label for="wlNewList">List name</label>
+              <input id="wlNewList" placeholder="Watchlist" maxlength="24">
+            </div>
+          </div>
+          <button class="btn btn-ghost" id="wlAddBtn">Add to list</button>
+        </div>
+
+        <div class="card">
+          <h2>Price alerts <span class="hint">get notified when a symbol crosses a price</span></h2>
+          <div id="alertsList"><div class="empty-note">Loading…</div></div>
+          <div class="field-row">
+            <div class="field">
+              <label for="alertSymbol">Symbol</label>
+              <input id="alertSymbol" placeholder="e.g. QQQ" style="text-transform:uppercase" maxlength="6">
+            </div>
+            <div class="field">
+              <label for="alertCondition">When price is</label>
+              <select id="alertCondition">
+                <option value="ABOVE">Above</option>
+                <option value="BELOW">Below</option>
+              </select>
             </div>
           </div>
           <div class="field">
-            <label for="fBracketTrail">Or trail the stop (%)</label>
-            <input id="fBracketTrail" type="number" step="0.1" min="0.1" max="89" placeholder="e.g. 5 for 5%">
+            <label for="alertPrice">Target price (USD)</label>
+            <input id="alertPrice" type="number" step="0.01" placeholder="700.00">
           </div>
+          <button class="btn btn-ghost" id="alertAddBtn">Set alert</button>
         </div>
 
-        <button class="btn btn-primary" id="previewBtn">Review order</button>
-
-        <div id="verdictBox"></div>
-      </div>
-
-      <div class="card">
-        <h2>Bracket orders <span class="hint">auto-exit plans, watched and closed for you</span></h2>
-        <div id="bracketList"><div class="empty-note">Loading…</div></div>
-      </div>
-
-    </div>
-  </div>
-
-  <div class="card sig-integrity-card" id="sigIntegrityCard" style="display:none">
-    <h2>Signal integrity <span class="hint">checks whether your AI agents agree, and whether they're up to date</span></h2>
-    <div class="history-summary" id="sigIntegritySummary">Loading…</div>
-    <div id="sigIntegrityList"></div>
-  </div>
-
-  <div class="card strategies-card">
-    <h2>
-      Strategies you can follow
-      <span class="hint">checks the symbol in the order form above</span>
-    </h2>
-    <button class="btn btn-ghost" id="scanAllBtn" style="margin-top:0">Check all for new signals</button>
-    <div class="strategy-columns" id="strategyColumns"></div>
-  </div>
-
-  <div class="card live-updates-card">
-    <h2>How these strategies have performed <span class="hint" id="liveUpdatesHint">updates every few hours</span></h2>
-    <div class="lu-meta" id="liveUpdatesMeta">Loading…</div>
-    <div id="liveUpdatesBody"></div>
-    <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Update now</button>
-  </div>
-
-  <div class="card history-card">
-    <h2>Transaction history <span class="hint">every order you've ever placed, searchable</span></h2>
-    <div class="history-filters">
-      <div class="field">
-        <label for="histSymbol">Symbol</label>
-        <input id="histSymbol" placeholder="e.g. QQQ" style="text-transform:uppercase" maxlength="6">
-      </div>
-      <div class="field">
-        <label for="histSide">Side</label>
-        <select id="histSide">
-          <option value="">All</option>
-          <option value="BUY">Buy</option>
-          <option value="SELL">Sell</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="histStatus">Status</label>
-        <select id="histStatus">
-          <option value="">All</option>
-          <option value="PREVIEWED">Reviewed, not placed</option>
-          <option value="SUBMITTED">Submitted</option>
-          <option value="ACKNOWLEDGED">Acknowledged</option>
-          <option value="PARTIAL_FILL">Partially filled</option>
-          <option value="FILLED">Filled</option>
-          <option value="CANCELED">Canceled</option>
-          <option value="REJECTED">Rejected</option>
-          <option value="FAILED">Failed</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="histFrom">From</label>
-        <input id="histFrom" type="date">
-      </div>
-      <div class="field">
-        <label for="histTo">To</label>
-        <input id="histTo" type="date">
-      </div>
-      <div class="field-actions">
-        <button class="btn btn-primary" id="histApplyBtn">Filter</button>
-        <button class="btn btn-ghost" id="histResetBtn">Reset</button>
       </div>
     </div>
-    <div class="history-summary" id="historySummary"></div>
-    <div id="historyList"><div class="empty-note">Loading…</div></div>
-    <div class="history-pagination" id="historyPagination"></div>
-  </div>
+
+  </section>
+
+  <section class="tab-panel" data-tab-panel="strategies" hidden>
+
+    <div class="card">
+      <h2>My trading agent <span class="hint">hand it money, it trades your best strategies until you stop it</span></h2>
+      <div id="planStatus"><div class="skel-bar" style="width:100%;height:52px;border-radius:9px"></div></div>
+      <div id="startAgentForm">
+        <div class="field">
+          <label for="agentNotional">Amount per trade (USD)</label>
+          <input id="agentNotional" type="number" min="1" step="1" value="1000">
+        </div>
+        <button class="btn btn-primary" id="startAgentBtn">Start trading</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Suggested trades <span class="hint" id="signalsHint">found automatically, waiting for your review</span></h2>
+      <div id="signalsList">
+        <div class="skel-row"><div class="skel-lines"><div class="skel-bar" style="width:35%"></div><div class="skel-bar" style="width:60%"></div></div></div>
+      </div>
+    </div>
+
+    <div class="card strategies-card">
+      <h2>
+        Strategies you can follow
+        <span class="hint">checks the symbol in the order form above</span>
+      </h2>
+      <button class="btn btn-ghost" id="scanAllBtn" style="margin-top:0">Check all for new signals</button>
+      <div class="strategy-columns" id="strategyColumns"></div>
+    </div>
+
+    <div class="card live-updates-card">
+      <h2>How these strategies have performed <span class="hint" id="liveUpdatesHint">updates every few hours</span></h2>
+      <div class="lu-meta" id="liveUpdatesMeta">Loading…</div>
+      <div id="liveUpdatesBody"></div>
+      <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Update now</button>
+    </div>
+
+  </section>
+
+  <section class="tab-panel" data-tab-panel="journal" hidden>
+
+    <div class="card history-card">
+      <h2>Transaction history <span class="hint">every order you've ever placed, searchable</span></h2>
+      <div class="history-filters">
+        <div class="field">
+          <label for="histSymbol">Symbol</label>
+          <input id="histSymbol" placeholder="e.g. QQQ" style="text-transform:uppercase" maxlength="6">
+        </div>
+        <div class="field">
+          <label for="histSide">Side</label>
+          <select id="histSide">
+            <option value="">All</option>
+            <option value="BUY">Buy</option>
+            <option value="SELL">Sell</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="histStatus">Status</label>
+          <select id="histStatus">
+            <option value="">All</option>
+            <option value="PREVIEWED">Reviewed, not placed</option>
+            <option value="SUBMITTED">Submitted</option>
+            <option value="ACKNOWLEDGED">Acknowledged</option>
+            <option value="PARTIAL_FILL">Partially filled</option>
+            <option value="FILLED">Filled</option>
+            <option value="CANCELED">Canceled</option>
+            <option value="REJECTED">Rejected</option>
+            <option value="FAILED">Failed</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="histFrom">From</label>
+          <input id="histFrom" type="date">
+        </div>
+        <div class="field">
+          <label for="histTo">To</label>
+          <input id="histTo" type="date">
+        </div>
+        <div class="field-actions">
+          <button class="btn btn-primary" id="histApplyBtn">Filter</button>
+          <button class="btn btn-ghost" id="histResetBtn">Reset</button>
+          <button class="btn btn-ghost" id="histExportBtn">Export CSV</button>
+        </div>
+      </div>
+      <div class="history-summary" id="historySummary"></div>
+      <div id="historyList"><div class="empty-note">Loading…</div></div>
+      <div class="history-pagination" id="historyPagination"></div>
+    </div>
+
+    <div class="card">
+      <h2>Win/loss heatmap <span class="hint" id="heatmapHint">last 90 days</span></h2>
+      <div id="heatmapBody"><div class="empty-note">Loading…</div></div>
+    </div>
+
+  </section>
+
+  <section class="tab-panel" data-tab-panel="risk" hidden>
+
+    <div class="card">
+      <h2>Trading controls</h2>
+      <div class="ks-row">
+        <div class="ks-text">
+          <div class="t1" id="ksTitle">Trading is active</div>
+          <div class="t2" id="ksSub">New orders are allowed</div>
+        </div>
+        <button class="toggle" id="ksToggle" aria-label="Pause or resume trading"></button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Connection <span class="hint">where this dashboard gets its data</span></h2>
+      <div class="settings-field">
+        <label for="baseUrl">Server address</label>
+        <input class="base-url" id="baseUrl" spellcheck="false" title="Execution-Engine API base URL" style="max-width:none">
+      </div>
+      <div class="settings-field" style="margin-top:12px">
+        <label for="accountSelect">Account</label>
+        <select class="account-select" id="accountSelect" title="Account alias" style="width:100%"></select>
+      </div>
+      <div class="settings-field" style="margin-top:12px">
+        <label for="sigIntegrityUrl">Signal integrity server (optional)</label>
+        <input class="base-url" id="sigIntegrityUrl" spellcheck="false" title="signal-integrity-layer API base URL — leave blank to hide that section" placeholder="e.g. http://localhost:8100" style="max-width:none">
+      </div>
+    </div>
+
+    <div class="card sig-integrity-card" id="sigIntegrityCard" style="display:none">
+      <h2>Signal integrity <span class="hint">checks whether your AI agents agree, and whether they're up to date</span></h2>
+      <div class="history-summary" id="sigIntegritySummary">Loading…</div>
+      <div id="sigIntegrityList"></div>
+    </div>
+
+  </section>
 </div>
 
 <div class="overlay" id="approvalOverlay">
@@ -879,11 +970,22 @@
     refreshSignalIntegrity();
   });
 
-  // Technical connection details (server address, account alias) are
-  // tucked behind a gear icon rather than shown up front — a customer
-  // using one deployment day-to-day never needs to touch these; they
-  // exist for whoever set this deployment up.
-  $('settingsBtn').addEventListener('click', () => $('settingsPanel').classList.toggle('show'));
+  // Technical connection details (server address, account alias) live under the
+  // Risk & Settings tab — a customer using one deployment day-to-day never needs
+  // to touch these; they're there for whoever set this deployment up.
+
+  // ---- Tabbed navigation ----
+  // Everything in every tab keeps refreshing on its usual timer regardless of which
+  // tab is showing — nothing here is lazy-loaded — so switching tabs is instant.
+  const TAB_IDS = ['overview', 'terminal', 'strategies', 'journal', 'risk'];
+  function setActiveTab(tab) {
+    if (!TAB_IDS.includes(tab)) tab = 'overview';
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.tab-panel').forEach(p => { p.hidden = p.dataset.tabPanel !== tab; });
+    store.set('edge.activeTab', tab);
+  }
+  document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setActiveTab(b.dataset.tab)));
+  setActiveTab(store.get('edge.activeTab', 'overview'));
 
   function base() { return baseUrlInput.value.trim().replace(/\/$/, ''); }
   function account() { return accountSelect.value; }
@@ -1435,6 +1537,98 @@
     $('histFrom').value = ''; $('histTo').value = '';
     refreshHistory(true);
   });
+
+  // ---- Export CSV — everything matching the current filters, not just the visible page ----
+  const CSV_COLUMNS = ['created_at', 'symbol', 'instruction', 'quantity', 'order_type', 'limit_price',
+    'status', 'filled_quantity', 'average_fill_price', 'estimated_notional_usd', 'strategy_id', 'decision_id'];
+  function toCsvValue(v) {
+    if (v == null) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  $('histExportBtn').addEventListener('click', async () => {
+    const btn = $('histExportBtn');
+    btn.disabled = true; const original = btn.textContent; btn.textContent = 'Exporting…';
+    try {
+      const params = { ...historyFilterParams(), limit: 1000, offset: 0 }; // the filters, not the pagination
+      const query = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+      const r = await api(`/v1/orders?${query}`);
+      const orders = r.orders || [];
+      if (!orders.length) { toast('No orders match these filters — nothing to export'); return; }
+      const lines = [CSV_COLUMNS.join(',')].concat(orders.map(o => CSV_COLUMNS.map(c => toCsvValue(o[c])).join(',')));
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `orders-${account()}-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast(`Exported ${orders.length} order${orders.length === 1 ? '' : 's'}`);
+    } catch (e) {
+      toast('Could not export: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = original;
+    }
+  });
+
+  // ---- Win/loss heatmap ----
+  // A day is only colored win/loss when the API actually reports a realized P&L for that
+  // order (realized_pl_usd) — today that's only Sandbox Demo data. A real account's orders
+  // don't carry that field yet, so real days render as neutral "activity" cells rather than
+  // a fabricated win or loss: this dashboard never invents a profit/loss figure.
+  const HEATMAP_DAYS = 90;
+  // Local calendar day, not the UTC date substring — the transaction history above shows
+  // each order's time in the viewer's own timezone, so the heatmap groups by the same days
+  // that view is actually showing, rather than silently disagreeing near a UTC midnight.
+  function localDayKey(date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+  function computeHeatmapDays(orders) {
+    const byDay = {};
+    for (const o of orders) {
+      if ((o.status || '').toUpperCase() !== 'FILLED' || !o.created_at) continue;
+      const day = localDayKey(new Date(o.created_at.endsWith('Z') ? o.created_at : o.created_at + 'Z'));
+      const entry = byDay[day] || { count: 0, pnl: 0, hasPnl: false };
+      entry.count += 1;
+      if (o.realized_pl_usd != null) { entry.pnl += Number(o.realized_pl_usd); entry.hasPnl = true; }
+      byDay[day] = entry;
+    }
+    return byDay;
+  }
+  function renderHeatmap(byDay) {
+    const today = new Date();
+    const cells = [];
+    for (let i = HEATMAP_DAYS - 1; i >= 0; i--) {
+      const d = new Date(today); d.setDate(d.getDate() - i);
+      const key = localDayKey(d);
+      const entry = byDay[key];
+      let cls = 'heatmap-cell', title = `${key}: no filled orders`;
+      if (entry) {
+        title = `${key}: ${entry.count} filled order${entry.count === 1 ? '' : 's'}`;
+        if (entry.hasPnl) {
+          const magnitude = Math.abs(entry.pnl) >= 200 ? '' : ' light';
+          cls += entry.pnl >= 0 ? ' win' + magnitude : ' loss' + magnitude;
+          title += `, ${entry.pnl >= 0 ? '+' : '−'}${money(Math.abs(entry.pnl))}`;
+        }
+      }
+      cells.push(`<div class="${cls}" title="${title}"></div>`);
+    }
+    $('heatmapBody').innerHTML = `
+      <div class="heatmap-wrap"><div class="heatmap-grid">${cells.join('')}</div></div>
+      <div class="heatmap-legend">
+        <span><span class="heatmap-cell loss"></span> loss</span>
+        <span><span class="heatmap-cell"></span> no P&amp;L data</span>
+        <span><span class="heatmap-cell win"></span> profit</span>
+      </div>`;
+  }
+  async function refreshHeatmap() {
+    try {
+      const query = `account=${encodeURIComponent(account())}&limit=200&status=FILLED`;
+      const r = await api(`/v1/orders?${query}`);
+      renderHeatmap(computeHeatmapDays(r.orders || []));
+    } catch (e) {
+      $('heatmapBody').innerHTML = '<div class="empty-note">Heatmap unavailable right now.</div>';
+    }
+  }
   // Enter key in any filter field applies immediately, same as the Filter button.
   ['histSymbol', 'histFrom', 'histTo'].forEach(id => {
     $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refreshHistory(true); });
@@ -2088,6 +2282,7 @@
     };
     renderPlanBanner();
     $('verdictBox').innerHTML = '';
+    setActiveTab('terminal'); // the order form lives there now
     document.getElementById('fSymbol').closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
     toast(`${signal.symbol} · ${signal.strategy_name} added to your order form below`);
   }
@@ -2450,6 +2645,16 @@
       <div class="lu-section-title">Recent automatic trades</div>
       ${activityRows}
     `;
+
+    // A compact copy of the same chart lives on the Overview tab — same cached data, just
+    // without the per-pair breakdown, so glancing at Overview still shows how things are going.
+    const overviewEl = $('overviewEquityCurve');
+    if (overviewEl) {
+      overviewEl.innerHTML = combined
+        ? buildEquityChartSvg(combined.equity_curve, s.avg_benchmark_return_pct) +
+          `<div class="lu-cost-note">${combined.total_return_pct >= 0 ? '+' : ''}${combined.total_return_pct.toFixed(2)}% combined return · ${money(combined.ending_capital)} ending balance</div>`
+        : '<div class="empty-note">Not enough data yet.</div>';
+    }
   }
 
   async function refreshLiveUpdates(force) {
@@ -2501,6 +2706,7 @@
     refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
     refreshPositions(); refreshFeed(); refreshKillSwitch(); refreshSignals(); refreshDailyPlan();
     refreshWatchlists(); refreshAlerts(); refreshBracketOrders(); refreshSignalIntegrity();
+    refreshHeatmap();
   }
   refreshAll();
   loadStrategies();
