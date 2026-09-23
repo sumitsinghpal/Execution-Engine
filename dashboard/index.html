@@ -947,6 +947,7 @@
       <div class="settings-field">
         <label for="baseUrl">Server address</label>
         <input class="base-url" id="baseUrl" spellcheck="false" title="Execution-Engine API base URL" style="max-width:none">
+        <div id="baseUrlError" class="field-hint" style="display:none; color:var(--crit); margin:4px 0 0"></div>
       </div>
       <div class="settings-field" style="margin-top:12px">
         <label for="accountSelect">Account</label>
@@ -1030,7 +1031,26 @@
 
   const baseUrlInput = $('baseUrl');
   baseUrlInput.value = store.get('edge.baseUrl', DEFAULT_API_URL);
-  baseUrlInput.addEventListener('change', () => { store.set('edge.baseUrl', baseUrlInput.value.trim()); refreshAll(); });
+  function isValidBaseUrl(value) {
+    try {
+      const u = new URL(value);
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch { return false; }
+  }
+  baseUrlInput.addEventListener('change', () => {
+    const value = baseUrlInput.value.trim();
+    const errorEl = $('baseUrlError');
+    if (!isValidBaseUrl(value)) {
+      errorEl.textContent = "That's not a full address — it needs to start with http:// or https://";
+      errorEl.style.display = '';
+      baseUrlInput.value = store.get('edge.baseUrl', DEFAULT_API_URL);
+      toast('Invalid server address — kept your previous one');
+      return;
+    }
+    errorEl.style.display = 'none';
+    store.set('edge.baseUrl', value);
+    refreshAll();
+  });
 
   const accountSelect = $('accountSelect');
   ['primary', 'retirement', 'paper', 'schwab_live'].forEach(a => {
