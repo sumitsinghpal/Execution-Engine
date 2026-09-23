@@ -488,6 +488,60 @@
   .l2-mid-price.tick-down { color: var(--sell); }
   .l2-spread { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); }
 
+  /* Ticker marquee — global chrome, visible on every tab. Every number in it is a
+     simulated random walk (see marqueeTick()), never a real market data feed, hence
+     the fixed, non-scrolling "SIM" badge at all times — it never scrolls out of view. */
+  .ticker-marquee-wrap {
+    display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+    padding: 8px 0; overflow: hidden;
+  }
+  .ticker-badge {
+    flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; color: var(--warn);
+    background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+    border-radius: 999px; padding: 4px 9px; margin-left: 12px;
+  }
+  .ticker-marquee-viewport { flex: 1 1 auto; overflow: hidden; }
+  .ticker-marquee { display: flex; width: max-content; animation: ticker-scroll 32s linear infinite; }
+  @keyframes ticker-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  @media (prefers-reduced-motion: reduce) { .ticker-marquee { animation: none; } }
+  .ticker-item {
+    display: inline-flex; align-items: baseline; gap: 6px; padding: 0 18px;
+    font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--ink-muted);
+    border-right: 1px solid var(--border); white-space: nowrap; transition: color .3s;
+  }
+  .ticker-item b { font-weight: 700; }
+  .ticker-item.up { color: var(--buy); }
+  .ticker-item.down { color: var(--sell); }
+  .ticker-item.pulse-up { animation: pulse-flash-up .8s ease-out; }
+  .ticker-item.pulse-down { animation: pulse-flash-down .8s ease-out; }
+  @keyframes pulse-flash-up { 0% { color: #fff; text-shadow: 0 0 10px var(--buy); } 100% { color: var(--buy); text-shadow: none; } }
+  @keyframes pulse-flash-down { 0% { color: #fff; text-shadow: 0 0 10px var(--sell); } 100% { color: var(--sell); text-shadow: none; } }
+  @media (prefers-reduced-motion: reduce) { .ticker-item.pulse-up, .ticker-item.pulse-down { animation: none; } }
+
+  /* Sector heatmap — a Finviz-style treemap of simulated performance, always labeled
+     as simulated (see the card's own badge). Tile area is proportional to each
+     symbol's (illustrative) market cap; color runs red -> black -> green with the
+     move's size. Real sector/quote data would replace demoSector*() wholesale. */
+  .sector-group { margin-bottom: 14px; }
+  .sector-group-label { font-size: 11.5px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+  .sector-tiles { display: flex; flex-wrap: wrap; gap: 4px; }
+  .sector-tile {
+    flex: 1 1 auto; min-width: 92px; border-radius: var(--radius-sm); padding: 10px 12px;
+    cursor: pointer; border: 1px solid var(--border); transition: transform .1s, filter .1s;
+    color: #fff; font-family: var(--font-mono);
+  }
+  .sector-tile:hover { filter: brightness(1.18); transform: translateY(-1px); }
+  .sector-tile .sym { display: block; font-weight: 800; font-size: 14px; }
+  .sector-tile .chg { display: block; font-size: 12px; margin-top: 2px; opacity: .92; }
+
+  /* Gainers & losers — the same simulated sector universe, just ranked. */
+  .movers-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: 13px; }
+  .movers-row:last-child { border-bottom: none; }
+  .movers-row .sym { font-weight: 700; color: var(--ink); }
+  .movers-row .chg.up { color: var(--buy); }
+  .movers-row .chg.down { color: var(--sell); }
+
   /* Live updates card */
   .live-updates-card { margin-top: 18px; }
 
@@ -659,6 +713,11 @@
   </div>
 
   <div class="mode-banner" id="modeBanner" style="display:none"></div>
+
+  <div class="ticker-marquee-wrap">
+    <span class="ticker-badge">🧪 SIM</span>
+    <div class="ticker-marquee-viewport"><div class="ticker-marquee" id="tickerMarquee"></div></div>
+  </div>
 
   <nav class="tabbar" id="tabbar">
     <button class="tab-btn" data-tab="terminal" type="button">Terminal</button>
@@ -901,18 +960,20 @@
   <section class="tab-panel" data-tab-panel="scanner" hidden>
 
     <div class="card">
-      <h2>Sector heatmap <span class="hint">relative sector performance today</span></h2>
-      <div class="empty-note">Execution-Engine's API doesn't provide sector-level market data today, so there's no heatmap to show here — this is a placeholder for when that data exists, not simulated numbers.</div>
+      <h2>Sector heatmap <span class="hint">simulated performance — click a tile to chart it</span></h2>
+      <div class="l2-badge">🧪 Simulated — no live sector/quote feed connected; tile size is illustrative market cap, not real-time data</div>
+      <div id="sectorHeatmap"></div>
     </div>
 
     <div class="card">
       <h2>Gainers &amp; losers <span class="hint">today's biggest movers</span></h2>
-      <div class="empty-note">No market-wide gainers/losers feed is connected yet — this is a placeholder for when that data exists, not simulated numbers.</div>
+      <div class="l2-badge">🧪 Simulated — ranked from the same sample universe as the heatmap above</div>
+      <div id="moversList"></div>
     </div>
 
     <div class="card">
       <h2>News <span class="hint">headlines that might move your positions</span></h2>
-      <div class="empty-note">No news feed is connected yet — this is a placeholder for when that data exists.</div>
+      <div class="empty-note">No news feed is connected yet, so there's nothing shown here rather than invented headlines. When one is connected, each item will show a timestamp, ticker tag, headline, sentiment badge, and source.</div>
     </div>
 
   </section>
@@ -1224,8 +1285,9 @@
   // that base — enough to feel live without a real market data feed.
   const DEMO_BASE_PRICES = {
     QQQ: 505, SPY: 565, IWM: 215, EEM: 42, GLD: 245, TLT: 92, VNQ: 88, HYG: 79, LQD: 108,
-    XLK: 225, XLF: 46, XLE: 88, XLV: 145, XLY: 195, XLP: 78,
+    XLK: 225, XLF: 46, XLE: 88, XLV: 145, XLY: 195, XLP: 78, DIA: 425, 'BTC-USD': 95000,
     NVDA: 875, TSLA: 245, AAPL: 228, MSFT: 425, AMZN: 185, GOOGL: 165, META: 565,
+    AMD: 155, TSM: 185, AVGO: 175, JPM: 215, BAC: 42, XOM: 118, CVX: 158,
   };
   function demoBasePrice(symbol) {
     if (DEMO_BASE_PRICES[symbol]) return DEMO_BASE_PRICES[symbol];
@@ -3133,6 +3195,97 @@
     scalperPlaceMarketOrder(symbol, held, false);
   });
 
+  // ---- Market Scanner: ticker marquee + sector heatmap + gainers/losers ----
+  // Every number here is a simulated random walk, clearly badged as such wherever it
+  // appears — never a real quote or index feed. News is deliberately NOT simulated:
+  // fabricated headlines/sources are a different, riskier kind of fake than a made-up
+  // percentage, so that card stays an honest empty state until a real feed exists.
+  const MARQUEE_SYMBOLS = ['SPY', 'QQQ', 'DIA', 'NVDA', 'TSLA', 'AAPL', 'BTC-USD'];
+  const marqueePct = {};
+  let marqueePrevPct = {};
+  function marqueeLabel(symbol) { return symbol === 'BTC-USD' ? 'BTC/USD' : symbol; }
+  function tickPct(symbol, maxAbsPct, stepPct) {
+    const prev = symbol in marqueePct ? marqueePct[symbol] : (Math.random() - 0.5) * maxAbsPct;
+    return Math.max(-maxAbsPct, Math.min(maxAbsPct, prev + (Math.random() - 0.5) * stepPct));
+  }
+  function renderMarquee() {
+    const prev = marqueePrevPct;
+    MARQUEE_SYMBOLS.forEach(symbol => { marqueePct[symbol] = tickPct(symbol, 5, 0.15); });
+    const item = (symbol) => {
+      const pct = marqueePct[symbol];
+      const up = pct >= 0;
+      const pulse = prev[symbol] == null ? '' : pct > prev[symbol] ? 'pulse-up' : pct < prev[symbol] ? 'pulse-down' : '';
+      return `<span class="ticker-item ${up ? 'up' : 'down'} ${pulse}">${marqueeLabel(symbol)} <b class="num">${up ? '+' : ''}${pct.toFixed(2)}%</b></span>`;
+    };
+    const row = MARQUEE_SYMBOLS.map(item).join('');
+    $('tickerMarquee').innerHTML = row + row; // duplicated once so the CSS scroll loop has no visible seam
+    marqueePrevPct = { ...marqueePct };
+  }
+  setInterval(renderMarquee, 2500);
+
+  const SECTOR_GROUPS = [
+    { name: 'Mega-Cap Tech', symbols: ['NVDA', 'MSFT', 'AAPL', 'AMZN', 'GOOGL', 'META'] },
+    { name: 'Semiconductors', symbols: ['AMD', 'TSM', 'AVGO'] },
+    { name: 'Financials', symbols: ['JPM', 'BAC'] },
+    { name: 'Energy', symbols: ['XOM', 'CVX'] },
+  ];
+  // Illustrative market caps ($B) — only used to size heatmap tiles, not a real feed.
+  const SECTOR_MARKET_CAP_B = { NVDA: 3300, MSFT: 3100, AAPL: 3400, AMZN: 1900, GOOGL: 2100, META: 1400, AMD: 220, TSM: 950, AVGO: 800, JPM: 600, BAC: 320, XOM: 480, CVX: 280 };
+  const sectorPct = {};
+  function tickSectorPcts() {
+    SECTOR_GROUPS.forEach(g => g.symbols.forEach(symbol => { sectorPct[symbol] = tickPct(symbol, 4, 0.2); }));
+  }
+  function heatmapColor(pct) {
+    const clamped = Math.max(-3, Math.min(3, pct));
+    return clamped >= 0
+      ? `color-mix(in srgb, #05070a ${100 - (clamped / 3) * 100}%, var(--buy) ${(clamped / 3) * 100}%)`
+      : `color-mix(in srgb, #05070a ${100 - (-clamped / 3) * 100}%, var(--sell) ${(-clamped / 3) * 100}%)`;
+  }
+  function chartSymbolFromScanner(symbol) {
+    $('chartSymbol').value = symbol;
+    store.set('edge.chartSymbol', symbol);
+    loadChart(symbol);
+    renderL2();
+    setActiveTab('terminal');
+    toast(`Charting ${symbol}`);
+  }
+  function renderSectorHeatmap() {
+    const el = $('sectorHeatmap');
+    if (!el) return;
+    el.innerHTML = SECTOR_GROUPS.map(g => {
+      const tiles = g.symbols.map(symbol => {
+        const pct = sectorPct[symbol] || 0;
+        const cap = SECTOR_MARKET_CAP_B[symbol] || 100;
+        return `<div class="sector-tile" data-symbol="${symbol}" style="flex-grow:${Math.sqrt(cap)}; background:${heatmapColor(pct)}">
+          <span class="sym">${symbol}</span><span class="chg num">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>
+        </div>`;
+      }).join('');
+      return `<div class="sector-group"><div class="sector-group-label">${g.name}</div><div class="sector-tiles">${tiles}</div></div>`;
+    }).join('');
+    el.querySelectorAll('.sector-tile').forEach(tile => {
+      tile.addEventListener('click', () => chartSymbolFromScanner(tile.dataset.symbol));
+    });
+  }
+  function renderMovers() {
+    const el = $('moversList');
+    if (!el) return;
+    const all = SECTOR_GROUPS.flatMap(g => g.symbols).map(symbol => ({ symbol, pct: sectorPct[symbol] || 0 }));
+    all.sort((a, b) => b.pct - a.pct);
+    const gainers = all.slice(0, 3);
+    const losers = all.slice(-3).reverse();
+    const row = (r) => `<div class="movers-row"><span class="sym">${r.symbol}</span><span class="chg num ${r.pct >= 0 ? 'up' : 'down'}">${r.pct >= 0 ? '+' : ''}${r.pct.toFixed(2)}%</span></div>`;
+    el.innerHTML = `
+      <div class="sector-group-label">Gainers</div>${gainers.map(row).join('')}
+      <div class="sector-group-label" style="margin-top:10px">Losers</div>${losers.map(row).join('')}
+    `;
+  }
+  function refreshScanner() {
+    tickSectorPcts();
+    renderSectorHeatmap();
+    renderMovers();
+  }
+  setInterval(refreshScanner, 4000);
+
   // ---- Live updates: 3-year backtest at a $1000-per-trade notional
   // (POST /v1/backtest/run, every DAILY-bar strategy in the catalog ×
   // QQQ/SPY/IWM) plus recent autonomous-trader activity, cached in
@@ -3412,6 +3565,8 @@
   loadStrategies();
   initChart();
   renderL2();
+  renderMarquee();
+  refreshScanner();
   refreshLiveUpdates(false);
   refreshHistory(true);
   loadFxRates();
