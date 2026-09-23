@@ -2486,6 +2486,12 @@
     const lo = Math.min(...values), hi = Math.max(...values);
     const span = (hi - lo) || 1;
     const pctOf = (v) => ((v - lo) / span) * 100;
+    const qty = parseInt($('fQty').value, 10) || 0;
+    const riskDollars = risk * qty;
+    const rewardDollars = reward * qty;
+    const label = qty > 0
+      ? `Risk ${money(riskDollars)} to make ${money(rewardDollars)} — R:R 1:${ratio.toFixed(1)}`
+      : `R:R = ${ratio.toFixed(1)}x`;
     el.style.display = '';
     el.innerHTML = `
       <div class="rr-track">
@@ -2493,7 +2499,7 @@
         <div class="rr-marker entry" style="left:${pctOf(entry)}%"><span class="rr-dot"></span><span class="rr-label">Entry<br><b>${money(entry)}</b></span></div>
         <div class="rr-marker target" style="left:${pctOf(target)}%"><span class="rr-dot"></span><span class="rr-label">Target<br><b>${money(target)}</b></span></div>
       </div>
-      <div class="rr-ratio ${ratio >= 2 ? 'up' : 'down'}">R:R = ${ratio.toFixed(1)}x</div>
+      <div class="rr-ratio ${ratio >= 2 ? 'up' : 'down'}">${label}</div>
     `;
   }
 
