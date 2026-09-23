@@ -3,7 +3,41 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EDGE Trading</title>
+<title>EDGE Trading | Automated Algorithmic Execution for Charles Schwab</title>
+<meta name="description" content="Execute algorithmic strategies, manage portfolio risk, and automate bracket orders with Charles Schwab Trader API integration.">
+<link rel="canonical" href="https://edge-trading-dashboard-app.vercel.app/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="EDGE Trading">
+<meta property="og:title" content="EDGE Trading | Automated Algorithmic Execution for Charles Schwab">
+<meta property="og:description" content="Execute algorithmic strategies, manage portfolio risk, and automate bracket orders with Charles Schwab Trader API integration.">
+<meta property="og:url" content="https://edge-trading-dashboard-app.vercel.app/">
+<meta property="og:image" content="https://edge-trading-dashboard-app.vercel.app/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="EDGE Trading | Automated Algorithmic Execution for Charles Schwab">
+<meta name="twitter:description" content="Execute algorithmic strategies, manage portfolio risk, and automate bracket orders with Charles Schwab Trader API integration.">
+<meta name="twitter:image" content="https://edge-trading-dashboard-app.vercel.app/og-image.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "EDGE Trading Platform",
+  "applicationCategory": "FinanceApplication",
+  "operatingSystem": "Web",
+  "description": "Execute algorithmic strategies, manage portfolio risk, and automate bracket orders with Charles Schwab Trader API integration.",
+  "url": "https://edge-trading-dashboard-app.vercel.app/",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
+
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
 <style>
   /* Dark is this product's look, full stop — like every trading terminal it takes cues
@@ -691,6 +725,14 @@
   /* System-metric accents (indigo) — informational counters that are neither a buy/sell nor a warning. */
   .stat-value.system { color: var(--system); }
   .pill.system { color: var(--system); border-color: color-mix(in srgb, var(--system) 35%, var(--border)); background: var(--system-soft); }
+
+  /* Footer — present on every tab (outside the tab-panel elements, inside .shell) */
+  .site-footer { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .site-footer-copyright { font-size: 12px; color: var(--ink-muted); margin: 0 0 10px; }
+  .site-footer-disclaimer { font-size: 11px; line-height: 1.6; color: var(--ink-faint); margin: 0 0 14px; max-width: 640px; }
+  .site-footer-links { font-size: 12px; margin: 0; }
+  .site-footer-links a { color: var(--ink-muted); text-decoration: none; }
+  .site-footer-links a:hover { color: var(--ink); text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -1112,6 +1154,21 @@
     </div>
 
   </section>
+
+  <footer class="site-footer">
+    <p class="site-footer-copyright">© <span id="footerYear">2026</span> EDGE Trading. All rights reserved.</p>
+    <p class="site-footer-disclaimer">
+      Trading involves substantial risk of loss and is not suitable for every investor. Nothing in this
+      application is financial, investment, or trading advice — Paper Trading uses simulated data only, and a
+      live-connected account executes real orders with real money at your own risk. Past performance of any
+      strategy shown here is not indicative of future results. "Charles Schwab" and "Schwab" are trademarks of
+      The Charles Schwab Corporation; EDGE Trading integrates with the Schwab Trader API but is not affiliated
+      with, endorsed by, or sponsored by Charles Schwab.
+    </p>
+    <p class="site-footer-links">
+      <a href="https://github.com/sumitsinghpal/Execution-Engine" target="_blank" rel="noopener">Documentation &amp; source (GitHub)</a>
+    </p>
+  </footer>
 </div>
 
 <div class="overlay" id="approvalOverlay">
@@ -3729,6 +3786,7 @@
   refreshHistory(true);
   loadFxRates();
   schedulePoll(0);
+  $('footerYear').textContent = String(new Date().getFullYear());
 })();
 </script>
 </body>
