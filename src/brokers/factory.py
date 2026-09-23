@@ -59,6 +59,7 @@ def _cache_key(settings: Settings) -> tuple:
         settings.schwab_retry_backoff_sec,
         settings.schwab_rate_limit_per_minute,
         settings.schwab_max_retry_after_sec,
+        settings.schwab_token_file,
     )
 
 
@@ -84,6 +85,7 @@ def build_broker_adapter(settings: Settings, mock_broker: bool = False) -> Broke
                 redirect_uri=settings.schwab_redirect_uri,
                 refresh_token=settings.schwab_refresh_token,
                 timeout_sec=settings.schwab_api_timeout_sec,
+                token_file=settings.schwab_token_file,
             )
             adapter = SchwabBrokerAdapter(
                 oauth,

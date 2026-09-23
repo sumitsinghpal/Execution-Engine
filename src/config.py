@@ -26,7 +26,11 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./execution_engine.db"
     
-    # Execution mode defaults to non-live simulation. LIVE is not implemented.
+    # Execution mode defaults to non-live simulation. Even with a Schwab account
+    # profile configured, a real order only reaches Schwab when execution_mode is
+    # not PAPER/SHADOW (see build_broker_adapter) AND that profile's own
+    # live_enabled is True (see schwab_live_trading_enabled below) — two
+    # independent switches, so enabling one alone changes nothing.
     execution_mode: str = "PAPER"
 
     # Account aliases prevent EDGE-TF callers from providing raw broker account IDs.
@@ -43,6 +47,10 @@ class Settings(BaseSettings):
     schwab_app_secret: Optional[str] = None
     schwab_refresh_token: Optional[str] = None
     schwab_redirect_uri: Optional[str] = None
+    # Where a refresh token Schwab rotates at runtime gets persisted so it
+    # survives a container restart — this value only reflects whatever was
+    # true at the last manual OAuth bootstrap. See SchwabOAuthClient.
+    schwab_token_file: str = ".schwab_token.json"
 
     # The plain Schwab account number to trade against — never a hash,
     # which is looked up automatically (see
@@ -54,6 +62,14 @@ class Settings(BaseSettings):
     # and allowing it to trade are deliberately separate steps.
     schwab_account_number: Optional[str] = None
     schwab_account_alias: str = "schwab_live"
+    # The explicit per-deployment opt-in for real order submission, separate from
+    # every other Schwab config above (which is also needed for read-only data
+    # and preview). Defaults to False: setting SCHWAB_APP_KEY/SECRET/REFRESH_TOKEN
+    # alone is NOT enough to place a live order — this must also be set to true,
+    # and even then only affects the auto-registered schwab_account_alias profile
+    # below; any other AccountProfile still defaults live_enabled=False unless
+    # constructed with it explicitly. See SchwabBrokerAdapter.submit_order().
+    schwab_live_trading_enabled: bool = False
 
     # Kill switch
     kill_switch_enabled: bool = False
@@ -69,6 +85,16 @@ class Settings(BaseSettings):
         default="QQQ,SPY,IWM,EEM,GLD,TLT", validation_alias="SYMBOL_ALLOWLIST"
     )
     symbol_denylist_raw: str = Field(default="", validation_alias="SYMBOL_DENYLIST")
+
+    # Browser origins allowed to call this API cross-origin (comma-separated). The
+    # deployed dashboard plus both local-dev ports it can run on by default — add
+    # a self-hosted dashboard's own origin here rather than widening this to "*",
+    # which would let any page on the internet call this API using a visitor's
+    # browser as long as they also had the admin key.
+    cors_allowed_origins_raw: str = Field(
+        default="https://edge-trading-dashboard-app.vercel.app,http://localhost:3000,http://localhost:8000",
+        validation_alias="CORS_ALLOWED_ORIGINS",
+    )
     
     # Risk limits
     max_order_notional_usd: Decimal = Decimal("100000")
@@ -258,7 +284,9 @@ class Settings(BaseSettings):
             self.account_profiles = {
                 **self.account_profiles,
                 self.schwab_account_alias: AccountProfile(
-                    broker=BrokerName.SCHWAB, credential_profile="schwab_main"
+                    broker=BrokerName.SCHWAB,
+                    credential_profile="schwab_main",
+                    live_enabled=self.schwab_live_trading_enabled,
                 ),
             }
         return self
@@ -304,6 +332,14 @@ class Settings(BaseSettings):
     @property
     def symbol_denylist(self) -> list[str]:
         return self._split_csv(self.symbol_denylist_raw)
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        return self._split_csv(self.cors_allowed_origins_raw)
+
+    @cors_allowed_origins.setter
+    def cors_allowed_origins(self, value: list[str]) -> None:
+        self.cors_allowed_origins_raw = ",".join(value)
 
     @symbol_denylist.setter
     def symbol_denylist(self, value: list[str]) -> None:

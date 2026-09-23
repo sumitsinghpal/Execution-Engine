@@ -58,6 +58,9 @@ logs/
 .env.local
 .env.*.local
 
+# Persisted Schwab OAuth refresh token (see SchwabOAuthClient) — a live credential, never committed
+.schwab_token.json
+
 # OS
 .DS_Store
 Thumbs.db

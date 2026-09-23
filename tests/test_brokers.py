@@ -38,6 +38,12 @@ def schwab_transport(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"securitiesAccount": {"currentBalances": {"cashAvailableForTrading": 1000}}})
     if request.url.path == "/trader/v1/accounts/account-hash/orders/42":
         return httpx.Response(200, json={"orderId": "42", "status": "WORKING"})
+    if request.url.path == "/trader/v1/accounts/account-hash/orders" and request.method == "POST":
+        # Schwab's real success shape: HTTP 201, empty body, the new order's ID
+        # only in the Location header — never JSON.
+        return httpx.Response(
+            201, headers={"Location": "https://api.schwabapi.com/trader/v1/accounts/account-hash/orders/98765"}
+        )
     if request.url.path == "/marketdata/v1/QQQ/quotes":
         return httpx.Response(
             200,
@@ -388,12 +394,54 @@ async def test_schwab_get_quote_parses_marketdata_response(
 
 
 @pytest.mark.asyncio
-async def test_schwab_live_submission_is_hard_blocked(
+async def test_schwab_submit_order_blocked_without_live_enabled(
     schwab_adapter: SchwabBrokerAdapter, schwab_profile: AccountProfile
 ) -> None:
-    """No code path may submit a live Schwab order in this release."""
+    """schwab_profile has live_enabled=False — submission must refuse before ever calling Schwab."""
+    assert schwab_profile.live_enabled is False
     with pytest.raises(LiveTradingDisabledError):
         await schwab_adapter.submit_order(schwab_profile, {"orderId": "decision-1"})
+
+
+@pytest.mark.asyncio
+async def test_schwab_submit_order_places_real_order_when_live_enabled(
+    schwab_adapter: SchwabBrokerAdapter,
+) -> None:
+    """
+    The one path that must work correctly for real money to move: translate the
+    order, POST it, and parse the new order's ID out of the Location header
+    (Schwab's actual success shape — HTTP 201, empty body, no JSON order ID).
+    """
+    live_profile = AccountProfile(
+        broker=BrokerName.SCHWAB, credential_profile="schwab_main", account_hash="account-hash", live_enabled=True
+    )
+    receipt = await schwab_adapter.submit_order(
+        live_profile,
+        {"orderId": "decision-1", "symbol": "QQQ", "assetType": "ETF", "quantity": 1, "instruction": "BUY",
+         "orderType": "LIMIT", "limitPrice": "270"},
+    )
+    assert receipt["orderId"] == "98765"
+    assert receipt["status"] == "SUBMITTED"
+    assert receipt["symbol"] == "QQQ"
+    # A real broker never fills synchronously — Executor only advances an order
+    # past SUBMITTED when these are present, so they must not be here.
+    assert "filledQuantity" not in receipt
+    assert "averageFillPrice" not in receipt
+
+
+def test_schwab_extract_order_id_from_location_rejects_missing_header() -> None:
+    """A missing/unparseable Location header must raise, never return a guessed or empty order ID."""
+    with pytest.raises(BrokerError):
+        SchwabBrokerAdapter._extract_order_id_from_location(None)
+    with pytest.raises(BrokerError):
+        SchwabBrokerAdapter._extract_order_id_from_location("https://api.schwabapi.com/trader/v1/accounts/x/orders/")
+
+
+def test_schwab_extract_order_id_from_location_parses_trailing_segment() -> None:
+    order_id = SchwabBrokerAdapter._extract_order_id_from_location(
+        "https://api.schwabapi.com/trader/v1/accounts/account-hash/orders/98765"
+    )
+    assert order_id == "98765"
 
 
 class TestSchwabAccountHashAutoResolution:

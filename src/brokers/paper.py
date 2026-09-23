@@ -220,8 +220,10 @@ class PaperBrokerAdapter(BrokerAdapter):
         Executor.execute_order(), which reads these fields when present.
 
         Real brokers (Schwab) don't get this treatment: SchwabBrokerAdapter
-        .submit_order() is hard-blocked regardless (LiveTradingDisabledError),
-        so this only ever changes PAPER-mode behavior.
+        .submit_order() reports "SUBMITTED" only and leaves the real fill to be
+        discovered later via get_order_status() polling, since a real order
+        never fills synchronously at submission time — this instant-fill
+        shortcut is specific to PAPER mode having no real market to fill against.
         """
         quantity = order_spec.get("quantity", 0)
         fill_price = float(order_spec.get("limitPrice") or 0)

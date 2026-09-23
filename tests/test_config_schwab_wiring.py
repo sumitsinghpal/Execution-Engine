@@ -14,8 +14,10 @@ from src.config import Settings
 
 
 def _settings(**overrides) -> Settings:
-    """A hermetic Settings instance ignoring any local .env, like the test_settings fixture does."""
-    defaults = dict(_env_file=None, env="test")
+    """A hermetic Settings instance ignoring any local .env, like the test_settings fixture does.
+    schwab_token_file defaults to disabled here so building a Schwab adapter in these tests never
+    reads or writes a real file on disk (see SchwabOAuthClient's own tests for that behavior)."""
+    defaults = dict(_env_file=None, env="test", schwab_token_file="")
     defaults.update(overrides)
     return Settings(**defaults)
 
@@ -37,6 +39,15 @@ class TestSchwabAccountAliasAutoRegistration:
         settings = _settings(schwab_account_number="99999", schwab_account_alias="my_schwab")
         assert "my_schwab" in settings.account_profiles
         assert "schwab_live" not in settings.account_profiles
+
+    def test_auto_registered_alias_defaults_live_disabled(self):
+        """Configuring Schwab at all must never itself permit a real order."""
+        settings = _settings(schwab_account_number="99999")
+        assert settings.account_profiles["schwab_live"].live_enabled is False
+
+    def test_schwab_live_trading_enabled_flag_propagates_to_the_alias(self):
+        settings = _settings(schwab_account_number="99999", schwab_live_trading_enabled=True)
+        assert settings.account_profiles["schwab_live"].live_enabled is True
 
     def test_an_explicitly_preconfigured_alias_is_not_overwritten(self):
         """A caller that already populated account_profiles for this alias wins over auto-registration."""

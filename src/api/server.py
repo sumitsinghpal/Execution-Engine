@@ -79,13 +79,14 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Local-dev CORS: permissive so the operator widget (served from a different
-# port) can call this API directly from the browser. Tighten this to a named
-# allowlist of origins before this is ever deployed anywhere reachable
-# outside localhost.
+# Named origin allowlist (CORS_ALLOWED_ORIGINS in .env) — not "*", which would
+# let any page on the internet call this API using a visitor's own browser as
+# long as they also had the admin key. Defaults to the deployed dashboard plus
+# both local-dev ports it can run on; a self-hosted dashboard adds its own
+# origin here rather than this being widened back to "*".
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_settings().cors_allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

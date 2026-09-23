@@ -1,7 +1,11 @@
 """Account-scoped Schwab Trader API adapter.
 
-This adapter intentionally provides only read-only calls and order preview. Live
-order submission is blocked until a separately reviewed release enables it.
+submit_order() places a REAL order against a REAL Schwab account — real money,
+not a simulation — enabled deliberately after LiveTradingDisabledError was
+removed following an explicit decision to turn this on (see the git history
+for src/brokers/schwab/adapter.py around that change). Everything else in this
+adapter (quotes, positions, balances, preview) was already live-data-capable
+before that; submission was the one call intentionally held back.
 """
 
 import asyncio
@@ -118,9 +122,73 @@ class SchwabBrokerAdapter(BrokerAdapter):
         return float(Decimal(str(price)) * Decimal(order_spec["quantity"]) * multiplier)
 
     async def submit_order(self, profile: AccountProfile, order_spec: dict[str, Any]) -> dict[str, Any]:
-        raise LiveTradingDisabledError(
-            "Live Schwab order submission is intentionally disabled; use PAPER mode until separately enabled"
+        """
+        Submit a LIVE order to Schwab — real money, real fills. Schwab's order
+        endpoint returns HTTP 201 with an EMPTY body on success; the new order's
+        ID lives only in the Location response header
+        (".../accounts/{hash}/orders/{orderId}"), so this is the one call site
+        that needs _request()'s raw headers instead of just its JSON body.
+
+        Deliberately reports status "SUBMITTED" only, with no filledQuantity or
+        averageFillPrice — unlike PaperBrokerAdapter (see its submit_order()
+        docstring), a real broker never fills synchronously at submission time.
+        Executor.execute_order() only advances an order past SUBMITTED when a
+        broker response says so; a real fill is discovered later by
+        PositionReconciliationService polling get_order_status(). Inventing a
+        fill here would be reporting a trade result this call never actually
+        observed.
+
+        Gated independently of everything else that must already be true to
+        reach this line (execution_mode not PAPER/SHADOW, a resolved Schwab
+        profile, a valid refresh token): this specific account profile's own
+        live_enabled must also be True. Two switches, not one — enabling Schwab
+        for read-only data/preview does not, by itself, ever permit a real
+        order for any account until this is opted into explicitly too.
+        """
+        if not profile.live_enabled:
+            raise LiveTradingDisabledError(
+                f"Live order submission is not enabled for this account profile "
+                f"(credential_profile={profile.credential_profile!r}) — set live_enabled=True "
+                f"(SCHWAB_LIVE_TRADING_ENABLED=true for the auto-registered alias) to allow it."
+            )
+        schwab_order = to_schwab_order(order_spec)
+        account_hash = await self._resolve_account_hash(profile)
+        _, headers = await self._request(
+            "POST", f"/accounts/{account_hash}/orders", json=schwab_order, return_headers=True
         )
+        order_id = self._extract_order_id_from_location(headers.get("Location"))
+        logger.warning(
+            "schwab_live_order_submitted",
+            account_hash=account_hash,
+            symbol=order_spec.get("symbol"),
+            instruction=order_spec.get("instruction"),
+            quantity=order_spec.get("quantity"),
+            broker_order_id=order_id,
+        )
+        return {
+            "orderId": order_id,
+            "status": "SUBMITTED",
+            "symbol": order_spec.get("symbol"),
+            "quantity": order_spec.get("quantity"),
+            "enteredTime": datetime.now(UTC).isoformat(),
+            "mode": "LIVE",
+        }
+
+    @staticmethod
+    def _extract_order_id_from_location(location: Optional[str]) -> str:
+        """
+        Schwab's only success signal for order submission — no body, just this
+        header. A missing or unparseable one means Schwab may have accepted a
+        real order we now have no ID for, which is worse than a loud failure
+        here: raise rather than return a guessed or empty ID that would silently
+        corrupt the audit trail for a trade that actually happened.
+        """
+        if not location:
+            raise BrokerError("Schwab accepted the order but returned no Location header to identify it")
+        order_id = location.rsplit("/", 1)[-1]
+        if not order_id:
+            raise BrokerError(f"Could not parse an order ID from Schwab's Location header: {location!r}")
+        return order_id
 
     async def get_order_status(self, profile: AccountProfile, order_id: str) -> dict[str, Any]:
         account_hash = await self._resolve_account_hash(profile)
@@ -285,8 +353,8 @@ class SchwabBrokerAdapter(BrokerAdapter):
         return min(seconds, self.max_retry_after_sec)
 
     async def _request(
-        self, method: str, path: str, base_url: Optional[str] = None, **kwargs: Any
-    ) -> dict[str, Any] | list[dict[str, Any]]:
+        self, method: str, path: str, base_url: Optional[str] = None, return_headers: bool = False, **kwargs: Any
+    ) -> dict[str, Any] | list[dict[str, Any]] | tuple[dict[str, Any] | list[dict[str, Any]], httpx.Headers]:
         """
         Issues one Schwab API call with an explicit timeout and retry-with-
         backoff on transient failures (connection errors, timeouts, and 5xx
@@ -304,6 +372,10 @@ class SchwabBrokerAdapter(BrokerAdapter):
         tripped). Every attempt first takes a slot from the shared rate limiter, and
         the access token is re-checked per attempt so one that expires during a
         long backoff is refreshed rather than reused.
+
+        return_headers=True returns (body, response.headers) instead of just body —
+        needed for submit_order(), whose only success signal is an HTTP 201 with an
+        EMPTY body; the new order's ID lives solely in the Location header.
         """
         url = f"{base_url or self.BASE_URL}{path}"
         last_exc: Optional[Exception] = None
@@ -350,9 +422,8 @@ class SchwabBrokerAdapter(BrokerAdapter):
                     )
                 response.raise_for_status()  # 4xx raises here, not retried below
 
-                if not response.content:
-                    return {}
-                return response.json()
+                body: dict[str, Any] | list[dict[str, Any]] = {} if not response.content else response.json()
+                return (body, response.headers) if return_headers else body
 
             except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as exc:
                 is_client_error = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500

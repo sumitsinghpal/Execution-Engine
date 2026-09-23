@@ -49,6 +49,7 @@ def test_settings():
         schwab_app_key="test-key",
         schwab_app_secret="test-secret",
         schwab_refresh_token="test-token",
+        schwab_token_file="",  # disabled: tests must never read/write a real token file on disk
         api_key_admin="change-me-in-prod",
         env="test",
         kill_switch_enabled=False,
