@@ -4,41 +4,41 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EDGE Trading</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
 <style>
   /* Dark is this product's look, full stop — like every trading terminal it takes cues
      from, it does not follow the visitor's OS light/dark preference. data-theme="light"
      or ="dark" on <html> is kept as a hook for a possible future manual toggle. */
   :root {
-    --bg: #0a0d14;
-    --surface: #121722;
-    --surface-2: #171d2b;
-    --raised: #1b2233;
+    --bg: #080b11;
+    --surface: #0f141f;
+    --surface-2: #141a27;
+    --raised: #182030;
     --ink: #f1f4f9;
     --ink-muted: #9aa4b8;
     --ink-faint: #616b80;
-    --border: rgba(255,255,255,0.07);
-    --border-strong: rgba(255,255,255,0.14);
+    --border: rgba(255,255,255,0.06);
+    --border-strong: rgba(255,255,255,0.13);
 
     --accent: #10b981;
     --accent-ink: #04130d;
     --accent-soft: rgba(16,185,129,0.14);
     --buy: #10b981;
     --buy-soft: rgba(16,185,129,0.14);
-    --sell: #ef4444;
-    --sell-soft: rgba(239,68,68,0.14);
+    --sell: #f43f5e;
+    --sell-soft: rgba(244,63,94,0.14);
     --warn: #f59e0b;
     --warn-soft: rgba(245,158,11,0.14);
-    --crit: #ef4444;
-    --crit-soft: rgba(239,68,68,0.14);
-    --system: #6366f1;
-    --system-soft: rgba(99,102,241,0.14);
+    --crit: #f43f5e;
+    --crit-soft: rgba(244,63,94,0.14);
+    --system: #06b6d4;
+    --system-soft: rgba(6,182,212,0.14);
 
     --radius-lg: 20px;
     --radius-md: 14px;
     --radius-sm: 9px;
-    --font-display: "Plus Jakarta Sans", system-ui, sans-serif;
-    --font-body: "Plus Jakarta Sans", system-ui, sans-serif;
+    --font-display: "Inter", system-ui, sans-serif;
+    --font-body: "Inter", system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
     --shadow-card: 0 1px 0 rgba(255,255,255,.03) inset, 0 20px 48px -24px rgba(0,0,0,.65);
   }
@@ -56,15 +56,15 @@
     --shadow-card: 0 1px 2px rgba(16,18,26,.04), 0 8px 24px -12px rgba(16,18,26,.12);
   }
   :root[data-theme="dark"] {
-    --bg: #0a0d14; --surface: #121722; --surface-2: #171d2b; --raised: #1b2233;
+    --bg: #080b11; --surface: #0f141f; --surface-2: #141a27; --raised: #182030;
     --ink: #f1f4f9; --ink-muted: #9aa4b8; --ink-faint: #616b80;
-    --border: rgba(255,255,255,0.07); --border-strong: rgba(255,255,255,0.14);
+    --border: rgba(255,255,255,0.06); --border-strong: rgba(255,255,255,0.13);
     --accent: #10b981; --accent-ink: #04130d; --accent-soft: rgba(16,185,129,0.14);
     --buy: #10b981; --buy-soft: rgba(16,185,129,0.14);
-    --sell: #ef4444; --sell-soft: rgba(239,68,68,0.14);
+    --sell: #f43f5e; --sell-soft: rgba(244,63,94,0.14);
     --warn: #f59e0b; --warn-soft: rgba(245,158,11,0.14);
-    --crit: #ef4444; --crit-soft: rgba(239,68,68,0.14);
-    --system: #6366f1; --system-soft: rgba(99,102,241,0.14);
+    --crit: #f43f5e; --crit-soft: rgba(244,63,94,0.14);
+    --system: #06b6d4; --system-soft: rgba(6,182,212,0.14);
     --shadow-card: 0 1px 0 rgba(255,255,255,.03) inset, 0 20px 48px -24px rgba(0,0,0,.65);
   }
 
@@ -167,16 +167,15 @@
   button.pill { font-family: var(--font-mono); cursor: pointer; -webkit-appearance: none; appearance: none; }
   button.pill.set { color: var(--buy); border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
 
-  /* Sandbox demo toggle + badge — sample data shown instead of a real account,
-     either by choice (the switch) or because no access code is set yet. */
-  .demo-switch {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: var(--ink-muted);
-    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2);
-    cursor: pointer; white-space: nowrap; flex: none;
+  /* Paper Trading mode pill — one control, two states: green with the live paper
+     balance when no real account is connected (either by choice or because no
+     access code is set yet), or red "Live API" once a real account is active. */
+  .mode-pill-wrap { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  button.pill.mode-pill { cursor: pointer; }
+  button.pill.mode-pill-reset {
+    cursor: pointer; color: var(--ink-muted); padding: 6px 9px;
   }
-  .demo-switch input { accent-color: var(--accent); cursor: pointer; margin: 0; }
-  button.pill.demo-badge { cursor: pointer; }
+  button.pill.mode-pill-reset:hover { color: var(--ink); border-color: var(--border-strong); }
   .pl-badge {
     display: inline-block; font-family: var(--font-mono); font-size: 11px; font-weight: 700;
     padding: 2px 7px; border-radius: 999px; flex: none;
@@ -570,7 +569,7 @@
   .tab-panel[hidden] { display: none; }
 
   /* Win/loss heatmap — a GitHub-contributions-style grid, one cell per day. Colored by that
-     day's realized profit/loss when the API reports it (only Sandbox Demo does today — see
+     day's realized profit/loss when the API reports it (Paper Trading fills always do — see
      the module docstring above computeHeatmap()); otherwise cells stay neutral, honestly. */
   .heatmap-wrap { overflow-x: auto; padding: 4px 0; }
   .heatmap-grid { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 13px); gap: 3px; width: max-content; }
@@ -596,10 +595,10 @@
       <div class="name">EDGE Trading<small>Your trading account, made simple</small></div>
     </div>
     <div class="topbar-right">
-      <label class="demo-switch" title="Show realistic sample data instead of your real account">
-        <input type="checkbox" id="demoModeToggle"> Sandbox
-      </label>
-      <button class="pill ok demo-badge" id="demoBadge" type="button" style="display:none">🟢 Sandbox Demo — Click to connect live API</button>
+      <div class="mode-pill-wrap" id="modePillWrap">
+        <button class="pill ok mode-pill" id="modePillMain" type="button"></button>
+        <button class="pill mode-pill-reset" id="modePillReset" type="button" title="Reset your paper balance to $100,000.00">↻ Reset</button>
+      </div>
       <select class="currency-select" id="currencySelect" title="Display currency — your orders always execute in US dollars"></select>
       <span class="pill" id="healthPill"><span class="dot"></span><span>checking…</span></span>
       <button class="pill" id="unlockPill" type="button" title="Unlock your account to place orders or change settings">🔒 <span id="unlockPillLabel">Unlock account</span></button>
@@ -609,14 +608,13 @@
   <div class="mode-banner" id="modeBanner" style="display:none"></div>
 
   <nav class="tabbar" id="tabbar">
-    <button class="tab-btn" data-tab="overview" type="button">Overview</button>
     <button class="tab-btn" data-tab="terminal" type="button">Terminal</button>
+    <button class="tab-btn" data-tab="scanner" type="button">Market Scanner</button>
     <button class="tab-btn" data-tab="strategies" type="button">Strategies &amp; Algos</button>
-    <button class="tab-btn" data-tab="journal" type="button">Trade Journal &amp; Logs</button>
-    <button class="tab-btn" data-tab="risk" type="button">Risk &amp; Settings</button>
+    <button class="tab-btn" data-tab="journal" type="button">Journal &amp; Risk</button>
   </nav>
 
-  <section class="tab-panel" data-tab-panel="overview">
+  <section class="tab-panel" data-tab-panel="terminal">
 
     <div class="card">
       <div class="hero-label">Account balance</div>
@@ -642,9 +640,18 @@
       </div>
     </div>
 
+    <div class="card chart-card">
+      <h2>Chart <span class="hint">Live price chart — separate from the order form below</span></h2>
+      <div class="chart-controls">
+        <input id="chartSymbol" maxlength="6" spellcheck="false">
+        <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
+      </div>
+      <div class="tv-wrap" id="tvChartContainer"></div>
+    </div>
+
     <div class="card">
-      <h2>Equity curve <span class="hint">your strategies, combined — full breakdown under Strategies &amp; Algos</span></h2>
-      <div id="overviewEquityCurve"><div class="skel-bar" style="width:100%;height:180px;border-radius:12px"></div></div>
+      <h2>Level 2 / DOM <span class="hint">order book depth</span></h2>
+      <div class="empty-note">Execution-Engine's API doesn't provide order-book depth today, so there's no live bid/ask ladder to show here — this is a placeholder for when that data exists, not a simulated feed.</div>
     </div>
 
     <div class="card">
@@ -661,24 +668,6 @@
         <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:60%"></div><div class="skel-bar" style="width:35%"></div></div></div>
         <div class="skel-row"><div class="skel-avatar"></div><div class="skel-lines"><div class="skel-bar" style="width:50%"></div><div class="skel-bar" style="width:40%"></div></div></div>
       </div>
-    </div>
-
-  </section>
-
-  <section class="tab-panel" data-tab-panel="terminal" hidden>
-
-    <div class="card chart-card">
-      <h2>Chart <span class="hint">Live price chart — separate from the order form below</span></h2>
-      <div class="chart-controls">
-        <input id="chartSymbol" maxlength="6" spellcheck="false">
-        <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
-      </div>
-      <div class="tv-wrap" id="tvChartContainer"></div>
-    </div>
-
-    <div class="card">
-      <h2>Level 2 / DOM <span class="hint">order book depth</span></h2>
-      <div class="empty-note">Execution-Engine's API doesn't provide order-book depth today, so there's no live bid/ask ladder to show here — this is a placeholder for when that data exists, not a simulated feed.</div>
     </div>
 
     <div class="grid">
@@ -833,6 +822,25 @@
 
   </section>
 
+  <section class="tab-panel" data-tab-panel="scanner" hidden>
+
+    <div class="card">
+      <h2>Sector heatmap <span class="hint">relative sector performance today</span></h2>
+      <div class="empty-note">Execution-Engine's API doesn't provide sector-level market data today, so there's no heatmap to show here — this is a placeholder for when that data exists, not simulated numbers.</div>
+    </div>
+
+    <div class="card">
+      <h2>Gainers &amp; losers <span class="hint">today's biggest movers</span></h2>
+      <div class="empty-note">No market-wide gainers/losers feed is connected yet — this is a placeholder for when that data exists, not simulated numbers.</div>
+    </div>
+
+    <div class="card">
+      <h2>News <span class="hint">headlines that might move your positions</span></h2>
+      <div class="empty-note">No news feed is connected yet — this is a placeholder for when that data exists.</div>
+    </div>
+
+  </section>
+
   <section class="tab-panel" data-tab-panel="strategies" hidden>
 
     <div class="card">
@@ -873,6 +881,11 @@
   </section>
 
   <section class="tab-panel" data-tab-panel="journal" hidden>
+
+    <div class="card">
+      <h2>Performance curve <span class="hint">your strategies, combined — full breakdown under Strategies &amp; Algos</span></h2>
+      <div id="journalEquityCurve"><div class="skel-bar" style="width:100%;height:180px;border-radius:12px"></div></div>
+    </div>
 
     <div class="card history-card">
       <h2>Transaction history <span class="hint">every order you've ever placed, searchable</span></h2>
@@ -923,13 +936,9 @@
     </div>
 
     <div class="card">
-      <h2>Win/loss heatmap <span class="hint" id="heatmapHint">last 90 days</span></h2>
+      <h2>PnL calendar <span class="hint" id="heatmapHint">last 90 days</span></h2>
       <div id="heatmapBody"><div class="empty-note">Loading…</div></div>
     </div>
-
-  </section>
-
-  <section class="tab-panel" data-tab-panel="risk" hidden>
 
     <div class="card">
       <h2>Trading controls</h2>
@@ -1073,29 +1082,32 @@
   // ---- Tabbed navigation ----
   // Everything in every tab keeps refreshing on its usual timer regardless of which
   // tab is showing — nothing here is lazy-loaded — so switching tabs is instant.
-  const TAB_IDS = ['overview', 'terminal', 'strategies', 'journal', 'risk'];
+  const TAB_IDS = ['terminal', 'scanner', 'strategies', 'journal'];
   function setActiveTab(tab) {
-    if (!TAB_IDS.includes(tab)) tab = 'overview';
+    if (!TAB_IDS.includes(tab)) tab = 'terminal';
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     document.querySelectorAll('.tab-panel').forEach(p => { p.hidden = p.dataset.tabPanel !== tab; });
     store.set('edge.activeTab', tab);
   }
   document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setActiveTab(b.dataset.tab)));
-  setActiveTab(store.get('edge.activeTab', 'overview'));
+  setActiveTab(store.get('edge.activeTab', 'terminal'));
 
   function base() { return baseUrlInput.value.trim().replace(/\/$/, ''); }
   function account() { return accountSelect.value; }
   function adminKey() { return store.get('edge.adminKey', ''); }
 
-  // ---- Sandbox demo mode ----
-  // Two ways in: someone explicitly flips the switch, or no access code is
-  // set yet (a brand-new visitor with nothing configured). Either way the
-  // dashboard should look complete and inviting, never broken — a handful of
-  // read-only endpoints below get realistic canned answers instead of a
-  // network call. Anything that would actually DO something (place an order,
-  // pause trading, add a watchlist symbol, ...) is refused with a plain
-  // message instead: faking a successful action here would be actively
-  // misleading, not a nice demo.
+  // ---- Paper Trading mode ----
+  // Two ways in: someone explicitly switches to Paper Trading, or no access
+  // code is set yet (a brand-new visitor with nothing configured). Either way,
+  // trading continues risk-free against a real, evolving $100,000 paper
+  // account instead of a frozen sample or a broken-looking error state.
+  // Read-only endpoints below answer from that paper state instead of a
+  // network call; order preview/execute are genuinely simulated (see
+  // demoPreviewOrder/demoExecuteOrder below) against a small simulated quote
+  // walk, with simple slippage on fill. Everything else that mutates state
+  // (flipping the kill switch, adding a watchlist symbol, attaching a
+  // bracket, ...) is still refused with a plain message — the simulator only
+  // goes as far as orders, so nothing else here can be mistaken for real.
   function demoModeOn() { return store.get('edge.demoMode', '0') === '1'; }
   function setDemoMode(on) {
     store.set('edge.demoMode', on ? '1' : '0');
@@ -1105,29 +1117,164 @@
   function effectiveDemo() { return demoModeOn() || !adminKey(); }
 
   function hoursAgoIso(hours) { return new Date(Date.now() - hours * 3600 * 1000).toISOString(); }
-  const DEMO_SPY_CALL_550 = 'SPY   ' + '261219' + 'C' + '00550000'; // 21-char OCC: root padded to 6, YYMMDD, C/P, strike x1000
 
-  function demoBalances() { return { balances: { net_liquidation_value: 124850.20, mode: 'PAPER' } }; }
-  function demoDrawdown() { return { drawdown_pct: -0.034, breached: false }; } // negative = up on the day
+  // ---- Persisted paper account — orders placed in Paper Trading actually move this ----
+  const PAPER_STATE_KEY = 'edge.paperState.v1';
+  const PAPER_STARTING_BALANCE = 100000;
+  function freshPaperState() {
+    return { balance: PAPER_STARTING_BALANCE, positions: {}, orders: [], quotes: {}, pendingPreviews: {}, nextFillId: 1 };
+  }
+  function loadPaperState() {
+    try {
+      const raw = localStorage.getItem(PAPER_STATE_KEY);
+      if (raw) return { ...freshPaperState(), ...JSON.parse(raw) };
+    } catch {}
+    return freshPaperState();
+  }
+  function savePaperState() {
+    try { localStorage.setItem(PAPER_STATE_KEY, JSON.stringify(paperState)); } catch {}
+  }
+  let paperState = loadPaperState();
+  function resetPaperState() {
+    paperState = freshPaperState();
+    savePaperState();
+    refreshDemoUi();
+    refreshAll(); loadStrategies(); refreshLiveUpdates(true);
+    toast('Paper trading account reset to $100,000.00');
+  }
+
+  // A small per-symbol simulated quote: starts from a realistic base price and
+  // random-walks a little on every fetch, clamped so it never drifts far from
+  // that base — enough to feel live without a real market data feed.
+  const DEMO_BASE_PRICES = {
+    QQQ: 505, SPY: 565, IWM: 215, EEM: 42, GLD: 245, TLT: 92, VNQ: 88, HYG: 79, LQD: 108,
+    XLK: 225, XLF: 46, XLE: 88, XLV: 145, XLY: 195, XLP: 78,
+    NVDA: 875, TSLA: 245, AAPL: 228, MSFT: 425, AMZN: 185, GOOGL: 165, META: 565,
+  };
+  function demoBasePrice(symbol) {
+    if (DEMO_BASE_PRICES[symbol]) return DEMO_BASE_PRICES[symbol];
+    let hash = 0;
+    for (let i = 0; i < symbol.length; i++) hash = (hash * 31 + symbol.charCodeAt(i)) >>> 0;
+    return 50 + (hash % 450); // deterministic, so the same symbol always starts near the same price
+  }
+  function demoQuote(symbol) {
+    const anchor = demoBasePrice(symbol);
+    const prev = paperState.quotes[symbol] ?? anchor;
+    let next = prev * (1 + (Math.random() - 0.5) * 0.003);
+    next = Math.min(anchor * 1.15, Math.max(anchor * 0.85, next));
+    paperState.quotes[symbol] = next;
+    savePaperState();
+    return Math.round(next * 100) / 100;
+  }
+  function demoQuotesResponse(path) {
+    const params = new URLSearchParams(path.split('?')[1] || '');
+    const symbols = (params.get('symbols') || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    return { quotes: symbols.map(symbol => ({ symbol, last: demoQuote(symbol), bid: null, ask: null })) };
+  }
+
+  function demoBalances() { return { balances: { net_liquidation_value: paperState.balance, mode: 'PAPER' } }; }
+  function demoDrawdown() {
+    const returnPct = (paperState.balance - PAPER_STARTING_BALANCE) / PAPER_STARTING_BALANCE;
+    return { drawdown_pct: -returnPct, breached: false }; // negative = up overall
+  }
   function demoPositions() {
-    return { positions: [
-      { instrument: { symbol: 'NVDA', assetType: 'EQUITY' }, longQuantity: 100, shortQuantity: 0, pl_pct: 5.2 },
-      { instrument: { symbol: 'TSLA', assetType: 'EQUITY' }, longQuantity: 50, shortQuantity: 0, pl_pct: -1.1 },
-      { instrument: { symbol: DEMO_SPY_CALL_550, assetType: 'OPTION' }, longQuantity: 1, shortQuantity: 0, pl_pct: 18.4 },
-    ] };
+    return { positions: Object.entries(paperState.positions).map(([symbol, p]) => {
+      const last = demoQuote(symbol);
+      const plPct = p.avgCost > 0 ? ((last - p.avgCost) / p.avgCost) * 100 : 0;
+      return { instrument: { symbol, assetType: 'EQUITY' }, longQuantity: p.qty, shortQuantity: 0, pl_pct: plPct };
+    }) };
   }
   function demoOrders() {
-    return { orders: [
-      { symbol: 'NVDA', instruction: 'BUY', quantity: 100, status: 'FILLED', estimated_notional_usd: 87500, created_at: hoursAgoIso(1), realized_pl_usd: 1240.50 },
-      { symbol: 'TSLA', instruction: 'SELL', quantity: 50, status: 'FILLED', estimated_notional_usd: 12250, created_at: hoursAgoIso(4), realized_pl_usd: -95.30 },
-      { symbol: DEMO_SPY_CALL_550, instruction: 'BUY_TO_OPEN', quantity: 1, status: 'FILLED', estimated_notional_usd: 3120, created_at: hoursAgoIso(22), realized_pl_usd: 482.10 },
-    ], total: 3 };
+    const orders = paperState.orders.slice().reverse();
+    return { orders, total: orders.length };
   }
+
+  // Preview: real client-side checks against the paper account (buying power on a
+  // BUY, shares actually held on a SELL, and a sanity band on a limit price versus
+  // the simulated quote) — the same verdict UI a real preview renders, on real
+  // paper-account numbers, not a canned "approved" response.
+  function demoPreviewOrder(proposal) {
+    const symbol = String(proposal.symbol || '').toUpperCase();
+    const quantity = parseInt(proposal.quantity, 10) || 0;
+    const isBuy = (proposal.instruction || 'BUY').toUpperCase() !== 'SELL';
+    const quote = demoQuote(symbol);
+    const price = proposal.order_type === 'LIMIT' ? Number(proposal.limit_price) : quote;
+    const notional = price * quantity;
+    const checks = { kill_switch_off: true, account_allowed: true, symbol_allowed: true, quote_fresh: true };
+    const rejections = [];
+    if (proposal.order_type === 'LIMIT' && quote > 0) {
+      checks.limit_price_reasonable = Math.abs(price - quote) / quote <= 0.08;
+      if (!checks.limit_price_reasonable) {
+        rejections.push(`Your price ${money(price)} is too far from the simulated price ${money(quote)} for ${symbol}.`);
+      }
+    }
+    if (isBuy) {
+      checks.notional_limit = notional > 0 && notional <= paperState.balance;
+      if (!checks.notional_limit) rejections.push(`This would cost ${money(notional)}, more than your ${money(paperState.balance)} paper balance.`);
+    } else {
+      const held = (paperState.positions[symbol] || { qty: 0 }).qty;
+      checks.notional_limit = quantity > 0 && quantity <= held;
+      if (!checks.notional_limit) rejections.push(`You only hold ${held} share${held === 1 ? '' : 's'} of ${symbol} in this paper account.`);
+    }
+    const previewId = `paper-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    paperState.pendingPreviews[previewId] = { symbol, quantity, isBuy, price, order_type: proposal.order_type, limit_price: proposal.limit_price, agent_id: proposal.agent_id };
+    savePaperState();
+    return {
+      preview_id: previewId,
+      risk_verdict: Object.values(checks).every(Boolean) ? 'APPROVED' : 'REJECTED',
+      risk_details: { checks, rejections },
+      estimated_cost: notional,
+      estimated_commission: 0,
+    };
+  }
+
+  // Execute: actually moves the paper balance and position, and records a real
+  // FILLED order so Activity, Transaction history, CSV export and the PnL
+  // calendar all pick it up exactly like a real fill would.
+  function demoExecuteOrder(req) {
+    const pending = paperState.pendingPreviews[req.preview_id];
+    if (!pending) throw new Error('This preview has expired — review the order again.');
+    delete paperState.pendingPreviews[req.preview_id];
+
+    const { symbol, quantity, isBuy, price, order_type, limit_price, agent_id } = pending;
+    // A market order chases the tape a little; a limit fills at exactly its own price.
+    const slippageBps = order_type === 'LIMIT' ? 0 : 5;
+    const fillPrice = order_type === 'LIMIT' ? Number(limit_price) : price * (1 + (isBuy ? 1 : -1) * slippageBps / 10000);
+    const notional = fillPrice * quantity;
+
+    let realizedPl = null;
+    const pos = paperState.positions[symbol] || { qty: 0, avgCost: 0 };
+    if (isBuy) {
+      const newQty = pos.qty + quantity;
+      pos.avgCost = newQty > 0 ? (pos.avgCost * pos.qty + notional) / newQty : 0;
+      pos.qty = newQty;
+      paperState.balance -= notional;
+    } else {
+      realizedPl = (fillPrice - pos.avgCost) * quantity;
+      pos.qty -= quantity;
+      if (pos.qty <= 0) { pos.qty = 0; pos.avgCost = 0; }
+      paperState.balance += notional;
+    }
+    if (pos.qty > 0) paperState.positions[symbol] = pos; else delete paperState.positions[symbol];
+
+    const executionId = `paper-fill-${paperState.nextFillId++}`;
+    const order = {
+      decision_id: req.decision_id, execution_id: executionId, symbol,
+      instruction: isBuy ? 'BUY' : 'SELL', quantity, order_type, limit_price: limit_price || null,
+      status: 'FILLED', filled_quantity: quantity, average_fill_price: fillPrice,
+      estimated_notional_usd: notional, realized_pl_usd: realizedPl,
+      created_at: new Date().toISOString(), agent_id,
+    };
+    paperState.orders.push(order);
+    savePaperState();
+    return { execution_id: executionId, status: 'FILLED', order };
+  }
+
   function demoAgents() {
     return { agents: [{ agent_id: 'orb', halted: false }, { agent_id: 'vwap_reversion', halted: false }, { agent_id: 'rsi2_connors', halted: false }] };
   }
   // Real strategies, real stop/target rules (see src/strategy/catalog.py) — only the win-rate
-  // NUMBERS shown alongside them are sandbox demo data, never fabricated descriptions.
+  // NUMBERS shown alongside them are illustrative sample data, never fabricated descriptions.
   function demoStrategies() {
     return { strategies: [
       { id: 'orb', name: 'Opening Range Breakout', category: 'INTRADAY', description: "Buys a breakout above the first 30 minutes' trading range.", famous_for: 'Classic day-trading setup popularized by Toby Crabel', risk_reward_label: '1 : 2', stop_rule: 'Opposite side of the opening range', target_rule: '2× the opening range height', bar_interval: '5min' },
@@ -1142,7 +1289,7 @@
   }
   // Feeds "How these strategies have performed" — deliberately gives ORB and VWAP Reversion a
   // real win-rate here (intradayStrategyIds: []) even though the live version can't backtest
-  // them against daily history; a sandbox is exactly where showing what that would look like is fine.
+  // them against daily history; Paper Trading is exactly where showing what that would look like is fine.
   function demoLiveUpdates() {
     const rows = [
       { symbol: 'QQQ', strategy_id: 'golden_cross', total_trades: 22, wins: 14, win_rate: 14 / 22, profit_factor: 1.8, total_return_pct: 9.4, benchmark_return_pct: 7.1, starting_capital: 100000, ending_capital: 109400 },
@@ -1187,6 +1334,7 @@
     { match: /^\/v1\/risk\/drawdown-check$/, methods: ['POST'], data: demoDrawdown },
     { match: /^\/v1\/agents\/status$/, methods: ['GET'], data: demoAgents },
     { match: /^\/v1\/orders$/, methods: ['GET'], data: demoOrders },
+    { match: /^\/v1\/quotes$/, methods: ['GET'], data: demoQuotesResponse },
     { match: /^\/v1\/strategies$/, methods: ['GET'], data: demoStrategies },
     { match: /^\/v1\/orders\/bracket$/, methods: ['GET'], data: () => ({ brackets: [] }) },
     { match: /^\/v1\/watchlists$/, methods: ['GET'], data: () => ({ watchlists: {} }) },
@@ -1274,6 +1422,7 @@
     refreshBalance();
     refreshPositions();
     refreshFeed();
+    refreshDemoUi();
     const cached = readLiveUpdatesCache();
     if (cached) renderLiveUpdates(cached);
     if (lastPreview) renderVerdict(lastPreview.preview);
@@ -1289,11 +1438,14 @@
       const pathname = path.split('?')[0];
       const method = (opts.method || 'GET').toUpperCase();
       const entry = DEMO_RESPONSES.find(e => e.methods.includes(method) && e.match.test(pathname));
-      if (entry) return entry.data();
+      if (entry) return entry.data(path);
+      if (pathname === '/v1/orders/preview' && method === 'POST') return demoPreviewOrder(JSON.parse(opts.body));
+      if (pathname === '/v1/orders/execute' && method === 'POST') return demoExecuteOrder(JSON.parse(opts.body));
       if (method !== 'GET') {
-        // A real action (place an order, flip the kill switch, add a symbol, ...) was attempted
-        // in the sandbox. Never fake success against fake data — refuse plainly instead.
-        throw new Error('Sandbox Demo — connect your live API (top-right) to do this for real.');
+        // A real action (flipping the kill switch, adding a symbol, attaching a bracket, ...) was
+        // attempted. Order preview/execute are genuinely simulated above; everything else here is
+        // never faked against sample data — refuse plainly instead.
+        throw new Error('Paper Trading — this action isn’t simulated yet. Connect your live API (top-right) to do this for real.');
       }
       // Any other GET (health, market-status, ...) is genuinely public and safe to try for real.
     }
@@ -1670,7 +1822,7 @@
 
   // ---- Win/loss heatmap ----
   // A day is only colored win/loss when the API actually reports a realized P&L for that
-  // order (realized_pl_usd) — today that's only Sandbox Demo data. A real account's orders
+  // order (realized_pl_usd) — Paper Trading fills always carry it. A real account's orders
   // don't carry that field yet, so real days render as neutral "activity" cells rather than
   // a fabricated win or loss: this dashboard never invents a profit/loss figure.
   const HEATMAP_DAYS = 90;
@@ -2043,20 +2195,31 @@
   });
   refreshUnlockPill();
 
-  // ---- Sandbox demo toggle + badge ----
+  // ---- Paper Trading / Live API mode pill ----
   function refreshDemoUi() {
-    $('demoModeToggle').checked = demoModeOn();
-    $('demoBadge').style.display = effectiveDemo() ? '' : 'none';
+    const main = $('modePillMain');
+    if (effectiveDemo()) {
+      main.className = 'pill ok mode-pill';
+      main.textContent = `🟢 Paper Trading: ${money(paperState.balance)}`;
+      main.title = 'Click to connect your live API';
+      $('modePillReset').style.display = '';
+    } else {
+      main.className = 'pill crit mode-pill';
+      main.textContent = '🔴 Live API';
+      main.title = 'Click to switch back to Paper Trading';
+      $('modePillReset').style.display = 'none';
+    }
   }
-  $('demoModeToggle').addEventListener('change', () => setDemoMode($('demoModeToggle').checked));
-  $('demoBadge').addEventListener('click', () => {
+  $('modePillMain').addEventListener('click', () => {
+    if (!effectiveDemo()) { setDemoMode(true); return; }
     setDemoMode(false);
     openAdminModal('Connect your live API', async () => {
       refreshUnlockPill(); refreshDemoUi();
       toast('Connected — showing your real account now');
       refreshAll(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
-    }, "Enter your access code to replace this sample data with your real account.");
+    }, "Enter your access code to replace paper trading with your real account.");
   });
+  $('modePillReset').addEventListener('click', () => resetPaperState());
   refreshDemoUi();
 
   // ---- Order ticket ----
@@ -2416,7 +2579,7 @@
       $('approvalOverlay').classList.remove('show');
       $('verdictBox').innerHTML = '';
       activePlan = null; renderPlanBanner();
-      refreshFeed(); refreshPositions(); refreshBalance(); refreshHistory(true);
+      refreshFeed(); refreshPositions(); refreshBalance(); refreshHistory(true); refreshDemoUi(); refreshHeatmap();
     } catch (e) {
       toast('Could not place order: ' + e.message);
     } finally {
@@ -2924,11 +3087,11 @@
       ${activityRows}
     `;
 
-    // A compact copy of the same chart lives on the Overview tab — same cached data, just
-    // without the per-pair breakdown, so glancing at Overview still shows how things are going.
-    const overviewEl = $('overviewEquityCurve');
-    if (overviewEl) {
-      overviewEl.innerHTML = combined
+    // A compact copy of the same chart lives on the Journal & Risk tab — same cached data,
+    // just without the per-pair breakdown, so the "Performance curve" card there stays current.
+    const journalEl = $('journalEquityCurve');
+    if (journalEl) {
+      journalEl.innerHTML = combined
         ? buildEquityChartSvg(combined.equity_curve, s.avg_benchmark_return_pct) +
           `<div class="lu-cost-note">${combined.total_return_pct >= 0 ? '+' : ''}${combined.total_return_pct.toFixed(2)}% combined return · ${money(combined.ending_capital)} ending balance</div>`
         : '<div class="empty-note">Not enough data yet.</div>';
@@ -2938,7 +3101,7 @@
   async function refreshLiveUpdates(force) {
     if (effectiveDemo()) {
       renderLiveUpdates(demoLiveUpdates());
-      $('liveUpdatesMeta').textContent = "Sandbox demo data — connect your live API to see your own strategies' real performance.";
+      $('liveUpdatesMeta').textContent = "Illustrative sample data — connect your live API to see your own strategies' real performance.";
       scheduleNextLiveUpdate();
       return;
     }
