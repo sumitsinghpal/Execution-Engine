@@ -2190,7 +2190,25 @@
     $('clearPlanBtn').addEventListener('click', () => { activePlan = null; renderPlanBanner(); });
   }
 
+  // Shared red banner for a ticket that never reached the network — both
+  // client-side validation failures and preview-request failures render
+  // through here so they look like the same "can't place this" state.
+  function renderTicketError(headline, msg) {
+    $('verdictBox').innerHTML = `<div class="verdict-box"><div class="verdict-head rejected"><span>${headline}</span></div><div class="verdict-body"><div class="rej-note" style="margin-left:0">${msg}</div></div></div>`;
+  }
+
   $('previewBtn').addEventListener('click', async () => {
+    const symbol = $('fSymbol').value.trim().toUpperCase();
+    const quantity = parseInt($('fQty').value, 10);
+    if (!symbol) {
+      renderTicketError("Can't review this order", 'Enter a symbol first.');
+      return;
+    }
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      renderTicketError("Can't review this order", 'Quantity must be a whole number of 1 or more.');
+      return;
+    }
+
     const btn = $('previewBtn');
     btn.disabled = true; btn.textContent = 'Checking…';
     const decisionId = `dash-${Date.now()}`;
@@ -2198,10 +2216,10 @@
       decision_id: decisionId,
       agent_id: $('fAgent').value.trim() || 'default',
       account: account(),
-      symbol: $('fSymbol').value.trim().toUpperCase(),
+      symbol,
       asset_type: $('fAssetType').value,
       instruction: side,
-      quantity: parseInt($('fQty').value, 10) || 0,
+      quantity,
       order_type: $('fType').value,
     };
     if (proposal.order_type === 'LIMIT') {
@@ -2220,7 +2238,7 @@
       lastPreview = { proposal, preview };
       renderVerdict(preview);
     } catch (e) {
-      $('verdictBox').innerHTML = `<div class="verdict-box"><div class="verdict-head rejected"><span>Request failed</span></div><div class="verdict-body"><div class="rej-note" style="margin-left:0">${e.message}</div></div></div>`;
+      renderTicketError('Request failed', e.message);
     } finally {
       btn.disabled = false; btn.textContent = 'Review order';
     }
