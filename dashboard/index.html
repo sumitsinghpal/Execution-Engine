@@ -1195,7 +1195,7 @@
     }
     errorEl.style.display = 'none';
     store.set('edge.baseUrl', value);
-    refreshAll();
+    resumePolling();
   });
 
   const accountSelect = $('accountSelect');
@@ -1203,7 +1203,7 @@
     const o = document.createElement('option'); o.value = a; o.textContent = a; accountSelect.appendChild(o);
   });
   accountSelect.value = store.get('edge.account', 'primary');
-  accountSelect.addEventListener('change', () => { store.set('edge.account', accountSelect.value); refreshAll(); });
+  accountSelect.addEventListener('change', () => { store.set('edge.account', accountSelect.value); resumePolling(); });
 
   const sigIntegrityUrlInput = $('sigIntegrityUrl');
   sigIntegrityUrlInput.value = store.get('edge.sigIntegrityUrl', '');
@@ -1571,6 +1571,13 @@
     clearTimeout(toast._h); toast._h = setTimeout(() => t.classList.remove('show'), 2600);
   }
 
+  // A real UUID (not a Date.now() timestamp) for every decision_id/idempotency_key —
+  // guarantees uniqueness even across two submissions in the same millisecond.
+  function newRequestId(prefix) {
+    const id = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    return `${prefix}-${id}`;
+  }
+
   async function api(path, opts = {}) {
     if (effectiveDemo()) {
       const pathname = path.split('?')[0];
@@ -1592,17 +1599,32 @@
     // src/api/server.py's verify_admin_key) — sent on every call rather
     // than per-endpoint. A 401/403 here means the key (top-right lock) is
     // missing or wrong, not that the server is down.
-    const res = await fetch(base() + path, {
-      headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey(), ...(opts.headers || {}) },
-      ...opts,
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let res;
+    try {
+      res = await fetch(base() + path, {
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey(), ...(opts.headers || {}) },
+        signal: controller.signal,
+        ...opts,
+      });
+    } catch (e) {
+      pollNoteFailure();
+      if (e.name === 'AbortError') throw new Error('Request timed out after 10s — check your server address and connection.');
+      throw e;
+    } finally {
+      clearTimeout(timeoutId);
+    }
     let body = null;
     try { body = await res.json(); } catch {}
     if (!res.ok) {
       const detail = body && body.detail ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)) : res.statusText;
       const err = new Error(detail); err.status = res.status; err.body = body;
+      if ([401, 403, 500, 502, 503, 504].includes(res.status)) pollNoteFailure();
+      else pollNoteSuccess();
       throw err;
     }
+    pollNoteSuccess();
     return body;
   }
 
@@ -2328,7 +2350,7 @@
     openAdminModal('Enter your access code', async () => {
       refreshUnlockPill(); refreshDemoUi();
       toast('Account unlocked');
-      refreshAll(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
+      resumePolling(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
     });
   });
   refreshUnlockPill();
@@ -2354,7 +2376,7 @@
     openAdminModal('Connect your live API', async () => {
       refreshUnlockPill(); refreshDemoUi();
       toast('Connected — showing your real account now');
-      refreshAll(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
+      resumePolling(); loadStrategies(); refreshLiveUpdates(true); refreshHistory(true);
     }, "Enter your access code to replace paper trading with your real account.");
   });
   $('modePillReset').addEventListener('click', () => resetPaperState());
@@ -2526,21 +2548,42 @@
     $('verdictBox').innerHTML = `<div class="verdict-box"><div class="verdict-head rejected"><span>${headline}</span></div><div class="verdict-body"><div class="rej-note" style="margin-left:0">${msg}</div></div></div>`;
   }
 
+  // Rejects empty, NaN, negative/zero, and scientific notation upfront, before any
+  // field built from it ever reaches an API call — "1e5" should never silently mean
+  // "1" (parseFloat's leading-digits behavior) instead of the 100000 someone typed.
+  function isCleanPositiveNumber(raw) {
+    if (typeof raw !== 'string' || raw.trim() === '' || /[eE]/.test(raw)) return false;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0;
+  }
+
   $('previewBtn').addEventListener('click', async () => {
     const symbol = $('fSymbol').value.trim().toUpperCase();
-    const quantity = parseInt($('fQty').value, 10);
+    const qtyRaw = $('fQty').value;
     if (!symbol) {
       renderTicketError("Can't review this order", 'Enter a symbol first.');
       return;
     }
-    if (!Number.isInteger(quantity) || quantity < 1) {
+    if (!isCleanPositiveNumber(qtyRaw) || !Number.isInteger(Number(qtyRaw))) {
       renderTicketError("Can't review this order", 'Quantity must be a whole number of 1 or more.');
       return;
+    }
+    const quantity = Number(qtyRaw);
+    if ($('fType').value === 'LIMIT' && !isCleanPositiveNumber($('fLimit').value)) {
+      renderTicketError("Can't review this order", 'Enter a valid limit price greater than 0.');
+      return;
+    }
+    for (const [id, label] of [['fBracketStop', 'Stop loss'], ['fBracketTarget', 'Target']]) {
+      const raw = $(id).value;
+      if (raw.trim() !== '' && !isCleanPositiveNumber(raw)) {
+        renderTicketError("Can't review this order", `${label} must be a valid price greater than 0.`);
+        return;
+      }
     }
 
     const btn = $('previewBtn');
     btn.disabled = true; btn.textContent = 'Checking…';
-    const decisionId = `dash-${Date.now()}`;
+    const decisionId = newRequestId('dash');
     const proposal = {
       decision_id: decisionId,
       agent_id: $('fAgent').value.trim() || 'default',
@@ -2552,9 +2595,7 @@
       order_type: $('fType').value,
     };
     if (proposal.order_type === 'LIMIT') {
-      const lp = $('fLimit').value;
-      if (!lp) { toast('Enter a limit price'); btn.disabled = false; btn.textContent = 'Review order'; return; }
-      proposal.limit_price = lp;
+      proposal.limit_price = $('fLimit').value;
     }
     if (activePlan) {
       proposal.strategy_id = activePlan.strategy_id;
@@ -2729,7 +2770,7 @@
           approved_by: approvedBy,
           approved_at: new Date().toISOString(),
           attestation,
-          idempotency_key: `dash-${Date.now()}`,
+          idempotency_key: newRequestId('exec'),
         },
       };
       const receipt = await api('/v1/orders/execute', { method: 'POST', body: JSON.stringify(req) });
@@ -3004,12 +3045,16 @@
 
   $('startAgentBtn').addEventListener('click', async () => {
     const notional = $('agentNotional').value;
-    if (!notional || Number(notional) <= 0) { toast('Enter an amount per trade'); return; }
+    if (!isCleanPositiveNumber(notional)) { toast('Enter a valid amount per trade greater than 0'); return; }
     const startedBy = store.get('edge.approver', 'you');
 
     const btn = $('startAgentBtn');
     btn.disabled = true; btn.textContent = 'Checking recent performance…';
     try {
+      // Sent as a string, not a JSON number: notional_per_trade_usd is a server-side
+      // Decimal (see src/execution/daily_plan.py), and a JS float round-trip through
+      // JSON.stringify(Number(...)) risks the exact precision issue Decimal exists to
+      // avoid. isCleanPositiveNumber() above already guarantees this parses cleanly.
       const result = await api('/v1/autonomous/start', {
         method: 'POST',
         body: JSON.stringify({ notional_per_trade_usd: String(notional), started_by: startedBy }),
@@ -3127,7 +3172,7 @@
   async function scalperPlaceMarketOrder(symbol, quantity, isBuy) {
     quantity = Math.floor(quantity);
     if (!(quantity > 0)) { toast('Nothing to do — quantity is 0'); return; }
-    const decisionId = `scalper-${Date.now()}`;
+    const decisionId = newRequestId('scalper');
 
     if (effectiveDemo()) {
       const preview = demoPreviewOrder({ decision_id: decisionId, symbol, quantity, instruction: isBuy ? 'BUY' : 'SELL', order_type: 'MARKET' });
@@ -3158,7 +3203,20 @@
     toast('Reviewing this order below — confirm to place it for real.');
   }
 
-  $('scalperBuyBtn').addEventListener('click', async () => {
+  // Guards every scalper button against a double-click firing two orders while the
+  // first is still resolving — disables + shows a busy dot immediately on click,
+  // re-enables in `finally` regardless of how the handler exits.
+  function guardScalperButton(btn, handler) {
+    const label = btn.textContent;
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true; btn.textContent = '⏳ ' + label;
+      try { await handler(); }
+      finally { btn.disabled = false; btn.textContent = label; }
+    });
+  }
+
+  guardScalperButton($('scalperBuyBtn'), async () => {
     playClickTone();
     const symbol = scalperSymbol();
     let qty = scalperQty;
@@ -3167,30 +3225,30 @@
       const price = demoQuote(symbol);
       qty = price > 0 ? Math.floor(paperState.balance / price) : 0;
     }
-    scalperPlaceMarketOrder(symbol, qty, true);
+    await scalperPlaceMarketOrder(symbol, qty, true);
   });
-  $('scalperSellBtn').addEventListener('click', async () => {
+  guardScalperButton($('scalperSellBtn'), async () => {
     playClickTone();
     const symbol = scalperSymbol();
     const qty = scalperQty === 'MAX' ? await scalperHeldQty(symbol) : scalperQty;
-    scalperPlaceMarketOrder(symbol, qty, false);
+    await scalperPlaceMarketOrder(symbol, qty, false);
   });
-  $('scalperClose50Btn').addEventListener('click', async () => {
+  guardScalperButton($('scalperClose50Btn'), async () => {
     playClickTone();
     const symbol = scalperSymbol();
     const held = await scalperHeldQty(symbol);
     const qty = Math.floor(held / 2);
     if (qty <= 0) { toast('No position to close'); return; }
-    scalperPlaceMarketOrder(symbol, qty, false);
+    await scalperPlaceMarketOrder(symbol, qty, false);
   });
-  $('scalperCloseAllBtn').addEventListener('click', async () => {
+  guardScalperButton($('scalperCloseAllBtn'), async () => {
     playClickTone();
     const symbol = scalperSymbol();
     const held = await scalperHeldQty(symbol);
     if (held <= 0) { toast('No position to close'); return; }
-    scalperPlaceMarketOrder(symbol, held, false);
+    await scalperPlaceMarketOrder(symbol, held, false);
   });
-  $('scalperReverseBtn').addEventListener('click', async () => {
+  guardScalperButton($('scalperReverseBtn'), async () => {
     playClickTone();
     const symbol = scalperSymbol();
     const held = await scalperHeldQty(symbol);
@@ -3198,7 +3256,7 @@
     // Short selling isn't modeled by this account (paper or live) — the closest honest
     // behavior is to flatten the long rather than silently pretending to open a short.
     toast('Short selling isn’t supported yet — closing your long position instead');
-    scalperPlaceMarketOrder(symbol, held, false);
+    await scalperPlaceMarketOrder(symbol, held, false);
   });
 
   // ---- Market Scanner: ticker marquee + sector heatmap + gainers/losers ----
@@ -3562,12 +3620,47 @@
 
   // ---- Refresh loop ----
   function refreshAll() {
-    refreshHealth(); refreshBalance(); refreshMarket(); refreshAgents();
-    refreshPositions(); refreshFeed(); refreshKillSwitch(); refreshSignals(); refreshDailyPlan();
-    refreshWatchlists(); refreshAlerts(); refreshBracketOrders(); refreshSignalIntegrity();
-    refreshHeatmap();
+    return Promise.all([
+      refreshHealth(), refreshBalance(), refreshMarket(), refreshAgents(),
+      refreshPositions(), refreshFeed(), refreshKillSwitch(), refreshSignals(), refreshDailyPlan(),
+      refreshWatchlists(), refreshAlerts(), refreshBracketOrders(), refreshSignalIntegrity(),
+      refreshHeatmap(),
+    ]);
   }
-  refreshAll();
+
+  // ---- Smart polling: pauses while the tab is hidden, and backs off (15s -> 30s
+  // -> 60s, then stops entirely) after consecutive 401/403/500-class responses
+  // instead of hammering a broken connection every 15s. Any successful response
+  // resets it; resumePolling() also resets it immediately (wired to the moments a
+  // user might have just fixed the connection — entering a key, editing the
+  // server address). Demo/Paper Trading responses never touch this at all, since
+  // they're answered locally in api() before any of this runs.
+  const POLL_BASE_MS = 15000;
+  const POLL_MAX_MS = 60000;
+  let pollDelayMs = POLL_BASE_MS;
+  let pollTimer = null;
+  let pollPaused = false;
+  let pollHadFailureThisRound = false;
+  function pollNoteFailure() { pollHadFailureThisRound = true; }
+  function pollNoteSuccess() { pollHadFailureThisRound = false; }
+  function schedulePoll(delay) { clearTimeout(pollTimer); pollTimer = setTimeout(runPoll, delay); }
+  function resumePolling() { pollPaused = false; pollDelayMs = POLL_BASE_MS; schedulePoll(0); }
+  async function runPoll() {
+    if (document.visibilityState === 'hidden') { schedulePoll(2000); return; } // check back soon in case the tab is un-hidden
+    if (pollPaused) return;
+    await refreshAll();
+    if (pollHadFailureThisRound) {
+      pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
+      if (pollDelayMs >= POLL_MAX_MS) { pollPaused = true; return; } // stays off until resumePolling()
+    } else {
+      pollDelayMs = POLL_BASE_MS;
+    }
+    schedulePoll(pollDelayMs);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !pollPaused) schedulePoll(0);
+  });
+
   loadStrategies();
   initChart();
   renderL2();
@@ -3576,7 +3669,7 @@
   refreshLiveUpdates(false);
   refreshHistory(true);
   loadFxRates();
-  setInterval(refreshAll, 15000);
+  schedulePoll(0);
 })();
 </script>
 </body>
