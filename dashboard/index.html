@@ -435,6 +435,59 @@
   .chart-controls .btn { width: auto; margin-top: 0; padding: 9px 16px; font-size: 13px; }
   .tv-wrap { height: 480px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); }
 
+  /* Scalper bar — one-click market orders against whichever symbol is charted above.
+     Paper Trading fires instantly; a live account still stops at the normal review +
+     slide-to-execute step below, so nothing here can place a real trade unconfirmed. */
+  .scalper-bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 14px; padding: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  }
+  .scalper-qty-seg { display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px; gap: 3px; flex: none; }
+  .scalper-qty-seg button {
+    border: none; background: transparent; color: var(--ink-muted); font-family: var(--font-mono); font-weight: 700; font-size: 12px;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; transition: background .12s, color .12s;
+  }
+  .scalper-qty-seg button.active { background: var(--system); color: #fff; }
+  .scalper-actions { display: flex; gap: 8px; flex-wrap: wrap; flex: 1 1 auto; }
+  .scalper-btn {
+    border: none; border-radius: var(--radius-sm); padding: 9px 14px; font-weight: 700; font-size: 12.5px;
+    font-family: var(--font-display); cursor: pointer; transition: filter .12s, transform .06s;
+    background: var(--raised); color: var(--ink); border: 1px solid var(--border-strong);
+  }
+  .scalper-btn:active { transform: scale(.97); }
+  .scalper-btn:hover { filter: brightness(1.12); }
+  .scalper-btn.buy { background: var(--buy); color: var(--accent-ink); border-color: transparent; }
+  .scalper-btn.sell { background: var(--sell); color: #fff; border-color: transparent; }
+  .scalper-btn.warn { background: var(--warn); color: #1a1200; border-color: transparent; }
+
+  /* Level 2 / DOM — simulated micro-fluctuations around the charted symbol's price when
+     no live order-book feed is connected. Always visibly labeled as simulated: this is a
+     depth-ladder shape to practice reading, never a stand-in for a real market feed. */
+  .l2-badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600;
+    color: var(--warn); background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+    padding: 5px 10px; border-radius: 999px; margin-bottom: 12px;
+  }
+  .l2-book { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+  .l2-side { display: flex; flex-direction: column; }
+  .l2-row { position: relative; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 5px 12px; font-size: 12.5px; }
+  .l2-vol-bar { position: absolute; top: 0; bottom: 0; right: 0; opacity: .16; }
+  .l2-row.ask .l2-vol-bar { background: var(--sell); }
+  .l2-row.bid .l2-vol-bar { background: var(--buy); }
+  .l2-row.ask .l2-price { color: var(--sell); }
+  .l2-row.bid .l2-price { color: var(--buy); }
+  .l2-price, .l2-size, .l2-total { position: relative; font-family: var(--font-mono); text-align: right; }
+  .l2-price { text-align: left; font-weight: 700; }
+  .l2-size, .l2-total { color: var(--ink-muted); }
+  .l2-mid {
+    display: flex; align-items: center; justify-content: space-between; padding: 8px 12px;
+    background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  .l2-mid-price { font-family: var(--font-mono); font-weight: 800; font-size: 15px; transition: color .25s; }
+  .l2-mid-price.tick-up { color: var(--buy); }
+  .l2-mid-price.tick-down { color: var(--sell); }
+  .l2-spread { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); }
+
   /* Live updates card */
   .live-updates-card { margin-top: 18px; }
 
@@ -646,12 +699,35 @@
         <input id="chartSymbol" maxlength="6" spellcheck="false">
         <button class="btn btn-ghost" id="chartLoadBtn">Load</button>
       </div>
+
+      <div class="scalper-bar" id="scalperBar">
+        <div class="scalper-qty-seg" id="scalperQtySeg">
+          <button type="button" data-qty="10">10</button>
+          <button type="button" data-qty="50">50</button>
+          <button type="button" class="active" data-qty="100">100</button>
+          <button type="button" data-qty="500">500</button>
+          <button type="button" data-qty="MAX">Max</button>
+        </div>
+        <div class="scalper-actions">
+          <button type="button" class="scalper-btn buy" id="scalperBuyBtn">Buy MKT</button>
+          <button type="button" class="scalper-btn sell" id="scalperSellBtn">Sell MKT</button>
+          <button type="button" class="scalper-btn" id="scalperClose50Btn">Close 50%</button>
+          <button type="button" class="scalper-btn warn" id="scalperCloseAllBtn">Close All</button>
+          <button type="button" class="scalper-btn" id="scalperReverseBtn">Reverse</button>
+        </div>
+      </div>
+
       <div class="tv-wrap" id="tvChartContainer"></div>
     </div>
 
     <div class="card">
       <h2>Level 2 / DOM <span class="hint">order book depth</span></h2>
-      <div class="empty-note">Execution-Engine's API doesn't provide order-book depth today, so there's no live bid/ask ladder to show here — this is a placeholder for when that data exists, not a simulated feed.</div>
+      <div class="l2-badge">🧪 Simulated depth — no live order-book feed connected</div>
+      <div class="l2-book">
+        <div class="l2-side asks" id="l2Asks"></div>
+        <div class="l2-mid" id="l2Mid"></div>
+        <div class="l2-side bids" id="l2Bids"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -2227,6 +2303,7 @@
   $('sideBuy').addEventListener('click', () => setSide('BUY'));
   $('sideSell').addEventListener('click', () => setSide('SELL'));
   function setSide(s) {
+    playClickTone();
     side = s;
     $('sideBuy').classList.toggle('active', s === 'BUY');
     $('sideSell').classList.toggle('active', s === 'SELL');
@@ -2274,6 +2351,7 @@
 
   document.querySelectorAll('#sizingModeSeg button').forEach(btn => {
     btn.addEventListener('click', () => {
+      playClickTone();
       sizingMode = btn.dataset.sizeMode;
       document.querySelectorAll('#sizingModeSeg button').forEach(b => b.classList.toggle('active', b === btn));
       $('sizingDollarsRow').style.display = sizingMode === 'dollars' ? '' : 'none';
@@ -2468,6 +2546,7 @@
       ${approved ? '<button class="btn btn-primary" id="executeBtn">Continue to confirm</button>' : ''}
     `;
     if (approved) $('executeBtn').addEventListener('click', openApprovalModal);
+    else playWarningTone();
   }
 
   // A chime confirming the order actually filled — never blocks or delays
@@ -2490,6 +2569,46 @@
       });
       setTimeout(() => ctx.close(), 500);
     } catch (e) { /* audio is a nice-to-have — never let it block a real order */ }
+  }
+
+  // A small mechanical tick for toggling side, sizing mode, or a scalper quantity —
+  // meant to be barely-there feedback, not an alert.
+  function playClickTone() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square'; osc.frequency.value = 900;
+      gain.gain.setValueAtTime(0.05, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.04);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(); osc.stop(ctx.currentTime + 0.05);
+      setTimeout(() => ctx.close(), 150);
+    } catch (e) { /* audio is a nice-to-have */ }
+  }
+
+  // A short falling tone for a rejected preview (a risk limit or price sanity check
+  // failed) — deliberately harsher than the click/fill sounds so it reads as a warning.
+  function playWarningTone() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, now);
+      osc.frequency.linearRampToValueAtTime(140, now + 0.3);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.15, now + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now); osc.stop(now + 0.36);
+      setTimeout(() => ctx.close(), 500);
+    } catch (e) { /* audio is a nice-to-have */ }
   }
 
   const slideTrack = $('slideConfirmTrack');
@@ -2865,6 +2984,7 @@
     if (!sym) { toast('Enter a symbol'); return; }
     store.set('edge.chartSymbol', sym);
     loadChart(sym);
+    renderL2();
   });
   $('chartSymbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('chartLoadBtn').click(); });
 
@@ -2873,6 +2993,145 @@
     $('chartSymbol').value = initial;
     loadChart(initial);
   }
+
+  // ---- Level 2 / DOM — simulated depth, always labeled as such (see the .l2-badge
+  // in the card itself). No live order-book feed exists to plug in here today; this
+  // gives a realistic-shaped ladder to practice reading a book against, ticking on
+  // its own small random walk rather than a frozen "not available" placeholder.
+  const l2MidPrice = {};
+  function l2GetMid(symbol) {
+    const anchor = demoBasePrice(symbol);
+    const prev = l2MidPrice[symbol] ?? anchor;
+    let next = prev * (1 + (Math.random() - 0.5) * 0.0006);
+    next = Math.min(anchor * 1.15, Math.max(anchor * 0.85, next));
+    l2MidPrice[symbol] = next;
+    return next;
+  }
+  function renderL2() {
+    const symbol = ($('chartSymbol').value || 'QQQ').trim().toUpperCase();
+    const priorMid = l2MidPrice[symbol];
+    const mid = l2GetMid(symbol);
+    const tick = Math.max(0.01, mid * 0.0002);
+    const rows = 6;
+    const bids = [], asks = [];
+    let bidTotal = 0, askTotal = 0;
+    for (let i = 0; i < rows; i++) {
+      const bidSize = Math.round(50 + Math.random() * 450);
+      const askSize = Math.round(50 + Math.random() * 450);
+      bidTotal += bidSize; askTotal += askSize;
+      bids.push({ price: mid - tick * (i + 0.5), size: bidSize, total: bidTotal });
+      asks.push({ price: mid + tick * (i + 0.5), size: askSize, total: askTotal });
+    }
+    const maxTotal = Math.max(bidTotal, askTotal);
+    const row = (r, cls) => `<div class="l2-row ${cls}"><div class="l2-vol-bar" style="width:${Math.min(100, (r.total / maxTotal) * 100)}%"></div><span class="l2-price num">${money(r.price)}</span><span class="l2-size num">${r.size}</span><span class="l2-total num">${r.total}</span></div>`;
+    $('l2Asks').innerHTML = asks.slice().reverse().map(r => row(r, 'ask')).join('');
+    $('l2Bids').innerHTML = bids.map(r => row(r, 'bid')).join('');
+    const tickClass = priorMid == null ? '' : mid >= priorMid ? 'tick-up' : 'tick-down';
+    $('l2Mid').innerHTML = `<span class="l2-mid-price num ${tickClass}">${money(mid)}</span><span class="l2-spread">Spread ${money(asks[0].price - bids[0].price)}</span>`;
+  }
+  setInterval(renderL2, 1200);
+
+  // ---- Scalper bar — one-click market orders against the charted symbol. Paper
+  // Trading fires instantly end to end; a live account fills in the real ticket and
+  // runs the same preview a normal order gets, then stops — a human still has to
+  // review and slide to execute, so this stays fast without skipping confirmation
+  // on real money. See the .scalper-bar comment above for the same note in CSS.
+  let scalperQty = 100;
+  document.querySelectorAll('#scalperQtySeg button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      playClickTone();
+      scalperQty = btn.dataset.qty === 'MAX' ? 'MAX' : Number(btn.dataset.qty);
+      document.querySelectorAll('#scalperQtySeg button').forEach(b => b.classList.toggle('active', b === btn));
+    });
+  });
+
+  function scalperSymbol() { return ($('chartSymbol').value || 'QQQ').trim().toUpperCase(); }
+
+  async function scalperHeldQty(symbol) {
+    if (effectiveDemo()) return (paperState.positions[symbol] || { qty: 0 }).qty;
+    try {
+      const r = await api(`/v1/account/${encodeURIComponent(account())}/positions`);
+      const p = (r.positions || []).find(x => (x.instrument && x.instrument.symbol || '').trim().toUpperCase() === symbol);
+      return p ? (p.longQuantity || 0) - (p.shortQuantity || 0) : 0;
+    } catch { return 0; }
+  }
+
+  async function scalperPlaceMarketOrder(symbol, quantity, isBuy) {
+    quantity = Math.floor(quantity);
+    if (!(quantity > 0)) { toast('Nothing to do — quantity is 0'); return; }
+    const decisionId = `scalper-${Date.now()}`;
+
+    if (effectiveDemo()) {
+      const preview = demoPreviewOrder({ decision_id: decisionId, symbol, quantity, instruction: isBuy ? 'BUY' : 'SELL', order_type: 'MARKET' });
+      if (preview.risk_verdict !== 'APPROVED') {
+        playWarningTone();
+        toast('Blocked: ' + (preview.risk_details.rejections[0] || 'risk check failed'));
+        return;
+      }
+      const receipt = demoExecuteOrder({
+        decision_id: decisionId, preview_id: preview.preview_id,
+        approval: { approved_by: 'Scalper bar', approved_at: new Date().toISOString(), attestation: 'One-click paper trade' },
+      });
+      playFillChime();
+      toast(`${isBuy ? 'Bought' : 'Sold'} ${quantity} ${symbol} @ ${money(receipt.order.average_fill_price)}`);
+      refreshFeed(); refreshPositions(); refreshBalance(); refreshHistory(true); refreshDemoUi(); refreshHeatmap();
+      return;
+    }
+
+    // Live account — fill in the real ticket and run the normal preview; execution
+    // still needs the approval modal's name/attestation and a slide to confirm.
+    $('fSymbol').value = symbol;
+    $('fQty').value = quantity;
+    $('fType').value = 'MARKET';
+    $('limitPriceField').style.display = 'none';
+    setSide(isBuy ? 'BUY' : 'SELL');
+    setActiveTab('terminal');
+    $('previewBtn').click();
+    toast('Reviewing this order below — confirm to place it for real.');
+  }
+
+  $('scalperBuyBtn').addEventListener('click', async () => {
+    playClickTone();
+    const symbol = scalperSymbol();
+    let qty = scalperQty;
+    if (qty === 'MAX') {
+      if (!effectiveDemo()) { toast('Max buying power isn’t available live here — pick a fixed size'); return; }
+      const price = demoQuote(symbol);
+      qty = price > 0 ? Math.floor(paperState.balance / price) : 0;
+    }
+    scalperPlaceMarketOrder(symbol, qty, true);
+  });
+  $('scalperSellBtn').addEventListener('click', async () => {
+    playClickTone();
+    const symbol = scalperSymbol();
+    const qty = scalperQty === 'MAX' ? await scalperHeldQty(symbol) : scalperQty;
+    scalperPlaceMarketOrder(symbol, qty, false);
+  });
+  $('scalperClose50Btn').addEventListener('click', async () => {
+    playClickTone();
+    const symbol = scalperSymbol();
+    const held = await scalperHeldQty(symbol);
+    const qty = Math.floor(held / 2);
+    if (qty <= 0) { toast('No position to close'); return; }
+    scalperPlaceMarketOrder(symbol, qty, false);
+  });
+  $('scalperCloseAllBtn').addEventListener('click', async () => {
+    playClickTone();
+    const symbol = scalperSymbol();
+    const held = await scalperHeldQty(symbol);
+    if (held <= 0) { toast('No position to close'); return; }
+    scalperPlaceMarketOrder(symbol, held, false);
+  });
+  $('scalperReverseBtn').addEventListener('click', async () => {
+    playClickTone();
+    const symbol = scalperSymbol();
+    const held = await scalperHeldQty(symbol);
+    if (held <= 0) { toast('No position to reverse'); return; }
+    // Short selling isn't modeled by this account (paper or live) — the closest honest
+    // behavior is to flatten the long rather than silently pretending to open a short.
+    toast('Short selling isn’t supported yet — closing your long position instead');
+    scalperPlaceMarketOrder(symbol, held, false);
+  });
 
   // ---- Live updates: 3-year backtest at a $1000-per-trade notional
   // (POST /v1/backtest/run, every DAILY-bar strategy in the catalog ×
@@ -3152,6 +3411,7 @@
   refreshAll();
   loadStrategies();
   initChart();
+  renderL2();
   refreshLiveUpdates(false);
   refreshHistory(true);
   loadFxRates();
