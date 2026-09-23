@@ -1177,17 +1177,27 @@
 
   const baseUrlInput = $('baseUrl');
   baseUrlInput.value = store.get('edge.baseUrl', DEFAULT_API_URL);
+  // http:// is only allowed for localhost/127.0.0.1/a private LAN address (local
+  // dev) — anywhere else, plain http would send the admin key header in clear
+  // text over the network. This isn't a domain whitelist: self-hosting this
+  // dashboard against your own server on your own domain is an explicitly
+  // supported use (see DEFAULT_API_URL above), so any real remote address is
+  // still allowed — it just has to be the https:// every real host already gives
+  // you (Render, Vercel, a VPS behind a reverse proxy, ...).
+  const LOCAL_HOSTNAME_PATTERN = /^(localhost|127(\.\d{1,3}){3}|\[::1\]|10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2})$/;
   function isValidBaseUrl(value) {
     try {
       const u = new URL(value);
-      return u.protocol === 'http:' || u.protocol === 'https:';
+      if (u.protocol === 'https:') return true;
+      if (u.protocol === 'http:') return LOCAL_HOSTNAME_PATTERN.test(u.hostname);
+      return false;
     } catch { return false; }
   }
   baseUrlInput.addEventListener('change', () => {
     const value = baseUrlInput.value.trim();
     const errorEl = $('baseUrlError');
     if (!isValidBaseUrl(value)) {
-      errorEl.textContent = "That's not a full address — it needs to start with http:// or https://";
+      errorEl.textContent = "That's not a valid address — it needs to start with https:// (http:// only works for localhost)";
       errorEl.style.display = '';
       baseUrlInput.value = store.get('edge.baseUrl', DEFAULT_API_URL);
       toast('Invalid server address — kept your previous one');
@@ -1231,7 +1241,32 @@
 
   function base() { return baseUrlInput.value.trim().replace(/\/$/, ''); }
   function account() { return accountSelect.value; }
-  function adminKey() { return store.get('edge.adminKey', ''); }
+
+  // The admin key is the one genuinely sensitive value this dashboard holds, so it
+  // gets its own storage — sessionStorage instead of the localStorage `store` above
+  // — cleared when the tab/browser closes and never shared across tabs. That
+  // shrinks its exposure window measurably versus localStorage, which persists
+  // indefinitely and is readable by any script with page access (including a
+  // browser extension) long after this session ends. It is NOT a defense against
+  // an XSS payload running in this page right now — nothing client-side can be,
+  // short of an httpOnly cookie a server sets at login, which a static file with
+  // no server-side session has no way to issue.
+  const credentialStore = {
+    get(k, d) { try { return sessionStorage.getItem(k) ?? d; } catch { return d; } },
+    set(k, v) { try { sessionStorage.setItem(k, v); } catch {} },
+  };
+  function adminKey() {
+    const current = credentialStore.get('edge.adminKey', null);
+    if (current != null) return current;
+    // One-time migration for a returning visitor whose key is still sitting in
+    // localStorage from before this change — move it and never write it back there.
+    const legacy = store.get('edge.adminKey', '');
+    if (legacy) {
+      credentialStore.set('edge.adminKey', legacy);
+      try { localStorage.removeItem('edge.adminKey'); } catch {}
+    }
+    return legacy;
+  }
 
   // ---- Paper Trading mode ----
   // Two ways in: someone explicitly switches to Paper Trading, or no access
@@ -1618,7 +1653,15 @@
     let body = null;
     try { body = await res.json(); } catch {}
     if (!res.ok) {
-      const detail = body && body.detail ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)) : res.statusText;
+      // 4xx details come from this API's own handlers and are meant to be read —
+      // "Your price looks unreasonable" is exactly what should reach the banner.
+      // A 5xx is different: it means something broke unexpectedly, so whatever
+      // text came back (which could be a raw traceback or an internal file path
+      // in a misconfigured deployment) never reaches the user — only a flat,
+      // friendly message does. The real detail is still on the Error object
+      // (e.err.body) for anyone debugging in devtools, just not rendered.
+      const rawDetail = body && body.detail ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)) : res.statusText;
+      const detail = res.status >= 500 ? 'The server hit an unexpected problem. Try again in a moment.' : rawDetail;
       const err = new Error(detail); err.status = res.status; err.body = body;
       if ([401, 403, 500, 502, 503, 504].includes(res.status)) pollNoteFailure();
       else pollNoteSuccess();
@@ -1665,16 +1708,20 @@
   // reads, e.g. "QQQ $410 Call · Oct 12" — nobody outside this codebase
   // should ever see the raw 21-char string.
   function formatSymbol(raw) {
-    if (!raw || raw.length !== 21) return raw;
+    // Every return path is escaped — this is the one function nearly every symbol
+    // display on the page routes through, including whatever a user (or a tampered
+    // localStorage paper-trading order) typed into the order ticket, so it's the
+    // cheapest single chokepoint to guarantee no symbol can inject markup.
+    if (!raw || raw.length !== 21) return escapeHtml(raw);
     const root = raw.slice(0, 6).trim();
     const datePart = raw.slice(6, 12);
     const right = raw.slice(12, 13);
     const strikePart = raw.slice(13);
-    if (!/^\d{6}$/.test(datePart) || (right !== 'C' && right !== 'P') || !/^\d{8}$/.test(strikePart)) return raw;
+    if (!/^\d{6}$/.test(datePart) || (right !== 'C' && right !== 'P') || !/^\d{8}$/.test(strikePart)) return escapeHtml(raw);
     const strike = Number(strikePart) / 1000;
     const mm = Number(datePart.slice(2, 4)), dd = Number(datePart.slice(4, 6));
     const monthLabel = MONTH_ABBR[mm - 1] || '';
-    return `${root} $${strike % 1 === 0 ? strike : strike.toFixed(2)} ${right === 'C' ? 'Call' : 'Put'} · ${monthLabel} ${dd}`;
+    return escapeHtml(`${root} $${strike % 1 === 0 ? strike : strike.toFixed(2)} ${right === 'C' ? 'Call' : 'Put'} · ${monthLabel} ${dd}`);
   }
   function timeAgo(iso) {
     const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z'));
@@ -2052,10 +2099,19 @@
   // fetch failure degrades to a quiet message in the card rather than a
   // toast, since this section is supplementary, not core trading
   // functionality.
+  // A plain equity/ETF ticker whitelist — letters, digits, "." (BRK.B) and "-"
+  // only, matching the 6-char maxlength these fields already carry. Deliberately
+  // NOT applied to the order ticket's own #fSymbol, which also accepts a 21-char
+  // OCC option symbol; that field relies on escapeHtml() at render time instead.
+  const PLAIN_SYMBOL_PATTERN = /^[A-Z0-9.-]{1,6}$/;
+  function isPlainSymbol(s) { return PLAIN_SYMBOL_PATTERN.test(s); }
+
+  // Safe for BOTH text content and inside a "..."-quoted attribute — a DOM
+  // textContent round-trip (the previous implementation) only escapes &, < and >,
+  // which is not enough wherever a value lands inside an attribute (a bare " can
+  // still break out of e.g. data-symbol="${value}"), so this encodes quotes too.
   function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str == null ? '' : String(str);
-    return div.innerHTML;
+    return String(str == null ? '' : str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
   function sigBadge(agreement) {
@@ -2146,7 +2202,7 @@
     const el = $('watchlistTabs');
     if (!names.length) { el.innerHTML = ''; return; }
     el.innerHTML = names.map(name =>
-      `<button type="button" class="watchlist-tab ${name === activeWatchlistName ? 'active' : ''}" data-list="${name}">${name}</button>`
+      `<button type="button" class="watchlist-tab ${name === activeWatchlistName ? 'active' : ''}" data-list="${escapeHtml(name)}">${escapeHtml(name)}</button>`
     ).join('');
     el.querySelectorAll('.watchlist-tab').forEach(btn => {
       btn.addEventListener('click', () => { activeWatchlistName = btn.dataset.list; renderWatchlistTabs(); renderWatchlistBody(); });
@@ -2161,10 +2217,10 @@
       return;
     }
     el.innerHTML = symbols.map(s => `
-      <div class="watchlist-row" data-symbol="${s}">
-        <span class="wl-symbol">${s}</span>
-        <span class="wl-price num" data-wl-price="${s}">…</span>
-        <button class="wl-remove" data-remove="${s}" title="Remove from list">✕</button>
+      <div class="watchlist-row" data-symbol="${escapeHtml(s)}">
+        <span class="wl-symbol">${escapeHtml(s)}</span>
+        <span class="wl-price num" data-wl-price="${escapeHtml(s)}">…</span>
+        <button class="wl-remove" data-remove="${escapeHtml(s)}" title="Remove from list">✕</button>
       </div>`).join('');
 
     el.querySelectorAll('[data-remove]').forEach(btn => {
@@ -2190,6 +2246,7 @@
     const symbol = $('wlNewSymbol').value.trim().toUpperCase();
     const listName = $('wlNewList').value.trim() || activeWatchlistName || 'Watchlist';
     if (!symbol) { toast('Enter a symbol'); return; }
+    if (!isPlainSymbol(symbol)) { toast('Symbols can only use letters, numbers, "." and "-"'); return; }
     try {
       await api(`/v1/watchlists/${encodeURIComponent(listName)}/items`, { method: 'POST', body: JSON.stringify({ symbol }) });
       $('wlNewSymbol').value = '';
@@ -2215,8 +2272,8 @@
       el.innerHTML = alerts.map(a => `
         <div class="alert-row">
           <div>
-            <div class="alert-desc">${a.symbol} <span style="color:var(--ink-faint);font-weight:500">${a.condition === 'ABOVE' ? 'above' : 'below'}</span> <b>${money(a.target_price)}</b></div>
-            <div class="alert-meta">set by ${a.created_by} · ${timeAgo(a.created_at)}</div>
+            <div class="alert-desc">${escapeHtml(a.symbol)} <span style="color:var(--ink-faint);font-weight:500">${a.condition === 'ABOVE' ? 'above' : 'below'}</span> <b>${money(a.target_price)}</b></div>
+            <div class="alert-meta">set by ${escapeHtml(a.created_by)} · ${timeAgo(a.created_at)}</div>
           </div>
           <button class="wl-remove" data-cancel-alert="${a.id}" title="Cancel this alert">✕</button>
         </div>`).join('');
@@ -2236,7 +2293,8 @@
     const condition = $('alertCondition').value;
     const price = $('alertPrice').value;
     if (!symbol) { toast('Enter a symbol'); return; }
-    if (!price || Number(price) <= 0) { toast('Enter a target price'); return; }
+    if (!isPlainSymbol(symbol)) { toast('Symbols can only use letters, numbers, "." and "-"'); return; }
+    if (!isCleanPositiveNumber(price)) { toast('Enter a valid target price greater than 0'); return; }
     const createdBy = store.get('edge.approver', 'you');
     try {
       await api('/v1/alerts', { method: 'POST', body: JSON.stringify({ symbol, condition, target_price: Number(price), created_by: createdBy }) });
@@ -2323,13 +2381,13 @@
   function openAdminModal(title, onConfirm, description) {
     $('adminTitle').textContent = title;
     $('adminSub').textContent = description || 'Needed to view your account and place or manage orders.';
-    $('mAdminKey').value = store.get('edge.adminKey', '');
+    $('mAdminKey').value = adminKey();
     $('adminOverlay').classList.add('show');
     const confirmBtn = $('mAdminConfirm');
     const handler = async () => {
       const key = $('mAdminKey').value.trim();
       if (!key) return;
-      store.set('edge.adminKey', key);
+      credentialStore.set('edge.adminKey', key);
       confirmBtn.disabled = true;
       try { await onConfirm(key); $('adminOverlay').classList.remove('show'); }
       catch (e) { toast('Failed: ' + e.message); }
@@ -3095,6 +3153,7 @@
   $('chartLoadBtn').addEventListener('click', () => {
     const sym = $('chartSymbol').value.trim().toUpperCase();
     if (!sym) { toast('Enter a symbol'); return; }
+    if (!isPlainSymbol(sym)) { toast('Symbols can only use letters, numbers, "." and "-"'); return; }
     store.set('edge.chartSymbol', sym);
     loadChart(sym);
     renderL2();
