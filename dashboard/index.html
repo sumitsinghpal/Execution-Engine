@@ -86,6 +86,7 @@
   .pos-qty, .alert-desc, .brk-levels, .feed-sub, .history-row-sub,
   #chartSymbol, #fSymbol, #histSymbol, #wlNewSymbol, #alertSymbol,
   #fQty, #fLimit, #agentNotional, #fBracketStop, #fBracketTarget, #fBracketTrail,
+  #fSizeDollars, #fSizeRiskPct,
   #alertPrice, #histFrom, #histTo {
     font-family: var(--font-mono);
   }
@@ -249,6 +250,51 @@
   }
   .seg button.active.buy { background: var(--buy); color: var(--accent-ink); }
   .seg button.active.sell { background: var(--sell); color: #fff; }
+  .seg.sizing-seg button.active { background: var(--system); color: #fff; }
+  .field input[readonly] { color: var(--ink-muted); cursor: not-allowed; }
+
+  .size-readout { font-size: 12.5px; color: var(--ink-muted); margin-top: 8px; line-height: 1.5; }
+  .size-readout.warn { color: var(--warn); }
+
+  .rr-meter { margin-top: 20px; }
+  .rr-track { position: relative; height: 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 3px; margin: 10px 8px 42px; }
+  .rr-marker { position: absolute; top: 50%; transform: translate(-50%, -50%); }
+  .rr-marker .rr-dot { display: block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--surface); }
+  .rr-marker.stop .rr-dot { background: var(--sell); }
+  .rr-marker.entry .rr-dot { background: var(--system); width: 14px; height: 14px; margin: -1px; }
+  .rr-marker.target .rr-dot { background: var(--buy); }
+  .rr-marker .rr-label {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    font-size: 10.5px; color: var(--ink-faint); white-space: nowrap; text-align: center; line-height: 1.5;
+  }
+  .rr-marker .rr-label b { font-size: 11.5px; color: var(--ink); font-family: var(--font-mono); }
+  .rr-ratio {
+    text-align: center; font-family: var(--font-mono); font-weight: 700; font-size: 15px;
+    padding: 9px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .rr-ratio.up { color: var(--buy); }
+  .rr-ratio.down { color: var(--warn); }
+
+  .slide-confirm-track {
+    position: relative; height: 52px; border-radius: 26px; background: var(--surface-2);
+    border: 1px solid var(--border); overflow: hidden;
+  }
+  .slide-confirm-track.busy input { pointer-events: none; }
+  .slide-confirm-fill {
+    position: absolute; inset: 0; width: 0%;
+    background: linear-gradient(90deg, var(--buy-soft), var(--buy)); transition: width .05s linear;
+  }
+  .slide-confirm-label {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13.5px; color: var(--ink); pointer-events: none; letter-spacing: .01em;
+  }
+  .slide-confirm-track input[type="range"] {
+    position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+  }
+  .slide-confirm-track input[type="range"]:disabled { cursor: not-allowed; }
+  .slide-confirm-track input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 44px; height: 44px; border-radius: 50%; }
+  .slide-confirm-track input[type="range"]::-moz-range-thumb { width: 44px; height: 44px; border-radius: 50%; border: none; }
 
   .field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
   .field label { font-size: 11.5px; font-weight: 600; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; }
@@ -657,6 +703,40 @@
             </div>
           </div>
 
+          <div class="field">
+            <label>Position sizing</label>
+            <div class="seg sizing-seg" id="sizingModeSeg">
+              <button type="button" class="active" data-size-mode="shares">Fixed shares</button>
+              <button type="button" data-size-mode="dollars">$ Amount</button>
+              <button type="button" data-size-mode="risk">% Account risk</button>
+            </div>
+          </div>
+          <div class="field-row" id="sizingDollarsRow" style="display:none">
+            <div class="field">
+              <label for="fSizeDollars">Dollars to invest</label>
+              <input id="fSizeDollars" type="number" min="1" step="1" placeholder="e.g. 1000">
+            </div>
+          </div>
+          <div class="field-row" id="sizingRiskRow" style="display:none">
+            <div class="field">
+              <label for="fSizeRiskPct">Risk (% of account)</label>
+              <input id="fSizeRiskPct" type="number" min="0.1" step="0.1" value="1">
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="fBracketStop">Stop loss (USD)</label>
+              <input id="fBracketStop" type="number" step="0.01" placeholder="optional">
+            </div>
+            <div class="field">
+              <label for="fBracketTarget">Target (USD)</label>
+              <input id="fBracketTarget" type="number" step="0.01" placeholder="optional">
+            </div>
+          </div>
+          <div id="sizeReadout" class="size-readout" style="display:none"></div>
+          <div id="rrMeter" class="rr-meter" style="display:none"></div>
+
           <div class="field-row">
             <div class="field">
               <label for="fType">When to fill</label>
@@ -685,21 +765,11 @@
           <div class="field-hint" id="futuresHint" style="display:none">Symbol format: product root + month code + year, e.g. <b>ESZ26</b> (E-mini S&amp;P 500, Dec 2026). Supported: ES, NQ, YM, RTY, CL, NG, GC, SI, ZB, ZN, ZC, ZS, ZW.</div>
 
           <div class="field" id="bracketToggleField">
-            <label class="checkbox-label"><input type="checkbox" id="fUseBracket"> Auto-exit this trade <span class="hint">(Buy only — closes itself when a level hits)</span></label>
+            <label class="checkbox-label"><input type="checkbox" id="fUseBracket"> Auto-exit this trade using the stop/target above <span class="hint">(Buy only — closes itself when a level hits)</span></label>
           </div>
           <div id="bracketFields" class="bracket-fields" style="display:none">
-            <div class="field-row">
-              <div class="field">
-                <label for="fBracketStop">Stop loss (USD)</label>
-                <input id="fBracketStop" type="number" step="0.01" placeholder="optional">
-              </div>
-              <div class="field">
-                <label for="fBracketTarget">Take profit (USD)</label>
-                <input id="fBracketTarget" type="number" step="0.01" placeholder="optional">
-              </div>
-            </div>
-            <div class="field">
-              <label for="fBracketTrail">Or trail the stop (%)</label>
+            <div class="field" style="margin-top:0">
+              <label for="fBracketTrail">Or trail the stop instead (%)</label>
               <input id="fBracketTrail" type="number" step="0.1" min="0.1" max="89" placeholder="e.g. 5 for 5%">
             </div>
           </div>
@@ -911,7 +981,13 @@
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="mCancel">Cancel</button>
-      <button class="btn btn-primary" id="mConfirm">Place order</button>
+    </div>
+    <div class="slide-confirm">
+      <div class="slide-confirm-track" id="slideConfirmTrack">
+        <div class="slide-confirm-fill" id="slideConfirmFill"></div>
+        <span class="slide-confirm-label" id="slideConfirmLabel">Slide to execute order →</span>
+        <input type="range" id="mConfirm" min="0" max="100" value="0" step="1" aria-label="Slide to execute order">
+      </div>
     </div>
   </div>
 </div>
@@ -1316,6 +1392,7 @@
     try {
       const r = await api(`/v1/account/${encodeURIComponent(account())}/balances`);
       const nlv = r.balances.net_liquidation_value ?? r.balances.availableFunds ?? 0;
+      lastKnownBalanceUsd = Number(nlv) || null;
       $('balanceValue').textContent = bigMoney(nlv);
       $('balanceMode').textContent = '';
       updateModeBanner(r.balances.mode);
@@ -1342,6 +1419,7 @@
     } catch (e) {
       $('drawdownStat').textContent = '—';
     }
+    recomputeSizing();
   }
 
   async function refreshMarket() {
@@ -1986,6 +2064,116 @@
     $('bracketFields').style.display = $('fUseBracket').checked ? '' : 'none';
   });
 
+  // ---- Risk sizing calculator + R:R meter ----
+  let sizingMode = 'shares';
+  let lastEntryQuote = null;
+  let lastKnownBalanceUsd = null;
+
+  function effectiveEntryPrice() {
+    if ($('fType').value === 'LIMIT') {
+      const v = Number($('fLimit').value);
+      return v > 0 ? v : null;
+    }
+    return lastEntryQuote;
+  }
+
+  async function refreshEntryQuote() {
+    if ($('fType').value === 'LIMIT') { recomputeSizing(); return; }
+    const symbol = $('fSymbol').value.trim().toUpperCase();
+    if (!symbol) { lastEntryQuote = null; recomputeSizing(); return; }
+    try {
+      const r = await api(`/v1/quotes?symbols=${encodeURIComponent(symbol)}`);
+      const q = (r.quotes || []).find(x => x.symbol === symbol);
+      lastEntryQuote = (q && !q.error && q.last) ? Number(q.last) : null;
+    } catch { lastEntryQuote = null; }
+    recomputeSizing();
+  }
+
+  document.querySelectorAll('#sizingModeSeg button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      sizingMode = btn.dataset.sizeMode;
+      document.querySelectorAll('#sizingModeSeg button').forEach(b => b.classList.toggle('active', b === btn));
+      $('sizingDollarsRow').style.display = sizingMode === 'dollars' ? '' : 'none';
+      $('sizingRiskRow').style.display = sizingMode === 'risk' ? '' : 'none';
+      $('fQty').readOnly = sizingMode !== 'shares';
+      recomputeSizing();
+    });
+  });
+
+  ['fSizeDollars', 'fSizeRiskPct', 'fBracketStop', 'fBracketTarget'].forEach(id => {
+    $(id).addEventListener('input', recomputeSizing);
+  });
+  $('fSymbol').addEventListener('change', refreshEntryQuote);
+  $('fLimit').addEventListener('input', recomputeSizing);
+  $('fType').addEventListener('change', refreshEntryQuote);
+
+  function recomputeSizing() {
+    const entry = effectiveEntryPrice();
+    const readout = $('sizeReadout');
+    readout.classList.remove('warn');
+    if (sizingMode === 'shares') {
+      readout.style.display = 'none';
+    } else if (sizingMode === 'dollars') {
+      readout.style.display = '';
+      const dollars = Number($('fSizeDollars').value);
+      if (!(entry > 0)) { readout.textContent = 'Waiting for a price…'; }
+      else if (!(dollars > 0)) { readout.textContent = 'Enter a dollar amount to invest'; }
+      else {
+        const qty = Math.floor(dollars / entry);
+        $('fQty').value = qty;
+        readout.textContent = qty > 0
+          ? `≈ ${qty} share${qty === 1 ? '' : 's'} at ${money(entry)} = ${money(qty * entry)}`
+          : `${money(dollars)} doesn't buy even 1 share at ${money(entry)}`;
+        if (qty === 0) readout.classList.add('warn');
+      }
+    } else if (sizingMode === 'risk') {
+      readout.style.display = '';
+      const riskPct = Number($('fSizeRiskPct').value);
+      const stop = Number($('fBracketStop').value);
+      if (!(lastKnownBalanceUsd > 0)) { readout.textContent = 'Waiting for your account balance…'; }
+      else if (!(entry > 0)) { readout.textContent = 'Waiting for a price…'; }
+      else if (!(stop > 0)) { readout.textContent = 'Enter a stop loss above to size by risk'; readout.classList.add('warn'); }
+      else {
+        const perShareRisk = Math.abs(entry - stop);
+        if (perShareRisk <= 0) { readout.textContent = 'Stop loss must differ from the entry price'; readout.classList.add('warn'); }
+        else {
+          const riskDollars = lastKnownBalanceUsd * (riskPct / 100);
+          const qty = Math.floor(riskDollars / perShareRisk);
+          $('fQty').value = qty;
+          readout.textContent = qty > 0
+            ? `Risking ${money(riskDollars)} (${riskPct || 0}% of ${money(lastKnownBalanceUsd)}) at ${money(perShareRisk)}/share ≈ ${qty} share${qty === 1 ? '' : 's'}`
+            : `${money(riskDollars)} of risk doesn't cover even 1 share at ${money(perShareRisk)}/share`;
+          if (qty === 0) readout.classList.add('warn');
+        }
+      }
+    }
+    renderRrMeter(entry);
+  }
+
+  function renderRrMeter(entry) {
+    const el = $('rrMeter');
+    const stop = Number($('fBracketStop').value);
+    const target = Number($('fBracketTarget').value);
+    if (!(entry > 0) || !(stop > 0) || !(target > 0)) { el.style.display = 'none'; return; }
+    const risk = Math.abs(entry - stop);
+    const reward = Math.abs(target - entry);
+    if (risk <= 0) { el.style.display = 'none'; return; }
+    const ratio = reward / risk;
+    const values = [stop, entry, target];
+    const lo = Math.min(...values), hi = Math.max(...values);
+    const span = (hi - lo) || 1;
+    const pctOf = (v) => ((v - lo) / span) * 100;
+    el.style.display = '';
+    el.innerHTML = `
+      <div class="rr-track">
+        <div class="rr-marker stop" style="left:${pctOf(stop)}%"><span class="rr-dot"></span><span class="rr-label">Stop<br><b>${money(stop)}</b></span></div>
+        <div class="rr-marker entry" style="left:${pctOf(entry)}%"><span class="rr-dot"></span><span class="rr-label">Entry<br><b>${money(entry)}</b></span></div>
+        <div class="rr-marker target" style="left:${pctOf(target)}%"><span class="rr-dot"></span><span class="rr-label">Target<br><b>${money(target)}</b></span></div>
+      </div>
+      <div class="rr-ratio ${ratio >= 2 ? 'up' : 'down'}">R:R = ${ratio.toFixed(1)}x</div>
+    `;
+  }
+
   let lastPreview = null;
   let activePlan = null; // { strategy_id, strategy_name, stop_loss_price, take_profit_price } when the ticket was loaded from a signal
 
@@ -2081,19 +2269,69 @@
     if (approved) $('executeBtn').addEventListener('click', openApprovalModal);
   }
 
+  // A chime confirming the order actually filled — never blocks or delays
+  // the real placement flow if the browser has no audio support.
+  function playFillChime() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const now = ctx.currentTime;
+      [523.25, 783.99].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine'; osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, now + i * 0.09);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + i * 0.09 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.09 + 0.22);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + i * 0.09); osc.stop(now + i * 0.09 + 0.24);
+      });
+      setTimeout(() => ctx.close(), 500);
+    } catch (e) { /* audio is a nice-to-have — never let it block a real order */ }
+  }
+
+  const slideTrack = $('slideConfirmTrack');
+  const slideFill = $('slideConfirmFill');
+  const slideLabel = $('slideConfirmLabel');
+  let orderExecuting = false;
+
+  function resetSlideConfirm() {
+    orderExecuting = false;
+    $('mConfirm').value = 0;
+    $('mConfirm').disabled = false;
+    slideTrack.classList.remove('busy');
+    slideFill.style.width = '0%';
+    slideLabel.textContent = 'Slide to execute order →';
+  }
+
   function openApprovalModal() {
     $('mApprover').value = store.get('edge.approver', '');
     $('mAttestation').value = 'I have reviewed and approve this order';
+    resetSlideConfirm();
     $('approvalOverlay').classList.add('show');
   }
-  $('mCancel').addEventListener('click', () => $('approvalOverlay').classList.remove('show'));
-  $('mConfirm').addEventListener('click', async () => {
+  $('mCancel').addEventListener('click', () => { $('approvalOverlay').classList.remove('show'); resetSlideConfirm(); });
+  $('mConfirm').addEventListener('input', () => {
+    const v = Number($('mConfirm').value);
+    slideFill.style.width = v + '%';
+    if (v >= 95 && !orderExecuting) {
+      orderExecuting = true;
+      $('mConfirm').value = 100;
+      $('mConfirm').disabled = true;
+      slideTrack.classList.add('busy');
+      slideFill.style.width = '100%';
+      executeOrder();
+    }
+  });
+
+  async function executeOrder() {
     const approvedBy = $('mApprover').value.trim();
     const attestation = $('mAttestation').value.trim();
-    if (!approvedBy || !attestation) { toast('Fill in both fields'); return; }
+    if (!approvedBy || !attestation) { toast('Fill in both fields'); resetSlideConfirm(); return; }
     store.set('edge.approver', approvedBy);
 
-    const btn = $('mConfirm'); btn.disabled = true; btn.textContent = 'Placing order…';
+    slideLabel.textContent = 'Placing order…';
     try {
       const req = {
         decision_id: lastPreview.proposal.decision_id,
@@ -2108,6 +2346,7 @@
       };
       const receipt = await api('/v1/orders/execute', { method: 'POST', body: JSON.stringify(req) });
       toast(`Order placed · ${receipt.execution_id}`);
+      playFillChime();
 
       if (side === 'BUY' && $('fUseBracket').checked) {
         const stop = $('fBracketStop').value;
@@ -2133,6 +2372,7 @@
         }
         $('fUseBracket').checked = false; $('bracketFields').style.display = 'none';
         $('fBracketStop').value = ''; $('fBracketTarget').value = ''; $('fBracketTrail').value = '';
+        recomputeSizing();
       }
 
       $('approvalOverlay').classList.remove('show');
@@ -2142,9 +2382,9 @@
     } catch (e) {
       toast('Could not place order: ' + e.message);
     } finally {
-      btn.disabled = false; btn.textContent = 'Place order';
+      resetSlideConfirm();
     }
-  });
+  }
 
   // ---- Strategy catalog ----
   const CATEGORY_LABELS = { INTRADAY: 'Intraday', MULTI_DAY: 'Multi-day', OTHER: 'Others' };
