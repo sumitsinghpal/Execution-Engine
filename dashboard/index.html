@@ -1351,7 +1351,12 @@
   const PAPER_STATE_KEY = 'edge.paperState.v1';
   const PAPER_STARTING_BALANCE = 100000;
   function freshPaperState() {
-    return { balance: PAPER_STARTING_BALANCE, positions: {}, orders: [], quotes: {}, pendingPreviews: {}, nextFillId: 1 };
+    return {
+      balance: PAPER_STARTING_BALANCE, positions: {}, orders: [], quotes: {}, pendingPreviews: {}, nextFillId: 1,
+      watchlists: {}, alerts: [], nextAlertId: 1, brackets: [], nextBracketId: 1,
+      killSwitchEnabled: false, killSwitchSetBy: null, killSwitchReason: null,
+      dailyPlan: null,
+    };
   }
   function loadPaperState() {
     try {
@@ -1430,8 +1435,11 @@
     const quote = demoQuote(symbol);
     const price = proposal.order_type === 'LIMIT' ? Number(proposal.limit_price) : quote;
     const notional = price * quantity;
-    const checks = { kill_switch_off: true, account_allowed: true, symbol_allowed: true, quote_fresh: true };
+    const checks = { kill_switch_off: !paperState.killSwitchEnabled, account_allowed: true, symbol_allowed: true, quote_fresh: true };
     const rejections = [];
+    if (!checks.kill_switch_off) {
+      rejections.push('Trading is paused (kill switch) — resume it under Journal & Risk before placing paper orders.');
+    }
     if (proposal.order_type === 'LIMIT' && quote > 0) {
       checks.limit_price_reasonable = Math.abs(price - quote) / quote <= 0.08;
       if (!checks.limit_price_reasonable) {
@@ -1458,20 +1466,12 @@
     };
   }
 
-  // Execute: actually moves the paper balance and position, and records a real
-  // FILLED order so Activity, Transaction history, CSV export and the PnL
-  // calendar all pick it up exactly like a real fill would.
-  function demoExecuteOrder(req) {
-    const pending = paperState.pendingPreviews[req.preview_id];
-    if (!pending) throw new Error('This preview has expired — review the order again.');
-    delete paperState.pendingPreviews[req.preview_id];
-
-    const { symbol, quantity, isBuy, price, order_type, limit_price, agent_id } = pending;
-    // A market order chases the tape a little; a limit fills at exactly its own price.
-    const slippageBps = order_type === 'LIMIT' ? 0 : 5;
-    const fillPrice = order_type === 'LIMIT' ? Number(limit_price) : price * (1 + (isBuy ? 1 : -1) * slippageBps / 10000);
+  // Shared by demoExecuteOrder() and a triggered bracket's auto-exit — the same
+  // balance/position/order-append logic either way, so a bracket-closed sell
+  // is indistinguishable from a manually-placed one anywhere it's displayed
+  // (Activity, Transaction history, CSV export, the PnL calendar).
+  function recordPaperFill({ symbol, isBuy, quantity, fillPrice, decisionId, orderType, limitPrice, agentId }) {
     const notional = fillPrice * quantity;
-
     let realizedPl = null;
     const pos = paperState.positions[symbol] || { qty: 0, avgCost: 0 };
     if (isBuy) {
@@ -1489,15 +1489,187 @@
 
     const executionId = `paper-fill-${paperState.nextFillId++}`;
     const order = {
-      decision_id: req.decision_id, execution_id: executionId, symbol,
-      instruction: isBuy ? 'BUY' : 'SELL', quantity, order_type, limit_price: limit_price || null,
+      decision_id: decisionId, execution_id: executionId, symbol,
+      instruction: isBuy ? 'BUY' : 'SELL', quantity, order_type: orderType, limit_price: limitPrice || null,
       status: 'FILLED', filled_quantity: quantity, average_fill_price: fillPrice,
       estimated_notional_usd: notional, realized_pl_usd: realizedPl,
-      created_at: new Date().toISOString(), agent_id,
+      created_at: new Date().toISOString(), agent_id: agentId,
     };
     paperState.orders.push(order);
+    return order;
+  }
+
+  // Execute: actually moves the paper balance and position, and records a real
+  // FILLED order so Activity, Transaction history, CSV export and the PnL
+  // calendar all pick it up exactly like a real fill would.
+  function demoExecuteOrder(req) {
+    const pending = paperState.pendingPreviews[req.preview_id];
+    if (!pending) throw new Error('This preview has expired — review the order again.');
+    delete paperState.pendingPreviews[req.preview_id];
+
+    const { symbol, quantity, isBuy, price, order_type, limit_price, agent_id } = pending;
+    // A market order chases the tape a little; a limit fills at exactly its own price.
+    const slippageBps = order_type === 'LIMIT' ? 0 : 5;
+    const fillPrice = order_type === 'LIMIT' ? Number(limit_price) : price * (1 + (isBuy ? 1 : -1) * slippageBps / 10000);
+
+    const order = recordPaperFill({
+      symbol, isBuy, quantity, fillPrice,
+      decisionId: req.decision_id, orderType: order_type, limitPrice: limit_price, agentId: agent_id,
+    });
     savePaperState();
-    return { execution_id: executionId, status: 'FILLED', order };
+    return { execution_id: order.execution_id, status: 'FILLED', order };
+  }
+
+  // ---- Paper-mode watchlists, alerts, bracket orders, kill switch, and the
+  // automated agent — every one of these mutating actions used to fall through
+  // to api()'s generic "not simulated yet" refusal. They're genuinely simulated
+  // now, persisted in the same paperState object as everything else, so a
+  // Paper Trading account behaves like a coherent product instead of one where
+  // only order execution actually works. See docs/existing-site-review-plan.md
+  // findings #1/#2/#3 for why these were refused before this change.
+
+  function demoAddWatchlistItem(path, opts) {
+    const listName = decodeURIComponent(path.split('?')[0].split('/')[3] || '');
+    const body = JSON.parse(opts.body || '{}');
+    const symbol = String(body.symbol || '').trim().toUpperCase();
+    if (!listName) throw new Error('A list name is required.');
+    if (!symbol) throw new Error('A symbol is required.');
+    if (!paperState.watchlists[listName]) paperState.watchlists[listName] = [];
+    if (!paperState.watchlists[listName].includes(symbol)) paperState.watchlists[listName].push(symbol);
+    savePaperState();
+    return { list: listName, symbols: paperState.watchlists[listName] };
+  }
+
+  function demoRemoveWatchlistItem(path) {
+    const parts = path.split('?')[0].split('/');
+    const listName = decodeURIComponent(parts[3] || '');
+    const symbol = decodeURIComponent(parts[5] || '');
+    if (paperState.watchlists[listName]) {
+      paperState.watchlists[listName] = paperState.watchlists[listName].filter((s) => s !== symbol);
+      if (paperState.watchlists[listName].length === 0) delete paperState.watchlists[listName];
+    }
+    savePaperState();
+    return {};
+  }
+
+  function demoCreateAlert(opts) {
+    const body = JSON.parse(opts.body || '{}');
+    const symbol = String(body.symbol || '').trim().toUpperCase();
+    const targetPrice = Number(body.target_price);
+    if (!symbol) throw new Error('A symbol is required.');
+    if (!(targetPrice > 0)) throw new Error('A valid target price greater than 0 is required.');
+    const alert = {
+      id: `paper-alert-${paperState.nextAlertId++}`,
+      symbol, condition: body.condition === 'BELOW' ? 'BELOW' : 'ABOVE', target_price: targetPrice,
+      created_by: body.created_by || 'you', created_at: new Date().toISOString(), active: true,
+    };
+    paperState.alerts.push(alert);
+    savePaperState();
+    return alert;
+  }
+
+  function demoDeleteAlert(path) {
+    const id = decodeURIComponent(path.split('?')[0].split('/').pop() || '');
+    paperState.alerts = paperState.alerts.filter((a) => a.id !== id);
+    savePaperState();
+    return {};
+  }
+
+  function demoAttachBracket(opts) {
+    const body = JSON.parse(opts.body || '{}');
+    const order = paperState.orders.find((o) => o.decision_id === body.entry_decision_id);
+    if (!order) throw new Error('Could not find the entry order to attach this auto-exit plan to.');
+    if (body.stop_loss_price == null && body.take_profit_price == null && body.trailing_stop_pct == null) {
+      throw new Error('Set at least a stop loss, a target, or a trailing stop.');
+    }
+    const bracket = {
+      id: `paper-bracket-${paperState.nextBracketId++}`,
+      entry_decision_id: body.entry_decision_id,
+      account: account(), symbol: order.symbol, quantity: order.filled_quantity || order.quantity,
+      entry_price: order.average_fill_price,
+      stop_loss_price: body.stop_loss_price != null ? Number(body.stop_loss_price) : null,
+      take_profit_price: body.take_profit_price != null ? Number(body.take_profit_price) : null,
+      trailing_stop_pct: body.trailing_stop_pct != null ? Number(body.trailing_stop_pct) : null,
+      highest_price_seen: order.average_fill_price,
+      status: 'OPEN', created_by: body.created_by || 'you', created_at: new Date().toISOString(),
+    };
+    paperState.brackets.push(bracket);
+    savePaperState();
+    return bracket;
+  }
+
+  function demoCancelBracket(path) {
+    const id = decodeURIComponent(path.split('?')[0].split('/')[4] || '');
+    const bracket = paperState.brackets.find((b) => b.id === id);
+    if (!bracket) throw new Error('That auto-exit plan no longer exists.');
+    if (bracket.status === 'OPEN') bracket.status = 'CANCELED';
+    savePaperState();
+    return bracket;
+  }
+
+  // Checked on an interval (see setInterval(checkBracketTriggers, ...) below) —
+  // not on every quote fetch, since most quote fetches (sizing calculator, L2
+  // ladder) have nothing to do with whether an open bracket should fire.
+  function checkBracketTriggers() {
+    let changed = false;
+    paperState.brackets.forEach((b) => {
+      if (b.status !== 'OPEN') return;
+      const held = (paperState.positions[b.symbol] || { qty: 0 }).qty;
+      if (held <= 0) { b.status = 'CLOSED_ERROR'; changed = true; return; } // position already closed some other way
+      const price = demoQuote(b.symbol);
+      let exitReason = null;
+      if (b.trailing_stop_pct) {
+        b.highest_price_seen = Math.max(b.highest_price_seen || b.entry_price, price);
+        if (price <= b.highest_price_seen * (1 - b.trailing_stop_pct)) exitReason = 'CLOSED_TRAILING_STOP';
+      }
+      if (!exitReason && b.stop_loss_price && price <= b.stop_loss_price) exitReason = 'CLOSED_STOP';
+      if (!exitReason && b.take_profit_price && price >= b.take_profit_price) exitReason = 'CLOSED_TARGET';
+      if (!exitReason) return;
+
+      const qty = Math.min(held, b.quantity);
+      recordPaperFill({
+        symbol: b.symbol, isBuy: false, quantity: qty, fillPrice: price,
+        decisionId: b.entry_decision_id, orderType: 'MARKET', limitPrice: null, agentId: 'bracket',
+      });
+      b.status = exitReason;
+      b.closed_at = new Date().toISOString();
+      b.exit_price = price;
+      changed = true;
+    });
+    if (changed) {
+      savePaperState();
+      refreshFeed(); refreshPositions(); refreshBalance(); refreshBracketOrders(); refreshHistory(true);
+      refreshDemoUi(); refreshHeatmap();
+    }
+  }
+
+  function demoSetKillSwitch(enabled, setBy) {
+    paperState.killSwitchEnabled = enabled;
+    paperState.killSwitchSetBy = setBy;
+    paperState.killSwitchReason = enabled ? 'Paused from the dashboard (paper)' : null;
+    savePaperState();
+  }
+
+  function demoStartAgent(opts) {
+    const body = JSON.parse(opts.body || '{}');
+    const notional = Number(body.notional_per_trade_usd);
+    if (!(notional > 0)) throw new Error('A valid amount per trade greater than 0 is required.');
+    // The same illustrative catalog subset already shown as "trading now" candidates
+    // elsewhere in Paper Trading — matches the real endpoint's response shape closely
+    // enough that renderPlanStatus()/renderAgentBadges() need no changes at all.
+    paperState.dailyPlan = {
+      strategy_ids: ['orb', 'vwap_reversion', 'rsi2_connors'],
+      notional_per_trade_usd: String(notional),
+      armed_by: body.started_by || 'you', armed_at: new Date().toISOString(), active: true,
+    };
+    savePaperState();
+    return { plan: paperState.dailyPlan };
+  }
+
+  function demoStopAgent() {
+    paperState.dailyPlan = null;
+    savePaperState();
+    return {};
   }
 
   function demoAgents() {
@@ -1566,12 +1738,20 @@
     { match: /^\/v1\/orders$/, methods: ['GET'], data: demoOrders },
     { match: /^\/v1\/quotes$/, methods: ['GET'], data: demoQuotesResponse },
     { match: /^\/v1\/strategies$/, methods: ['GET'], data: demoStrategies },
-    { match: /^\/v1\/orders\/bracket$/, methods: ['GET'], data: () => ({ brackets: [] }) },
-    { match: /^\/v1\/watchlists$/, methods: ['GET'], data: () => ({ watchlists: {} }) },
-    { match: /^\/v1\/alerts$/, methods: ['GET'], data: () => ({ alerts: [] }) },
+    { match: /^\/v1\/orders\/bracket$/, methods: ['GET'], data: () => ({ brackets: paperState.brackets }) },
+    { match: /^\/v1\/orders\/bracket\/attach$/, methods: ['POST'], data: (path, opts) => demoAttachBracket(opts) },
+    { match: /^\/v1\/orders\/bracket\/[^/]+\/cancel$/, methods: ['POST'], data: (path) => demoCancelBracket(path) },
+    { match: /^\/v1\/watchlists$/, methods: ['GET'], data: () => ({ watchlists: paperState.watchlists }) },
+    { match: /^\/v1\/watchlists\/[^/]+\/items$/, methods: ['POST'], data: (path, opts) => demoAddWatchlistItem(path, opts) },
+    { match: /^\/v1\/watchlists\/[^/]+\/items\/[^/]+$/, methods: ['DELETE'], data: (path) => demoRemoveWatchlistItem(path) },
+    { match: /^\/v1\/alerts$/, methods: ['GET'], data: () => ({ alerts: paperState.alerts.filter((a) => a.active) }) },
+    { match: /^\/v1\/alerts$/, methods: ['POST'], data: (path, opts) => demoCreateAlert(opts) },
+    { match: /^\/v1\/alerts\/[^/]+$/, methods: ['DELETE'], data: (path) => demoDeleteAlert(path) },
     { match: /^\/v1\/strategies\/signals$/, methods: ['GET'], data: () => ({ signals: [] }) },
-    { match: /^\/v1\/autonomous\/plan$/, methods: ['GET'], data: () => ({ active_plan: null }) },
-    { match: /^\/v1\/kill-switch\/status$/, methods: ['GET'], data: () => ({ enabled: false }) },
+    { match: /^\/v1\/autonomous\/plan$/, methods: ['GET'], data: () => ({ active_plan: paperState.dailyPlan }) },
+    { match: /^\/v1\/autonomous\/start$/, methods: ['POST'], data: (path, opts) => demoStartAgent(opts) },
+    { match: /^\/v1\/autonomous\/disarm$/, methods: ['POST'], data: () => demoStopAgent() },
+    { match: /^\/v1\/kill-switch\/status$/, methods: ['GET'], data: () => ({ enabled: paperState.killSwitchEnabled, reason: paperState.killSwitchReason, set_by: paperState.killSwitchSetBy }) },
   ];
 
   // ---- Currency display (global reach) ----
@@ -1675,7 +1855,7 @@
       const pathname = path.split('?')[0];
       const method = (opts.method || 'GET').toUpperCase();
       const entry = DEMO_RESPONSES.find(e => e.methods.includes(method) && e.match.test(pathname));
-      if (entry) return entry.data(path);
+      if (entry) return entry.data(path, opts);
       if (pathname === '/v1/orders/preview' && method === 'POST') return demoPreviewOrder(JSON.parse(opts.body));
       if (pathname === '/v1/orders/execute' && method === 'POST') return demoExecuteOrder(JSON.parse(opts.body));
       if (method !== 'GET') {
@@ -2428,6 +2608,16 @@
 
   $('ksToggle').addEventListener('click', () => {
     const willEnable = $('ksToggle').dataset.enabled !== 'true';
+    if (effectiveDemo()) {
+      // Paper Trading never asks for or sends the admin key — this toggles a
+      // paperState flag directly, and it's a real switch: an enabled paper kill
+      // switch genuinely blocks new paper orders (see demoPreviewOrder's
+      // kill_switch_off check), it isn't just for show.
+      demoSetKillSwitch(willEnable, store.get('edge.approver', 'you'));
+      toast(willEnable ? 'Trading paused (paper)' : 'Trading resumed (paper)');
+      refreshKillSwitch();
+      return;
+    }
     openAdminModal(willEnable ? 'Pause all trading?' : 'Resume trading?', async (key) => {
       await api(`/v1/kill-switch/${willEnable ? 'on' : 'off'}`, { method: 'POST', headers: { 'x-admin-key': key } });
       toast(willEnable ? 'Trading paused' : 'Trading resumed');
@@ -3259,6 +3449,7 @@
     $('l2Mid').innerHTML = `<span class="l2-mid-price num ${tickClass}">${money(mid)}</span><span class="l2-spread">Spread ${money(asks[0].price - bids[0].price)}</span>`;
   }
   setInterval(renderL2, 1200);
+  setInterval(checkBracketTriggers, 5000);
 
   // ---- Scalper bar — one-click market orders against the charted symbol. Paper
   // Trading fires instantly end to end; a live account fills in the real ticket and
