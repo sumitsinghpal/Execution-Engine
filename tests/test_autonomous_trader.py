@@ -318,6 +318,33 @@ class TestScanForEntries:
         assert opened == 1  # ZAUTJ still went through despite ZAUTI failing
 
     @pytest.mark.asyncio
+    async def test_risk_rejection_blocks_the_entry_without_opening_a_position(self, test_db_engine_and_session, monkeypatch, _fake_broker):
+        """
+        The agent cannot bypass risk checks: a fired signal alone isn't
+        enough to open a position — it still has to clear the exact same
+        RiskChecker gate a human order does (see src/risk/limits.py). Uses
+        the symbol allowlist rather than the kill switch (already covered
+        by the tests above) so this exercises a genuinely different
+        rejection path through the same "if risk_verdict != APPROVED:
+        continue" gate in scan_for_entries().
+        """
+        _, session = test_db_engine_and_session
+        not_allowed_symbol = "ZAUTNOTALLOWED"
+        settings = _settings(monkeypatch, watchlist=not_allowed_symbol, SYMBOL_ALLOWLIST=_ALL_TEST_SYMBOLS)
+        _arm(session)
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 0
+        assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == not_allowed_symbol] == []
+        assert _fake_broker.submitted_specs == []  # never even reached the broker
+
+    @pytest.mark.asyncio
     async def test_without_an_armed_plan_nothing_opens_even_with_a_fired_signal(self, test_db_engine_and_session, monkeypatch):
         """
         The core new gate: settings.autonomous_trading_enabled=True alone

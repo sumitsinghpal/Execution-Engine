@@ -701,6 +701,13 @@
   .plan-status .t1 { font-weight: 700; font-size: 13.5px; }
   .plan-status .t2 { font-size: 12px; color: var(--ink-faint); margin-top: 3px; }
   .plan-status.armed .t1 { color: var(--buy); }
+  .agent-error {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--warn);
+    background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+    border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;
+  }
+  .agent-meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 10px 0; }
+  .agent-meta-label { display: block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--ink-faint); margin-bottom: 3px; }
   .agent-badge {
     display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 9.5px; font-weight: 800;
     padding: 3px 7px; border-radius: 999px; background: var(--buy-soft); color: var(--buy); text-transform: uppercase; letter-spacing: .03em;
@@ -1052,7 +1059,7 @@
   <section class="tab-panel" data-tab-panel="strategies" hidden>
 
     <div class="card">
-      <h2>My trading agent <span class="hint">hand it money, it trades your best strategies until you stop it</span></h2>
+      <h2>My trading agent <span class="hint">a strategy automation agent — fixed, predefined rules, not general AI judgment</span></h2>
       <div id="planStatus"><div class="skel-bar" style="width:100%;height:52px;border-radius:9px"></div></div>
       <div id="startAgentForm">
         <div class="field">
@@ -1686,16 +1693,20 @@
 
   function demoStartAgent(opts) {
     const body = JSON.parse(opts.body || '{}');
-    const notional = Number(body.notional_per_trade_usd);
-    if (!(notional > 0)) throw new Error('A valid amount per trade greater than 0 is required.');
     // The same illustrative catalog subset already shown as "trading now" candidates
     // elsewhere in Paper Trading — matches the real endpoint's response shape closely
     // enough that renderPlanStatus()/renderAgentBadges() need no changes at all.
-    paperState.dailyPlan = {
-      strategy_ids: ['orb', 'vwap_reversion', 'rsi2_connors'],
-      notional_per_trade_usd: String(notional),
-      armed_by: body.started_by || 'you', armed_at: new Date().toISOString(), active: true,
-    };
+    // agentOnStart() (see the "My trading agent" section below) is the single
+    // source of truth for validation and plan-replace semantics — used here and
+    // by the real "Start trading" button alike, so both paths agree.
+    const result = agentOnStart({
+      notionalPerTradeUsd: body.notional_per_trade_usd,
+      strategyIds: ['orb', 'vwap_reversion', 'rsi2_connors'],
+      startedBy: body.started_by,
+      nowIso: new Date().toISOString(),
+    });
+    if (!result.ok) throw new Error(result.error);
+    paperState.dailyPlan = result.plan;
     savePaperState();
     return { plan: paperState.dailyPlan };
   }
@@ -3412,38 +3423,144 @@
     toast(`${signal.symbol} · ${signal.strategy_name} added to your order form below`);
   }
 
-  // ---- My trading agent: one-time start/stop (src/execution/daily_plan.py,
-  // src/execution/strategy_ranking.py, src/execution/strategy_rotation.py).
-  // This is a real "set it and forget it" agent, not a signal feed with
-  // buttons to click: Start computes a ranking and arms it in ONE call
-  // (POST /v1/autonomous/start), and from then on a background loop on
-  // the server re-ranks and swaps in whichever strategies are working
-  // best roughly once a day, entirely on its own — no daily "come back
-  // and re-confirm" step here. The only manual action is Stop.
+  // ---- My trading agent — a strategy automation agent, not general AI:
+  // every entry/exit decision it could ever make is one of
+  // src/strategy/catalog.py's fixed technical rules (Golden Cross, Turtle,
+  // RSI(2), ...), never a judgment call. "Start" ranks recent performance
+  // and arms a plan in ONE call (POST /v1/autonomous/start); "Stop" disarms
+  // it (POST /v1/autonomous/disarm). Positions already open keep being
+  // managed either way.
+  //
+  // Arming a plan here NEVER places a trade by itself. Whether anything
+  // executes automatically depends on a separate, deployment-level switch
+  // this dashboard cannot turn on (AUTONOMOUS_TRADING_ENABLED, default
+  // off — see GET /v1/autonomous/status and src/config.py). Even when that
+  // switch IS on, every order still runs through the same risk checks as a
+  // human order and can only ever reach a simulated (PAPER) broker, never
+  // a live one — see src/execution/autonomous_trader.py's _build_broker().
+  // deriveAgentDisplay() below is what keeps this card honest about which
+  // of those is actually true right now, instead of always claiming
+  // "running, trading automatically" the moment a plan is armed.
   //
   // "dailyPlanState" here is the CURRENTLY ARMED plan from the API — not
   // to be confused with "activePlan" above, which is the unrelated
   // per-order strategy banner shown when a suggested trade from the
   // "Suggested trades" card is loaded into the order form; that's a
   // separate, manual, review-one-signal-at-a-time feature, not this one.
+
+  // ---- TESTABLE: pure "My trading agent" validation/display — see tests/test_agent_status.mjs ----
+  function agentValidateAmount(raw) {
+    if (typeof raw !== 'string' || raw.trim() === '' || /[eE]/.test(raw)) {
+      return { ok: false, error: 'Enter a valid amount per trade greater than 0.' };
+    }
+    const amount = Number(raw);
+    if (!Number.isFinite(amount) || !(amount > 0)) {
+      return { ok: false, error: 'Enter a valid amount per trade greater than 0.' };
+    }
+    return { ok: true, amount };
+  }
+
+  // Builds the plan a "Start" click arms. Starting again while already
+  // running simply produces a new plan that REPLACES the old one — the
+  // same semantics as the real POST /v1/autonomous/start ("Replaces any
+  // previously active plan"), never a duplicate and never an error.
+  function agentOnStart({ notionalPerTradeUsd, strategyIds, startedBy, nowIso }) {
+    const check = agentValidateAmount(notionalPerTradeUsd);
+    if (!check.ok) return { ok: false, error: check.error };
+    return {
+      ok: true,
+      plan: {
+        strategy_ids: strategyIds,
+        notional_per_trade_usd: String(check.amount),
+        armed_by: startedBy || 'you',
+        armed_at: nowIso,
+        active: true,
+      },
+    };
+  }
+
+  // Everything the card needs to render, derived purely from: the
+  // currently armed plan (or null — reconstructed identically whether it
+  // just changed or was freshly loaded after a page reload, since both
+  // come from the exact same persisted shape); whether this is Paper
+  // Trading; and, in Live mode only, the server's own
+  // autonomous_trading_enabled switch (never fetched in Paper Trading —
+  // see the module comment above and the no-admin-key-in-paper-mode
+  // guarantee elsewhere in this file).
+  function deriveAgentDisplay({ plan, isPaperMode, liveAutonomousEnabled, scanIntervalSec, lastError }) {
+    const status = plan ? 'running' : 'stopped';
+    let mode, lastScan, nextScan;
+    if (isPaperMode) {
+      mode = 'alert_only';
+      lastScan = 'Not available in Paper Trading';
+      nextScan = 'Manual scan only — Paper Trading runs no background scanner';
+    } else if (liveAutonomousEnabled === true) {
+      mode = 'paper_auto_execution';
+      lastScan = 'Not tracked by the server yet';
+      nextScan = `Automatically, about every ${scanIntervalSec}s while this stays on`;
+    } else if (liveAutonomousEnabled === false) {
+      mode = 'alert_only';
+      lastScan = 'Not tracked by the server yet';
+      nextScan = 'Manual scan only — automatic scanning is off for this deployment';
+    } else {
+      mode = 'unknown';
+      lastScan = 'Checking…';
+      nextScan = 'Checking…';
+    }
+    return {
+      status,
+      mode,
+      amountPerTradeUsd: plan ? Number(plan.notional_per_trade_usd) : null,
+      lastScan,
+      nextScan,
+      error: lastError || null,
+    };
+  }
+  // ---- END TESTABLE ----
+
+  const AGENT_MODE_META = {
+    alert_only: { label: 'Alert-only — you place every trade yourself', cls: '' },
+    paper_auto_execution: { label: 'Paper auto-execution — trades for you (still simulated only)', cls: 'warn' },
+    unknown: { label: 'Checking…', cls: '' },
+  };
+
   let dailyPlanState = null;
+  let lastAgentError = null;
+  let agentAutonomousStatus = { enabled: null, scanIntervalSec: null }; // Live mode only — see refreshAgentAutonomousStatus()
 
   function renderPlanStatus() {
     const el = $('planStatus');
-    if (!dailyPlanState) {
-      el.innerHTML = `
+    const display = deriveAgentDisplay({
+      plan: dailyPlanState,
+      isPaperMode: effectiveDemo(),
+      liveAutonomousEnabled: agentAutonomousStatus.enabled,
+      scanIntervalSec: agentAutonomousStatus.scanIntervalSec,
+      lastError: lastAgentError,
+    });
+    const errorHtml = display.error ? `<div class="agent-error">⚠ ${escapeHtml(display.error)}</div>` : '';
+
+    if (display.status === 'stopped') {
+      el.innerHTML = `${errorHtml}
         <div class="plan-status">
-          <div><div class="t1">Agent is off</div><div class="t2">Enter an amount below and start it — it picks your best-performing strategies and keeps trading until you stop it.</div></div>
+          <div><div class="t1">Agent is off</div><div class="t2">A strategy automation agent — it follows a fixed, predefined rule set, not general AI judgment. Enter an amount below and start it to prioritize your best-performing strategies.</div></div>
         </div>`;
       $('startAgentForm').style.display = '';
       return;
     }
+
+    const modeMeta = AGENT_MODE_META[display.mode];
     const names = dailyPlanState.strategy_ids.map(id => STRATEGY_NAMES[id] || id).join(', ');
-    el.innerHTML = `
+    el.innerHTML = `${errorHtml}
       <div class="plan-status armed">
         <div>
-          <div class="t1">🤖 Agent is running</div>
-          <div class="t2">Trading ${names} at ${money(Number(dailyPlanState.notional_per_trade_usd))}/trade — it rotates in your best strategies automatically, about once a day.</div>
+          <div class="t1">🤖 Running</div>
+          <div class="agent-meta-grid">
+            <div><span class="agent-meta-label">Mode</span><span class="pill ${modeMeta.cls}"><span class="dot"></span><span>${modeMeta.label}</span></span></div>
+            <div><span class="agent-meta-label">Amount per trade</span><span class="num">${money(display.amountPerTradeUsd)}</span></div>
+            <div><span class="agent-meta-label">Last scan</span><span>${escapeHtml(display.lastScan)}</span></div>
+            <div><span class="agent-meta-label">Next scan</span><span>${escapeHtml(display.nextScan)}</span></div>
+          </div>
+          <div class="t2">Prioritizing ${escapeHtml(names)}.</div>
         </div>
         <button class="btn btn-danger" id="stopAgentBtn" style="width:auto;margin-top:0;padding:9px 16px">Stop</button>
       </div>`;
@@ -3451,15 +3568,31 @@
     $('stopAgentBtn').addEventListener('click', stopAgent);
   }
 
+  // Live mode only (admin-key-gated, so never called from Paper Trading —
+  // see the no-admin-key-in-paper-mode guarantee elsewhere in this file):
+  // the one real signal for whether anything executes automatically.
+  async function refreshAgentAutonomousStatus() {
+    try {
+      const r = await api('/v1/autonomous/status');
+      agentAutonomousStatus = { enabled: !!r.enabled, scanIntervalSec: r.scan_interval_sec };
+    } catch {
+      agentAutonomousStatus = { enabled: null, scanIntervalSec: null };
+    }
+  }
+
   async function refreshDailyPlan() {
     try {
       const r = await api('/v1/autonomous/plan');
       dailyPlanState = r.active_plan;
+      lastAgentError = null;
       systemSignals.agentChecked = true; systemSignals.agentOk = true;
     } catch (e) {
-      dailyPlanState = null;
+      // A failed check is not the same as "nothing armed" — say so, rather
+      // than silently showing "Agent is off" as if everything were fine.
+      lastAgentError = e.message || 'Could not check the agent’s status.';
       systemSignals.agentChecked = true; systemSignals.agentOk = false;
     }
+    if (!effectiveDemo()) await refreshAgentAutonomousStatus();
     renderPlanStatus();
     renderAgentBadges();
     renderSystemStatus();
@@ -3504,7 +3637,8 @@
 
   $('startAgentBtn').addEventListener('click', async () => {
     const notional = $('agentNotional').value;
-    if (!isCleanPositiveNumber(notional)) { toast('Enter a valid amount per trade greater than 0'); return; }
+    const check = agentValidateAmount(notional);
+    if (!check.ok) { toast(check.error); return; }
     const startedBy = store.get('edge.approver', 'you');
 
     const btn = $('startAgentBtn');
@@ -3513,13 +3647,14 @@
       // Sent as a string, not a JSON number: notional_per_trade_usd is a server-side
       // Decimal (see src/execution/daily_plan.py), and a JS float round-trip through
       // JSON.stringify(Number(...)) risks the exact precision issue Decimal exists to
-      // avoid. isCleanPositiveNumber() above already guarantees this parses cleanly.
+      // avoid. agentValidateAmount() above already guarantees this parses cleanly.
       const result = await api('/v1/autonomous/start', {
         method: 'POST',
         body: JSON.stringify({ notional_per_trade_usd: String(notional), started_by: startedBy }),
       });
       const names = result.plan.strategy_ids.map(id => STRATEGY_NAMES[id] || id).join(', ');
-      toast(`Agent started — trading ${names} at ${money(Number(notional))}/trade`);
+      toast(`Agent armed — prioritizing ${names} at ${money(Number(notional))}/trade`);
+      lastAgentError = null;
       await refreshDailyPlan();
     } catch (e) {
       toast('Could not start: ' + e.message);
