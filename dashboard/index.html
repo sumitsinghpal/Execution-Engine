@@ -677,10 +677,10 @@
   .lu-stat-value { font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
   .lu-stat-value.up { color: var(--buy); } .lu-stat-value.down { color: var(--sell); }
   .lu-section-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; margin: 18px 0 8px; }
-  .lu-pair-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .lu-pair-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .lu-pair-row:last-child { border-bottom: none; }
   .lu-pair-name { font-family: var(--font-mono); color: var(--ink-muted); }
-  .lu-pair-metrics { display: flex; gap: 12px; font-family: var(--font-mono); color: var(--ink-faint); }
+  .lu-pair-metrics { display: flex; flex-wrap: wrap; gap: 10px 12px; font-family: var(--font-mono); color: var(--ink-faint); }
   .lu-pair-metrics b { color: var(--ink); }
   .lu-chart-wrap { margin: 4px 0 6px; }
   .lu-chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
@@ -694,6 +694,15 @@
   .lu-chart-legend .swatch { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
   .lu-chart-legend .swatch.dashed { background: none; border-top: 1.5px dashed var(--ink-faint); height: 0; }
   .lu-cost-note { font-size: 11px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 4px; }
+  .lu-methodology { margin: 14px 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+  .lu-methodology summary { cursor: pointer; padding: 10px 13px; font-size: 12px; font-weight: 700; color: var(--ink-faint); list-style: none; }
+  .lu-methodology summary::-webkit-details-marker { display: none; }
+  .lu-methodology summary::before { content: '▸ '; }
+  .lu-methodology[open] summary::before { content: '▾ '; }
+  .lu-meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 16px; padding: 2px 13px 13px; }
+  .lu-meta-row { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+  .lu-meta-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--ink-faint); }
+  .lu-meta-value { color: var(--ink); }
 
   /* Automate card */
   .plan-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); flex-wrap: wrap; transition: background .2s, border-color .2s; }
@@ -1087,7 +1096,7 @@
     </div>
 
     <div class="card live-updates-card">
-      <h2>How these strategies have performed <span class="hint" id="liveUpdatesHint">updates every few hours</span></h2>
+      <h2>How these strategies have performed <span class="pill" id="luProvenancePill" style="margin-left:6px"></span> <span class="hint" id="liveUpdatesHint">updates every few hours</span></h2>
       <div class="lu-meta" id="liveUpdatesMeta">Loading…</div>
       <div id="liveUpdatesBody"></div>
       <button class="btn btn-ghost" id="refreshLiveUpdatesBtn">Update now</button>
@@ -1769,6 +1778,9 @@
         { symbol: 'SPY', strategy_id: 'vwap_reversion', status: 'OPEN', entry_price: 601.15, opened_at: hoursAgoIso(2) },
       ],
       computedAt: new Date().toISOString(),
+      isSample: true, // every figure above is hand-written illustrative data, not a real backtest — see deriveBacktestMeta()
+      startDate: null, endDate: null, // no real date range — this never ran against real market data
+      symbols: ['QQQ', 'SPY', 'IWM'],
     };
   }
 
@@ -4040,9 +4052,15 @@
   // Reversion) trade 5-minute bars and are excluded — this backtest only
   // ever fetches daily history, so backtesting them against it would
   // silently produce meaningless numbers, not real ones.
-  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v4'; // v4: response now carries summary.combined_portfolio (equity curve) + avg_benchmark_return_pct + per-pair benchmark_return_pct — a v3 cache predates those fields, so bump to force a fresh fetch rather than rendering an empty chart from stale data
+  const LIVE_UPDATES_KEY = 'edge.liveUpdates.v5'; // v5: response now also carries the real startDate/endDate this backtest actually ran with (see computeLiveUpdates) — a v4 cache predates those fields
   const LIVE_UPDATES_INTERVAL_MS = 3 * 60 * 60 * 1000;
   const LIVE_UPDATES_NOTIONAL_USD = 1000; // matches settings.autonomous_notional_per_trade_usd, the live autonomous trader's own default sizing
+  // The dashboard's POST /v1/backtest/run body never overrides these — see
+  // BacktestRequest in src/backtest/api_models.py — so these ARE the exact
+  // values the backend actually used, not an approximation of them.
+  const BACKTEST_STARTING_CAPITAL_USD = 100000;
+  const BACKTEST_SLIPPAGE_BPS = 5;
+  const BACKTEST_COMMISSION_USD = 0;
   let liveUpdatesTimer = null;
   let strategyAggCache = null; // { byStrategy: {id: {trades, wins, pnl}}, intradayIds: [id, ...] } — set once live-updates data is available
 
@@ -4076,8 +4094,77 @@
       api('/v1/autonomous/positions?limit=6').catch(() => ({ positions: [] })),
     ]);
 
-    return { backtest, intradayStrategyIds, positions: positionsRes.positions || [], computedAt: new Date().toISOString() };
+    return {
+      backtest, intradayStrategyIds, positions: positionsRes.positions || [],
+      computedAt: new Date().toISOString(),
+      isSample: false, // a real backtest this browser actually ran, against real market data
+      startDate: fmt(start), endDate: fmt(end), // the REAL dates this backtest ran with — not re-derived later from "now"
+      symbols: ['QQQ', 'SPY', 'IWM'],
+    };
   }
+
+  // ---- TESTABLE: pure backtest provenance/methodology — see tests/test_backtest_provenance.mjs ----
+  // The longest run of consecutive losing trades, in chronological order —
+  // derived from real per-trade pnl_usd the backtest already returns
+  // (src/backtest/engine.py's BacktestTrade), never estimated. A trade
+  // still open at the end of the window (exit_reason "OPEN_AT_END") is
+  // excluded, same as summary stats elsewhere on this page. Returns null
+  // when there's no trade list to compute from at all (illustrative sample
+  // data never includes one) — "0" would falsely claim a computed streak
+  // of zero losses, which is a different fact than "not computed".
+  function computeLosingStreak(trades) {
+    if (!trades || !trades.length) return null;
+    const closed = trades
+      .filter(t => t && t.exit_date != null)
+      .slice()
+      .sort((a, b) => (a.exit_date < b.exit_date ? -1 : a.exit_date > b.exit_date ? 1 : 0));
+    let longest = 0, current = 0;
+    for (const t of closed) {
+      if ((t.pnl_usd || 0) < 0) { current += 1; longest = Math.max(longest, current); }
+      else { current = 0; }
+    }
+    return longest;
+  }
+
+  // Same computation across every (symbol, strategy) pair's trades merged
+  // into one chronological list — mirrors how the backend's own
+  // combine_equity_curves() merges them for the combined portfolio (see
+  // src/backtest/runner.py), so this is the real combined-account streak,
+  // not an average or a max of the per-pair streaks.
+  function combinedLosingStreak(results) {
+    const allTrades = (results || []).flatMap(r => r.trades || []);
+    return computeLosingStreak(allTrades);
+  }
+
+  // Everything "for every performance section" needs to show, derived only
+  // from data this app actually has — a field this repo genuinely doesn't
+  // track comes back as the literal string 'Not available', never guessed.
+  // isSample=true means hardcoded illustrative numbers (demoLiveUpdates() —
+  // no real dates, no real trade list); false means a real backtest this
+  // browser actually ran against real market data (computeLiveUpdates()).
+  function deriveBacktestMeta({ isSample, symbols, startDate, endDate, notionalPerTradeUsd, startingCapitalUsd, slippageBps, commissionUsd, computedAtIso }) {
+    const instrumentAndTimeframe = symbols && symbols.length ? `${symbols.join(', ')} · Daily bars` : 'Not available';
+    const dateRange = isSample ? 'Illustrative example' : (startDate && endDate ? `${startDate} to ${endDate}` : 'Not available');
+    const startingCapital = isSample ? 'Illustrative example' : (startingCapitalUsd != null ? startingCapitalUsd : 'Not available');
+    const positionSize = isSample ? 'Illustrative example' : (notionalPerTradeUsd != null ? notionalPerTradeUsd : 'Not available');
+    const feesAndSlippage = isSample
+      ? 'Illustrative example'
+      : (slippageBps != null && commissionUsd != null)
+        ? `${slippageBps} bps (${(slippageBps / 100).toFixed(2)}%) slippage per fill, ${commissionUsd === 0 ? 'no commission' : money(commissionUsd) + ' commission per order'}`
+        : 'Not available';
+    return {
+      provenance: isSample ? 'Illustrative example' : 'Verified — a real backtest this browser ran against real market data',
+      instrumentAndTimeframe,
+      dateRange,
+      startingCapital,
+      positionSize,
+      feesAndSlippage,
+      sampleType: isSample ? 'Illustrative example' : 'Out-of-sample — fixed, predefined rules, never fitted or optimized to this data',
+      benchmarkDefinition: 'Buy-and-hold of the same symbol, over the same date range',
+      dataTimestamp: computedAtIso || 'Not available',
+    };
+  }
+  // ---- END TESTABLE ----
 
   function aggregateByStrategy(backtest) {
     const byStrategy = {};
@@ -4099,6 +4186,11 @@
       if (!line) return;
 
       if (!strategyAggCache) return; // leave the "Backtest: loading…" placeholder from the initial render
+      // Every line here states its provenance up front — see the
+      // "How these strategies have performed" card below for the full
+      // methodology (date range, fees/slippage, drawdown, etc.) behind
+      // whichever of these two this is.
+      const provenance = strategyAggCache.isSample ? 'Sample' : 'Verified';
 
       if (strategyAggCache.intradayIds.includes(id)) {
         line.textContent = 'Trades too fast to test with 3 years of daily data';
@@ -4108,21 +4200,21 @@
 
       const a = strategyAggCache.byStrategy[id];
       if (!a || (a.trades === 0 && a.tooSmall === 0)) {
-        line.textContent = `Last 3 years, ${money(LIVE_UPDATES_NOTIONAL_USD)}/trade: no opportunities found on QQQ, SPY, or IWM`;
+        line.textContent = `${provenance} — last 3 years, ${money(LIVE_UPDATES_NOTIONAL_USD)}/trade: no opportunities found on QQQ, SPY, or IWM`;
         return;
       }
       if (a.trades === 0 && a.tooSmall > 0) {
         // The strategy fired — $100 just doesn't buy 1 share of these
         // symbols (QQQ/SPY/IWM all trade well into the hundreds). Distinct
         // from "never fires" so this doesn't read as a broken strategy.
-        line.textContent = `Found ${a.tooSmall} opportunit${a.tooSmall === 1 ? 'y' : 'ies'}, but ${money(LIVE_UPDATES_NOTIONAL_USD)} isn't enough to buy even 1 share of QQQ, SPY, or IWM`;
+        line.textContent = `${provenance} — found ${a.tooSmall} opportunit${a.tooSmall === 1 ? 'y' : 'ies'}, but ${money(LIVE_UPDATES_NOTIONAL_USD)} isn't enough to buy even 1 share of QQQ, SPY, or IWM`;
         line.classList.add('muted');
         return;
       }
       const winRate = Math.round((a.wins / a.trades) * 100);
       const pnlClass = a.pnl >= 0 ? 'up' : 'down';
       line.innerHTML =
-        `Last 3 years, ${money(LIVE_UPDATES_NOTIONAL_USD)}/trade: <b>${a.trades}</b> trades · ${winRate}% win rate · ` +
+        `<b>${provenance}</b> — last 3 years, ${money(LIVE_UPDATES_NOTIONAL_USD)}/trade: <b>${a.trades}</b> trades · ${winRate}% win rate · ` +
         `<b class="${pnlClass}">${a.pnl >= 0 ? '+' : '−'}${money(Math.abs(a.pnl))}</b> profit`;
     });
   }
@@ -4180,16 +4272,63 @@
 
   function renderLiveUpdates(data) {
     const s = (data.backtest && data.backtest.summary) || {};
-    strategyAggCache = { byStrategy: aggregateByStrategy(data.backtest), intradayIds: data.intradayStrategyIds || [] };
+    const isSample = !!data.isSample;
+    strategyAggCache = { byStrategy: aggregateByStrategy(data.backtest), intradayIds: data.intradayStrategyIds || [], isSample };
     renderStrategyResultLines();
-    $('liveUpdatesMeta').textContent =
-      `Updated ${timeAgo(data.computedAt)} · based on the last 3 years of real market data, trading ${money(LIVE_UPDATES_NOTIONAL_USD)} per position`;
+
+    const provPill = $('luProvenancePill');
+    provPill.className = `pill${isSample ? '' : ' ok'}`;
+    provPill.innerHTML = `<span class="dot"></span><span>${isSample ? 'Sample data' : 'Verified'}</span>`;
+
+    $('liveUpdatesMeta').textContent = isSample
+      ? 'Illustrative example — connect your live API to see a real backtest.'
+      : `Updated ${timeAgo(data.computedAt)} · based on the last 3 years of real market data, trading ${money(LIVE_UPDATES_NOTIONAL_USD)} per position`;
+
+    const meta = deriveBacktestMeta({
+      isSample,
+      symbols: data.symbols,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      notionalPerTradeUsd: LIVE_UPDATES_NOTIONAL_USD,
+      startingCapitalUsd: BACKTEST_STARTING_CAPITAL_USD,
+      slippageBps: BACKTEST_SLIPPAGE_BPS,
+      commissionUsd: BACKTEST_COMMISSION_USD,
+      computedAtIso: data.computedAt,
+    });
+    const combined = s.combined_portfolio || null;
+    const combinedDrawdown = combined ? `−${combined.max_drawdown_pct.toFixed(1)}%` : 'Not available';
+    const combinedStreak = isSample
+      ? 'Illustrative example'
+      : (() => {
+          const n = combinedLosingStreak((data.backtest && data.backtest.results) || []);
+          return n == null ? 'Not available' : `${n} trade${n === 1 ? '' : 's'} in a row`;
+        })();
+
+    const methodologyRow = (label, value) => `<div class="lu-meta-row"><span class="lu-meta-label">${label}</span><span class="lu-meta-value">${escapeHtml(String(value))}</span></div>`;
+    const methodologyPanel = `
+      <details class="lu-methodology">
+        <summary>Methodology &amp; data details</summary>
+        <div class="lu-meta-grid">
+          ${methodologyRow('Provenance', meta.provenance)}
+          ${methodologyRow('Instrument & timeframe', meta.instrumentAndTimeframe)}
+          ${methodologyRow('Date range', meta.dateRange)}
+          ${methodologyRow('Starting capital', typeof meta.startingCapital === 'number' ? money(meta.startingCapital) : meta.startingCapital)}
+          ${methodologyRow('Assumed position size', typeof meta.positionSize === 'number' ? money(meta.positionSize) + '/trade' : meta.positionSize)}
+          ${methodologyRow('Fees & slippage assumed', meta.feesAndSlippage)}
+          ${methodologyRow('Sample type', meta.sampleType)}
+          ${methodologyRow('Maximum drawdown (combined)', combinedDrawdown)}
+          ${methodologyRow('Largest losing streak (combined)', combinedStreak)}
+          ${methodologyRow('Benchmark definition', meta.benchmarkDefinition)}
+          ${methodologyRow('Data timestamp', meta.dataTimestamp === 'Not available' ? meta.dataTimestamp : new Date(meta.dataTimestamp).toLocaleString())}
+        </div>
+      </details>`;
 
     const pairRows = ((data.backtest && data.backtest.results) || [])
       .slice()
       .sort((a, z) => z.total_return_pct - a.total_return_pct)
       .map(r => {
         const beatBenchmark = r.total_return_pct >= r.benchmark_return_pct;
+        const streak = isSample ? null : computeLosingStreak(r.trades);
         return `
         <div class="lu-pair-row">
           <span class="lu-pair-name">${r.symbol} · ${r.strategy_id}</span>
@@ -4198,13 +4337,16 @@
             <span>win <b>${pct(r.win_rate)}</b></span>
             <span title="Profit factor — gross profit divided by gross loss">quality <b class="${r.profit_factor != null && r.profit_factor >= 1 ? 'up' : 'down'}">${r.profit_factor == null ? '—' : Number(r.profit_factor).toFixed(2)}</b></span>
             <span title="This strategy's return vs. just buying and holding ${r.symbol} over the same period">vs. holding <b class="${beatBenchmark ? 'up' : 'down'}">${r.total_return_pct >= 0 ? '+' : ''}${r.total_return_pct.toFixed(1)}% / ${r.benchmark_return_pct >= 0 ? '+' : ''}${r.benchmark_return_pct.toFixed(1)}%</b></span>
+            <span title="Maximum drawdown — the largest peak-to-trough decline in this pair's own equity curve">dip <b class="down">${r.max_drawdown_pct != null ? '−' + r.max_drawdown_pct.toFixed(1) + '%' : '—'}</b></span>
+            <span title="Longest run of consecutive losing trades, in chronological order">streak <b>${streak != null ? streak : '—'}</b></span>
           </span>
         </div>`;
       })
       .join('') || '<div class="empty-note">No results yet.</div>';
 
-    const combined = s.combined_portfolio || null;
-
+    const activityProvenancePill = isSample
+      ? '<span class="pill">Illustrative example</span>'
+      : '<span class="pill">Paper-account · simulated</span>';
     const activityRows = data.positions.length
       ? data.positions.map(p => `
         <div class="feed-row">
@@ -4227,13 +4369,19 @@
         <div><div class="lu-stat-label">Just buying &amp; holding</div><div class="lu-stat-value num">${s.avg_benchmark_return_pct != null ? (s.avg_benchmark_return_pct >= 0 ? '+' : '') + s.avg_benchmark_return_pct.toFixed(1) + '%' : '—'}</div></div>
         <div><div class="lu-stat-label">Worst dip (combined)</div><div class="lu-stat-value num ${combined ? 'down' : ''}">${combined ? '−' + combined.max_drawdown_pct.toFixed(1) + '%' : '—'}</div></div>
       </div>
+      ${methodologyPanel}
       <div class="lu-section-title">All strategies combined, starting from ${combined ? bigMoney(combined.starting_capital) : '—'} (test account)</div>
       <div class="lu-chart-wrap">${combined ? buildEquityChartSvg(combined.equity_curve, s.avg_benchmark_return_pct) : '<div class="empty-note">Not enough data yet.</div>'}</div>
       ${combined ? `<div class="lu-cost-note">${combined.total_return_pct >= 0 ? '+' : ''}${combined.total_return_pct.toFixed(2)}% combined return · ${money(combined.ending_capital)} ending balance · includes a small estimate for trading costs</div>` : ''}
       <div class="lu-section-title">Results by investment &amp; strategy</div>
       ${pairRows}
-      <div class="lu-section-title">Recent automatic trades</div>
+      <div class="lu-section-title">Automated agent activity ${activityProvenancePill}</div>
+      <div class="lu-cost-note">${isSample
+        ? 'Illustrative example positions — not real trades. Connect your live API to see what the automated agent has actually opened.'
+        : 'Real positions the automated agent actually opened — never a backtest. Always a simulated account, even when your dashboard is connected to a live broker: see "My trading agent" on this tab for why.'}</div>
       ${activityRows}
+      <div class="lu-section-title">Live-account results</div>
+      <div class="empty-note">Not shown on this page — no real broker order history is displayed here. Live order history, once you're connected, lives under Journal &amp; Risk → Transaction history.</div>
     `;
 
     // A compact copy of the same chart lives on the Journal & Risk tab — same cached data,
@@ -4249,8 +4397,7 @@
 
   async function refreshLiveUpdates(force) {
     if (effectiveDemo()) {
-      renderLiveUpdates(demoLiveUpdates());
-      $('liveUpdatesMeta').textContent = "Illustrative sample data — connect your live API to see your own strategies' real performance.";
+      renderLiveUpdates(demoLiveUpdates()); // sets the "Sample data" pill/meta itself — see isSample in renderLiveUpdates()
       scheduleNextLiveUpdate();
       return;
     }
