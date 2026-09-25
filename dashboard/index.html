@@ -646,6 +646,18 @@
   .field-hint { font-size: 11.5px; color: var(--ink-faint); margin: -6px 0 12px; line-height: 1.5; }
   .field-hint b { font-family: var(--font-mono); color: var(--ink); }
 
+  /* Chart vs order-ticket symbol sync — see #symbolSyncRow */
+  .symbol-sync-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: -6px 0 10px; }
+  .symbol-sync-current { font-size: 11.5px; color: var(--ink-faint); }
+  .symbol-sync-current strong { font-family: var(--font-mono); color: var(--ink); font-weight: 700; }
+  .symbol-sync-row .btn { width: auto; margin-top: 0; padding: 7px 12px; font-size: 12px; }
+  .symbol-sync-warn {
+    display: none; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--warn);
+    background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+    border-radius: var(--radius-sm); padding: 8px 12px; margin: 0 0 14px;
+  }
+  .symbol-sync-warn.visible { display: flex; }
+
   /* Bracket orders list */
   .bracket-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
   .bracket-row:last-child { border-bottom: none; }
@@ -878,6 +890,13 @@
               <input id="fQty" type="number" min="1" value="10">
             </div>
           </div>
+
+          <div class="symbol-sync-row" id="symbolSyncRow">
+            <span class="symbol-sync-current">Chart symbol: <strong id="symbolSyncChartVal">—</strong></span>
+            <span class="symbol-sync-current">Order symbol: <strong id="symbolSyncOrderVal">—</strong></span>
+            <button type="button" class="btn btn-ghost" id="useChartSymbolBtn">Use chart symbol in order ticket</button>
+          </div>
+          <div class="symbol-sync-warn" id="symbolMismatchWarning">⚠ Order symbol doesn't match the charted symbol — double-check before placing this order.</div>
 
           <div class="field">
             <label>Position sizing</label>
@@ -3376,6 +3395,7 @@
   function loadSignalIntoTicket(signal) {
     setSide('BUY'); // every strategy in this catalog is long-only
     $('fSymbol').value = signal.symbol;
+    applyOrderSymbolEdit(signal.symbol);
     $('fType').value = 'LIMIT';
     $('limitPriceField').style.display = '';
     $('fLimit').value = Number(signal.entry_price).toFixed(2);
@@ -3508,6 +3528,73 @@
     }
   });
 
+  // ---- Chart vs order-ticket symbol sync — the chart and the order form track
+  // separate symbols on purpose (so glancing at a chart never silently changes what
+  // you're about to trade), but that means they can drift apart unnoticed. This pure
+  // state machine is the single source of truth for both current-symbol displays and
+  // the mismatch warning; see tests/test_symbol_sync.mjs for its test coverage.
+  // ---- TESTABLE: pure chart/order-ticket symbol sync logic — see tests/test_symbol_sync.mjs ----
+  function normalizeSymbolValue(raw) {
+    return (raw || '').trim().toUpperCase();
+  }
+
+  // The chart symbol changed — from the Load button, Enter key, or a Market Scanner
+  // heatmap tile. Only the chart side updates; the order-ticket symbol is preserved
+  // exactly as the user left it until they explicitly choose to sync it.
+  function symbolSyncOnChartChange(state, newChartSymbolRaw) {
+    return { chartSymbol: normalizeSymbolValue(newChartSymbolRaw), orderSymbol: state.orderSymbol };
+  }
+
+  // The order ticket's Symbol field changed — typed by hand, or filled in by loading
+  // a strategy signal or a scalper trade into the ticket. Only the order side updates;
+  // the chart symbol is untouched.
+  function symbolSyncOnOrderEdit(state, newOrderSymbolRaw) {
+    return { chartSymbol: state.chartSymbol, orderSymbol: normalizeSymbolValue(newOrderSymbolRaw) };
+  }
+
+  // "Use chart symbol in order ticket" — the one explicit action that copies the
+  // charted symbol into the order ticket, overwriting whatever was there.
+  function symbolSyncOnUseChartSymbol(state) {
+    return { chartSymbol: state.chartSymbol, orderSymbol: state.chartSymbol };
+  }
+
+  function symbolSyncMismatch(state) {
+    return !!state.chartSymbol && !!state.orderSymbol && state.chartSymbol !== state.orderSymbol;
+  }
+  // ---- END TESTABLE ----
+
+  let symbolSyncState = { chartSymbol: '', orderSymbol: '' };
+
+  function renderSymbolSyncRow() {
+    const chartEl = $('symbolSyncChartVal');
+    const orderEl = $('symbolSyncOrderVal');
+    const warnEl = $('symbolMismatchWarning');
+    if (!chartEl || !orderEl || !warnEl) return;
+    chartEl.textContent = symbolSyncState.chartSymbol || '—';
+    orderEl.textContent = symbolSyncState.orderSymbol || '—';
+    warnEl.classList.toggle('visible', symbolSyncMismatch(symbolSyncState));
+  }
+
+  function applyChartSymbolChange(newChartSymbol) {
+    symbolSyncState = symbolSyncOnChartChange(symbolSyncState, newChartSymbol);
+    renderSymbolSyncRow();
+  }
+
+  function applyOrderSymbolEdit(newOrderSymbol) {
+    symbolSyncState = symbolSyncOnOrderEdit(symbolSyncState, newOrderSymbol);
+    renderSymbolSyncRow();
+  }
+
+  $('useChartSymbolBtn').addEventListener('click', () => {
+    symbolSyncState = symbolSyncOnUseChartSymbol(symbolSyncState);
+    $('fSymbol').value = symbolSyncState.orderSymbol;
+    renderSymbolSyncRow();
+    refreshEntryQuote();
+    toast(`Order symbol set to ${symbolSyncState.orderSymbol}`);
+  });
+
+  $('fSymbol').addEventListener('input', () => applyOrderSymbolEdit($('fSymbol').value));
+
   // ---- Chart (TradingView — independent widget, not fed by this API) ----
   function loadChart(symbol) {
     const container = $('tvChartContainer');
@@ -3543,6 +3630,7 @@
     store.set('edge.chartSymbol', sym);
     loadChart(sym);
     renderL2();
+    applyChartSymbolChange(sym);
   });
   $('chartSymbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('chartLoadBtn').click(); });
 
@@ -3550,6 +3638,8 @@
     const initial = store.get('edge.chartSymbol', $('fSymbol').value.trim().toUpperCase() || 'QQQ');
     $('chartSymbol').value = initial;
     loadChart(initial);
+    symbolSyncState = { chartSymbol: normalizeSymbolValue(initial), orderSymbol: normalizeSymbolValue($('fSymbol').value) };
+    renderSymbolSyncRow();
   }
 
   // ---- Level 2 / DOM — simulated depth, always labeled as such (see the .l2-badge
@@ -3640,6 +3730,7 @@
     // Live account — fill in the real ticket and run the normal preview; execution
     // still needs the approval modal's name/attestation and a slide to confirm.
     $('fSymbol').value = symbol;
+    applyOrderSymbolEdit(symbol);
     $('fQty').value = quantity;
     $('fType').value = 'MARKET';
     $('limitPriceField').style.display = 'none';
@@ -3756,6 +3847,7 @@
     store.set('edge.chartSymbol', symbol);
     loadChart(symbol);
     renderL2();
+    applyChartSymbolChange(symbol);
     setActiveTab('terminal');
     toast(`Charting ${symbol}`);
   }
