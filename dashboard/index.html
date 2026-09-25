@@ -197,6 +197,8 @@
   .pill.ok .dot { background: var(--buy); }
   .pill.crit { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, var(--border)); background: var(--crit-soft); }
   .pill.crit .dot { background: var(--crit); animation: pulse 1.6s ease-in-out infinite; }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); background: var(--warn-soft); }
+  .pill.warn .dot { background: var(--warn); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   button.pill { font-family: var(--font-mono); cursor: pointer; -webkit-appearance: none; appearance: none; }
   button.pill.set { color: var(--buy); border-color: color-mix(in srgb, var(--buy) 35%, var(--border)); background: var(--buy-soft); }
@@ -726,6 +728,14 @@
   .stat-value.system { color: var(--system); }
   .pill.system { color: var(--system); border-color: color-mix(in srgb, var(--system) 35%, var(--border)); background: var(--system-soft); }
 
+  /* System status card — one row per real capability, each pill state derived
+     from an actual health check or known local state (see deriveSystemStatus()).
+     Never a single blanket "all fine" claim. */
+  .status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .status-row:last-child { border-bottom: none; }
+  .status-row-label { font-size: 13.5px; font-weight: 600; }
+  .status-row-sub { font-size: 11.5px; color: var(--ink-faint); margin-top: 1px; }
+
   /* Footer — present on every tab (outside the tab-panel elements, inside .shell) */
   .site-footer { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); }
   .site-footer-copyright { font-size: 12px; color: var(--ink-muted); margin: 0 0 10px; }
@@ -1117,6 +1127,11 @@
     <div class="card">
       <h2>PnL calendar <span class="hint" id="heatmapHint">last 90 days</span></h2>
       <div id="heatmapBody"><div class="empty-note">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>System status <span class="hint">what's actually working right now</span></h2>
+      <div id="systemStatusBody"></div>
     </div>
 
     <div class="card">
@@ -1969,18 +1984,120 @@
     return Math.floor(s / 86400) + 'd ago';
   }
 
+  // ---- System status ----
+  // The header pill only ever checked one thing (server reachability) but
+  // called it "All systems working" — broad enough to read as a claim about
+  // Paper Trading, alerts, the agent, etc. too, none of which it measures.
+  // This card replaces that single claim with one row per real capability in
+  // this repo, each derived from an actual check or known local state —
+  // never a guess, and never "Working" for something that wasn't checked.
+
+  // ---- TESTABLE: pure status derivation, no DOM/fetch — see tests/test_system_status.mjs ----
+  function deriveSystemStatus(signals) {
+    const paperEngine = signals.storageWorks ? 'working' : 'failed';
+
+    let liveApi;
+    if (signals.demoMode) liveApi = 'unavailable_paper';
+    else if (!signals.healthChecked) liveApi = 'checking';
+    else if (signals.healthError) liveApi = 'disconnected';
+    else liveApi = signals.healthOk ? 'working' : 'failed';
+
+    let marketData;
+    if (!signals.marketChecked) marketData = 'checking';
+    else marketData = signals.marketOk ? 'working' : 'disconnected';
+
+    let chartProvider;
+    if (!signals.chartLoaded) chartProvider = 'checking';
+    else chartProvider = signals.chartAvailable ? 'working' : 'failed';
+
+    const newsFeed = 'not_configured';
+
+    let signalIntegrity;
+    if (!signals.sigIntegrityConfigured) signalIntegrity = 'not_configured';
+    else if (!signals.sigIntegrityChecked) signalIntegrity = 'checking';
+    else signalIntegrity = signals.sigIntegrityOk ? 'working' : 'disconnected';
+
+    let alertEngine;
+    if (signals.demoMode) alertEngine = 'simulated';
+    else if (!signals.alertsChecked) alertEngine = 'checking';
+    else alertEngine = signals.alertsOk ? 'working' : 'failed';
+
+    let agentEngine;
+    if (signals.demoMode) agentEngine = 'simulated';
+    else if (!signals.agentChecked) agentEngine = 'checking';
+    else agentEngine = signals.agentOk ? 'working' : 'failed';
+
+    return { paperEngine, liveApi, marketData, chartProvider, newsFeed, signalIntegrity, alertEngine, agentEngine };
+  }
+  // ---- END TESTABLE ----
+
+  const STATUS_META = {
+    working: { label: 'Working', cls: 'ok' },
+    simulated: { label: 'Simulated', cls: 'system' },
+    disconnected: { label: 'Disconnected', cls: 'crit' },
+    checking: { label: 'Checking…', cls: '' },
+    failed: { label: 'Failed', cls: 'crit' },
+    not_configured: { label: 'Not configured', cls: '' },
+    unavailable_paper: { label: 'Unavailable in paper mode', cls: 'warn' },
+  };
+  const STATUS_ROW_DEFS = [
+    { key: 'paperEngine', label: 'Paper engine', sub: 'The local simulator this dashboard runs Paper Trading on' },
+    { key: 'liveApi', label: 'Live execution API', sub: 'The real Execution-Engine backend' },
+    { key: 'marketData', label: 'Market data', sub: 'Market hours / status feed' },
+    { key: 'chartProvider', label: 'Chart provider', sub: 'TradingView widget' },
+    { key: 'newsFeed', label: 'News feed', sub: 'No provider connected in this build' },
+    { key: 'signalIntegrity', label: 'Signal-integrity service', sub: 'Optional external agent-agreement checker' },
+    { key: 'alertEngine', label: 'Alert engine', sub: 'Price alerts' },
+    { key: 'agentEngine', label: 'Agent engine', sub: 'Automated trading agent' },
+  ];
+  // localStorage/sessionStorage can throw (private browsing with storage
+  // blocked, quota exceeded) — Paper Trading silently swallows that today
+  // (see savePaperState()'s own try/catch), so this is the only way a user
+  // would ever learn their trades aren't actually being saved.
+  function probeStorageWorks() {
+    try {
+      const k = '__edge_storage_probe__';
+      localStorage.setItem(k, '1'); localStorage.removeItem(k);
+      return true;
+    } catch { return false; }
+  }
+  const systemSignals = {
+    healthChecked: false, healthOk: false, healthError: false,
+    marketChecked: false, marketOk: false,
+    chartLoaded: false, chartAvailable: false,
+    sigIntegrityConfigured: false, sigIntegrityChecked: false, sigIntegrityOk: false,
+    alertsChecked: false, alertsOk: false,
+    agentChecked: false, agentOk: false,
+    storageWorks: probeStorageWorks(),
+  };
+  function renderSystemStatus() {
+    const el = $('systemStatusBody');
+    if (!el) return;
+    const status = deriveSystemStatus({ ...systemSignals, demoMode: effectiveDemo() });
+    el.innerHTML = STATUS_ROW_DEFS.map((row) => {
+      const meta = STATUS_META[status[row.key]];
+      return `<div class="status-row">
+        <div><div class="status-row-label">${row.label}</div><div class="status-row-sub">${row.sub}</div></div>
+        <span class="pill ${meta.cls}"><span class="dot"></span><span>${meta.label}</span></span>
+      </div>`;
+    }).join('');
+  }
+
   // ---- Health ----
   async function refreshHealth() {
     const pill = $('healthPill');
     try {
       const h = await api('/v1/health');
       const ok = h.status === 'healthy';
+      systemSignals.healthChecked = true; systemSignals.healthOk = ok; systemSignals.healthError = false;
       pill.className = 'pill ' + (ok ? 'ok' : 'crit');
-      pill.innerHTML = `<span class="dot"></span><span>${ok ? 'All systems working' : 'Having trouble connecting'}</span>`;
+      pill.innerHTML = `<span class="dot"></span><span>${ok ? 'Server reachable' : 'Server reporting unhealthy'}</span>`;
     } catch (e) {
+      systemSignals.healthChecked = true; systemSignals.healthOk = false; systemSignals.healthError = true;
       pill.className = 'pill crit';
       pill.innerHTML = `<span class="dot"></span><span>Offline</span>`;
     }
+    renderSystemStatus();
   }
 
   // ---- Balance / drawdown ----
@@ -2042,7 +2159,12 @@
     try {
       const m = await api('/v1/market-status');
       $('marketStat').textContent = m.in_market_hours ? 'Open' : 'Closed';
-    } catch { $('marketStat').textContent = '—'; }
+      systemSignals.marketChecked = true; systemSignals.marketOk = true;
+    } catch {
+      $('marketStat').textContent = '—';
+      systemSignals.marketChecked = true; systemSignals.marketOk = false;
+    }
+    renderSystemStatus();
   }
 
   async function refreshAgents() {
@@ -2359,17 +2481,21 @@
   async function refreshSignalIntegrity() {
     const url = sigIntegrityUrlInput.value.trim();
     const card = $('sigIntegrityCard');
-    if (!url) { card.style.display = 'none'; return; }
+    systemSignals.sigIntegrityConfigured = !!url;
+    if (!url) { card.style.display = 'none'; renderSystemStatus(); return; }
     card.style.display = '';
     try {
       const resp = await fetch(url.replace(/\/$/, '') + '/v1/compare');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       renderSignalIntegrity(data.symbols || []);
+      systemSignals.sigIntegrityChecked = true; systemSignals.sigIntegrityOk = true;
     } catch (e) {
       $('sigIntegritySummary').textContent = `Could not reach ${url}: ${e.message}`;
       $('sigIntegrityList').innerHTML = '';
+      systemSignals.sigIntegrityChecked = true; systemSignals.sigIntegrityOk = false;
     }
+    renderSystemStatus();
   }
 
   function renderSignalIntegrity(symbols) {
@@ -2501,9 +2627,11 @@
     const el = $('alertsList');
     try {
       const r = await api('/v1/alerts?active_only=true');
+      systemSignals.alertsChecked = true; systemSignals.alertsOk = true;
       const alerts = r.alerts || [];
       if (!alerts.length) {
         el.innerHTML = '<div class="empty-note">No active alerts. Set one below and we\'ll notify you when it hits.</div>';
+        renderSystemStatus();
         return;
       }
       el.innerHTML = alerts.map(a => `
@@ -2522,7 +2650,9 @@
       });
     } catch (e) {
       el.innerHTML = `<div class="empty-note">Could not load alerts: ${e.message}</div>`;
+      systemSignals.alertsChecked = true; systemSignals.alertsOk = false;
     }
+    renderSystemStatus();
   }
 
   $('alertAddBtn').addEventListener('click', async () => {
@@ -2674,6 +2804,7 @@
       main.title = 'Click to switch back to Paper Trading';
       $('modePillReset').style.display = 'none';
     }
+    renderSystemStatus();
   }
   $('modePillMain').addEventListener('click', () => {
     if (!effectiveDemo()) { setDemoMode(true); return; }
@@ -3304,11 +3435,14 @@
     try {
       const r = await api('/v1/autonomous/plan');
       dailyPlanState = r.active_plan;
+      systemSignals.agentChecked = true; systemSignals.agentOk = true;
     } catch (e) {
       dailyPlanState = null;
+      systemSignals.agentChecked = true; systemSignals.agentOk = false;
     }
     renderPlanStatus();
     renderAgentBadges();
+    renderSystemStatus();
   }
 
   async function stopAgent() {
@@ -3378,10 +3512,15 @@
   function loadChart(symbol) {
     const container = $('tvChartContainer');
     container.innerHTML = '';
+    systemSignals.chartLoaded = true;
     if (typeof TradingView === 'undefined' || !TradingView.widget) {
       container.innerHTML = '<div class="empty-note" style="padding:16px">Could not load the TradingView widget (blocked, or offline).</div>';
+      systemSignals.chartAvailable = false;
+      renderSystemStatus();
       return;
     }
+    systemSignals.chartAvailable = true;
+    renderSystemStatus();
     const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     new TradingView.widget({
       autosize: true,
@@ -3977,6 +4116,7 @@
   refreshHistory(true);
   loadFxRates();
   schedulePoll(0);
+  renderSystemStatus();
   $('footerYear').textContent = String(new Date().getFullYear());
 })();
 </script>
