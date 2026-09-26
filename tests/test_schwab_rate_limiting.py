@@ -381,23 +381,23 @@ class TestFactoryCachesTheSchwabAdapter:
         clear_broker_cache()
 
     def test_the_same_settings_share_one_adapter_and_therefore_one_token_hash_and_limiter(self):
-        first, second = build_broker_adapter(self.settings()), build_broker_adapter(self.settings())
+        first, second = build_broker_adapter(self.settings()).adapters["schwab"], build_broker_adapter(self.settings()).adapters["schwab"]
         assert first is second and first.oauth is second.oauth and first._limiter is second._limiter
 
     def test_a_different_refresh_token_is_a_different_adapter(self):
-        assert build_broker_adapter(self.settings()) is not build_broker_adapter(self.settings(schwab_refresh_token="rotated"))
+        assert build_broker_adapter(self.settings()).adapters["schwab"] is not build_broker_adapter(self.settings(schwab_refresh_token="rotated")).adapters["schwab"]
 
     def test_a_different_rate_limit_is_a_different_adapter(self):
-        assert build_broker_adapter(self.settings()) is not build_broker_adapter(self.settings(schwab_rate_limit_per_minute=60))
+        assert build_broker_adapter(self.settings()).adapters["schwab"] is not build_broker_adapter(self.settings(schwab_rate_limit_per_minute=60)).adapters["schwab"]
 
     def test_the_configured_limits_reach_the_adapter(self):
-        adapter = build_broker_adapter(self.settings(schwab_rate_limit_per_minute=42, schwab_max_retry_after_sec=5.0))
+        adapter = build_broker_adapter(self.settings(schwab_rate_limit_per_minute=42, schwab_max_retry_after_sec=5.0)).adapters["schwab"]
         assert adapter._limiter.max_calls == 42 and adapter.max_retry_after_sec == 5.0
 
     def test_clearing_the_cache_builds_a_fresh_adapter(self):
-        first = build_broker_adapter(self.settings())
+        first = build_broker_adapter(self.settings()).adapters["schwab"]
         clear_broker_cache()
-        assert build_broker_adapter(self.settings()) is not first
+        assert build_broker_adapter(self.settings()).adapters["schwab"] is not first
 
     def test_paper_mode_is_untouched(self):
         assert isinstance(build_broker_adapter(self.settings(execution_mode="PAPER")), PaperBrokerAdapter)

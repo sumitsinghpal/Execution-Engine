@@ -47,6 +47,7 @@ class OrderType(str, Enum):
 
 class OrderStatus(str, Enum):
     """Order state machine."""
+    SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
     PREVIEWED = "PREVIEWED"
     APPROVED = "APPROVED"
     SUBMITTED = "SUBMITTED"
@@ -293,6 +294,13 @@ class ExecutionRequest(BaseModel):
     decision_id: str = Field(..., description="Original decision_id")
     preview_id: str = Field(..., description="Must reference an active preview")
     approval: ApprovalArtifact = Field(..., description="Approval artifact")
+
+    @model_validator(mode="after")
+    def approval_matches_preview(self):
+        if self.approval.preview_id != self.preview_id:
+            raise ValueError("Approval preview_id must match execution preview_id")
+        return self
+
     
     model_config = {"extra": "forbid"}
 

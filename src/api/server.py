@@ -15,7 +15,7 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from sqlmodel import select
 
-from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError
+from src.brokers.base import BrokerAPIOutageError, BrokerAuthenticationError, BrokerError
 from src.brokers.factory import build_broker_adapter
 from src.brokers.quotes import fetch_quotes
 from src.config import get_settings, Settings
@@ -1592,3 +1592,28 @@ if __name__ == "__main__":
         port=settings.port,
         reload=(settings.env == "development"),
     )
+
+
+@app.post("/v1/orders/{decision_id}/cancel", dependencies=[Depends(verify_admin_key)])
+async def cancel_reconciled_order(decision_id: str, db: Session = Depends(get_db),
+                                  settings: Settings = Depends(get_settings_dep)):
+    """Request cancellation at the selected broker; do not invent a terminal state."""
+    order = db.exec(select(OrderRecord).where(OrderRecord.decision_id == decision_id)).first()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.execution_id or order.execution_id.startswith("algo-"):
+        raise HTTPException(status_code=409, detail="No single broker order to cancel; reconcile child orders")
+    if order.status in {"FILLED", "CANCELED", "REJECTED", "FAILED"}:
+        raise HTTPException(status_code=409, detail="Order is already terminal")
+    from src.execution.submission_guard import check_binding
+    broker = build_broker_adapter(settings)
+    profile = settings.get_account_profile(order.account)
+    try:
+        check_binding(db, order, profile, settings.execution_mode)
+        if not hasattr(broker, "cancel_order"):
+            raise ValueError("Selected broker does not support cancellation")
+        result = await broker.cancel_order(profile, order.execution_id)
+    except (ValueError, BrokerError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"decision_id": decision_id, "execution_id": order.execution_id,
+            "status": order.status, "cancellation_requested": True, "broker_response": result}

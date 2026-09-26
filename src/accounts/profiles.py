@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class BrokerName(str, Enum):
     """Supported broker integrations."""
 
+    ROBINHOOD = "robinhood"
     PAPER = "paper"
     SCHWAB = "schwab"
 

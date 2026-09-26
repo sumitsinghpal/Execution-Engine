@@ -63,7 +63,7 @@ def _cache_key(settings: Settings) -> tuple:
     )
 
 
-def build_broker_adapter(settings: Settings, mock_broker: bool = False) -> BrokerAdapter:
+def _build_schwab_adapter(settings: Settings, mock_broker: bool = False) -> BrokerAdapter:
     """Choose the configured broker without allowing implicit live trading."""
     if mock_broker or settings.execution_mode.upper() in {"PAPER", "SHADOW"}:
         return PaperBrokerAdapter()
@@ -101,3 +101,27 @@ def build_broker_adapter(settings: Settings, mock_broker: bool = False) -> Broke
 
 
 __all__ = ["build_broker_adapter", "clear_broker_cache"]
+
+
+def build_broker_adapter(settings: Settings, mock_broker: bool = False) -> BrokerAdapter:
+    if mock_broker or settings.execution_mode.upper() in {"PAPER", "SHADOW"}:
+        return PaperBrokerAdapter()
+    if settings.execution_mode.upper() not in {"LIVE", "SCHWAB", "ROBINHOOD"}:
+        raise ValueError("Unknown execution mode")
+    from src.brokers.robinhood.adapter import RobinhoodHostBridgeAdapter
+    from src.brokers.router import BrokerRouter
+    brokers = {p.broker for p in settings.account_profiles.values()}
+    adapters = {}
+    if BrokerName.PAPER in brokers:
+        adapters[BrokerName.PAPER] = PaperBrokerAdapter()
+    if BrokerName.SCHWAB in brokers:
+        adapters[BrokerName.SCHWAB] = _build_schwab_adapter(settings)
+    if BrokerName.ROBINHOOD in brokers:
+        adapters[BrokerName.ROBINHOOD] = RobinhoodHostBridgeAdapter(
+            settings.robinhood_bridge_url, settings.robinhood_bridge_token,
+            settings.robinhood_live_trading_enabled)
+    if len(adapters) == 1:
+        return next(iter(adapters.values()))
+    live_brokers = brokers - {BrokerName.PAPER}
+    market = settings.market_data_broker or (next(iter(live_brokers)) if len(live_brokers) == 1 else "")
+    return BrokerRouter(adapters, market)

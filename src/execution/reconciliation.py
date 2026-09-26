@@ -41,7 +41,10 @@ class ReconciliationService:
     VALID_TRANSITIONS = {
         OrderStatus.PREVIEWED: [OrderStatus.APPROVED, OrderStatus.REJECTED],
         OrderStatus.APPROVED: [OrderStatus.SUBMITTED, OrderStatus.REJECTED],
+        OrderStatus.SUBMISSION_UNKNOWN: [OrderStatus.ACKNOWLEDGED, OrderStatus.PARTIAL_FILL, OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED],
         OrderStatus.SUBMITTED: [
+            OrderStatus.FILLED,
+            OrderStatus.CANCELED,
             OrderStatus.ACKNOWLEDGED,
             OrderStatus.PARTIAL_FILL,
             OrderStatus.REJECTED,
@@ -112,7 +115,7 @@ class ReconciliationService:
             return False
         
         # Status changed
-        if old_status != local_status:
+        if old_status != local_status or broker_status.get("filledQuantity", 0) > order.filled_quantity:
             # Record reconciliation event
             event = ReconciliationEvent(
                 decision_id=decision_id,

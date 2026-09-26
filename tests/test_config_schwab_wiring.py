@@ -75,10 +75,11 @@ class TestBuildBrokerAdapter:
         )
         assert isinstance(build_broker_adapter(settings), PaperBrokerAdapter)
 
-    def test_no_schwab_account_profile_returns_paper_even_outside_paper_mode(self):
+    def test_unknown_execution_mode_is_rejected(self):
         """Nothing in account_profiles actually uses SCHWAB, so there's nothing to switch to."""
         settings = _settings(execution_mode="LIVE_PREVIEW")
-        assert isinstance(build_broker_adapter(settings), PaperBrokerAdapter)
+        with pytest.raises(ValueError, match="Unknown execution mode"):
+            build_broker_adapter(settings)
 
     def test_schwab_mode_without_credentials_raises(self):
         settings = _settings(execution_mode="SCHWAB", schwab_account_number="99999")
@@ -94,7 +95,9 @@ class TestBuildBrokerAdapter:
             schwab_refresh_token="refresh",
             schwab_account_number="99999",
         )
-        adapter = build_broker_adapter(settings)
+        router = build_broker_adapter(settings)
+        assert isinstance(router.adapters[BrokerName.PAPER], PaperBrokerAdapter)
+        adapter = router.adapters[BrokerName.SCHWAB]
         assert isinstance(adapter, SchwabBrokerAdapter)
         assert adapter.account_number == "99999"
 

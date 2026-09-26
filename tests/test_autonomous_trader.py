@@ -17,7 +17,10 @@ from datetime import UTC, datetime
 
 import pytest
 
+from src.accounts.profiles import BrokerName
 from src.brokers.paper import PaperBrokerAdapter
+from src.brokers.robinhood.adapter import RobinhoodHostBridgeAdapter
+from src.brokers.router import BrokerRouter
 from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
@@ -582,3 +585,49 @@ class TestBuildBroker:
 
         assert broker.submit_order.__func__ is PaperBrokerAdapter.submit_order
         assert broker.preview_order.__func__ is PaperBrokerAdapter.preview_order
+
+    def test_a_broker_router_wrapping_schwab_still_gets_wrapped_in_schwab_data_paper_broker(self, monkeypatch):
+        """
+        build_broker_adapter() returns a BrokerRouter (not a bare
+        SchwabBrokerAdapter) whenever more than one broker is configured —
+        which is effectively always once Schwab is added alongside the
+        default "primary" PAPER profile (see src/brokers/factory.py). This
+        is the regression this test guards: _build_broker() must look
+        inside the router for the real Schwab adapter and wrap THAT,
+        not silently hand the router itself to the autonomous loop.
+        """
+        settings = Settings(_env_file=None, env="test", execution_mode="SCHWAB")
+        fake_schwab = SchwabBrokerAdapter.__new__(SchwabBrokerAdapter)
+        router = BrokerRouter({BrokerName.PAPER: PaperBrokerAdapter(), BrokerName.SCHWAB: fake_schwab}, BrokerName.SCHWAB)
+        monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: router)
+
+        broker = _real_build_broker(settings)
+
+        assert isinstance(broker, SchwabDataPaperBroker)
+        assert broker.submit_order.__func__ is PaperBrokerAdapter.submit_order
+
+    def test_a_live_capable_broker_this_function_cannot_wrap_falls_back_to_plain_paper_not_the_live_adapter(self, monkeypatch):
+        """
+        A RobinhoodHostBridgeAdapter (or any BrokerRouter with no Schwab
+        adapter inside it) is real and live-capable, and there is no
+        simulate-fills wrapper for it yet — _build_broker() must never
+        return it, or a router containing it, directly. Fail closed to a
+        fully-synthetic PaperBrokerAdapter instead, even though that means
+        losing real market data for the autonomous loop in this
+        configuration — the alternative is a live order path with no
+        simulation at all, which is never acceptable here.
+        """
+        settings = Settings(_env_file=None, env="test", execution_mode="LIVE")
+        fake_robinhood = RobinhoodHostBridgeAdapter.__new__(RobinhoodHostBridgeAdapter)
+
+        monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: fake_robinhood)
+        broker = _real_build_broker(settings)
+        assert isinstance(broker, PaperBrokerAdapter)
+        assert not isinstance(broker, SchwabDataPaperBroker)
+
+        router_without_schwab = BrokerRouter({BrokerName.PAPER: PaperBrokerAdapter(), BrokerName.ROBINHOOD: fake_robinhood}, BrokerName.ROBINHOOD)
+        monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: router_without_schwab)
+        broker = _real_build_broker(settings)
+        assert isinstance(broker, PaperBrokerAdapter)
+        assert not isinstance(broker, SchwabDataPaperBroker)
+        assert broker is not router_without_schwab

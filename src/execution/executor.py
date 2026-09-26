@@ -4,7 +4,7 @@ Core execution orchestration: preview and execute flows.
 
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -16,6 +16,7 @@ from src.brokers.factory import build_broker_adapter
 from src.config import get_settings
 from src.execution.algo_slices import build_twap_plan, build_vwap_plan, schedule_algo_execution
 from src.execution.approval import ApprovalManager
+from src.execution.submission_guard import SubmissionClaim, claim_submission, PreviewBinding, bind_preview, check_binding
 from src.execution.idempotency import IdempotencyManager, Operation
 from src.execution.kill_switch_state import KillSwitchService
 from src.execution.symbol_coordination import SymbolCoordinationGuard
@@ -116,6 +117,8 @@ class Executor:
         if self.idempotency.is_duplicate(proposal.decision_id, Operation.PREVIEW):
             cached = self.idempotency.get_existing_response(proposal.decision_id, Operation.PREVIEW)
             if cached:
+                if OrderPreview.model_validate_json(cached).payload_checksum != self.builder.compute_payload_checksum(proposal):
+                    raise ValueError("Decision ID already belongs to different order terms")
                 logger.warning("duplicate_preview_returned_cached_response", decision_id=proposal.decision_id)
                 return OrderPreview.model_validate_json(cached)
             logger.warning("duplicate_preview_no_cached_response_found", decision_id=proposal.decision_id)
@@ -223,6 +226,8 @@ class Executor:
         self.session.add(order_record)
         self.session.commit()
         
+        bind_preview(self.session, order_record, profile, self.settings.execution_mode)
+
         # Log to audit ledger
         self._audit_log(
             "ORDER_PREVIEWED",
@@ -272,6 +277,13 @@ class Executor:
         5. Persist execution and return receipt
         """
         
+        saved = self.session.exec(select(OrderRecord).where(OrderRecord.decision_id == decision_id)).first()
+        if saved and saved.preview_id != preview_id:
+            raise ValueError("Preview ID mismatch")
+        prior_claim = self.session.get(SubmissionClaim, decision_id)
+        if prior_claim and prior_claim.idempotency_key != idempotency_key:
+            raise ValueError("Execution idempotency key conflict")
+
         # Check for duplicate execution. This must actually short-circuit and
         # return the original result, not just log a warning and continue —
         # otherwise a retried/duplicated request resubmits to the broker a
@@ -290,6 +302,12 @@ class Executor:
 
         if not order:
             raise ValueError(f"Order {decision_id} not found")
+
+        if not order.risk_approved:
+            raise ValueError("Preview risk verdict is REJECTED")
+        if order.status != OrderStatus.PREVIEWED.value:
+            raise ValueError("Order has already entered execution; reconcile its status before retrying")
+        check_binding(self.session, order, self.settings.get_account_profile(order.account), self.settings.execution_mode)
 
         # Verify preview hasn't expired
         if order.preview_expires_at and datetime.utcnow() > order.preview_expires_at:
@@ -312,7 +330,7 @@ class Executor:
         if not attestation or not attestation.strip():
             raise ValueError("Approval must include a non-empty attestation.")
 
-        approved_at_naive = approved_at.replace(tzinfo=None) if approved_at.tzinfo else approved_at
+        approved_at_naive = approved_at.astimezone(timezone.utc).replace(tzinfo=None) if approved_at.tzinfo else approved_at
         approval_age = datetime.utcnow() - approved_at_naive
         if approval_age < timedelta(0):
             raise ValueError("Approval timestamp is in the future.")
@@ -321,6 +339,12 @@ class Executor:
                 f"Approval is stale ({approval_age.total_seconds() / 60:.1f} min old; "
                 f"must be within {self.approval_manager.MAX_APPROVAL_AGE_MINUTES} min)."
             )
+
+        if not idempotency_key.strip():
+            raise ValueError("Execution requires an idempotency key")
+        if self._get_kill_switch_state(order.agent_id):
+            raise ValueError("Kill switch is ON - order rejected")
+        claim_submission(self.session, decision_id, preview_id, idempotency_key)
 
         # Record approval for the audit trail
         self.approval_manager.record_approval(
@@ -373,12 +397,23 @@ class Executor:
             profile = self.settings.get_account_profile(order.account)
             try:
                 broker_response = await self.broker.submit_order(profile, order_spec)
-            except BrokerAuthenticationError as exc:
-                self._shutdown_on_auth_failure(exc)
+            except Exception as exc:
+                order.status = OrderStatus.SUBMISSION_UNKNOWN.value
+                order.broker_message = "Submission outcome unknown; broker reconciliation required"
+                self.session.add(order)
+                self.session.commit()
+                if isinstance(exc, BrokerAuthenticationError):
+                    self._shutdown_on_auth_failure(exc)
                 raise
 
             # Extract broker order ID
-            execution_id = broker_response.get("orderId", f"exec-{uuid.uuid4()}")
+            execution_id = broker_response.get("orderId")
+            if not execution_id:
+                order.status = OrderStatus.SUBMISSION_UNKNOWN.value
+                order.broker_message = "Broker returned no order ID; do not resubmit. Reconcile with broker."
+                self.session.add(order)
+                self.session.commit()
+                raise ValueError(order.broker_message)
             order.raw_broker_response = json.dumps(broker_response)
 
         # Update order record

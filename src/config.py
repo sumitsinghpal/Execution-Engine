@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # live_enabled is True (see schwab_live_trading_enabled below) — two
     # independent switches, so enabling one alone changes nothing.
     execution_mode: str = "PAPER"
+    robinhood_bridge_url: str = ""
+    robinhood_bridge_token: str = ""
+    robinhood_live_trading_enabled: bool = False
+    market_data_broker: str = ""
+
 
     # Account aliases prevent EDGE-TF callers from providing raw broker account IDs.
     account_profiles: dict[str, AccountProfile] = Field(

@@ -154,7 +154,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
         schwab_order = to_schwab_order(order_spec)
         account_hash = await self._resolve_account_hash(profile)
         _, headers = await self._request(
-            "POST", f"/accounts/{account_hash}/orders", json=schwab_order, return_headers=True
+            "POST", f"/accounts/{account_hash}/orders", json=schwab_order, return_headers=True, retry_allowed=False
         )
         order_id = self._extract_order_id_from_location(headers.get("Location"))
         logger.warning(
@@ -193,6 +193,11 @@ class SchwabBrokerAdapter(BrokerAdapter):
     async def get_order_status(self, profile: AccountProfile, order_id: str) -> dict[str, Any]:
         account_hash = await self._resolve_account_hash(profile)
         return await self._request("GET", f"/accounts/{account_hash}/orders/{order_id}")
+
+    async def cancel_order(self, profile: AccountProfile, order_id: str) -> dict[str, Any]:
+        account_hash = await self._resolve_account_hash(profile)
+        await self._request("DELETE", f"/accounts/{account_hash}/orders/{order_id}", retry_allowed=False)
+        return {"orderId": order_id, "cancellationRequested": True}
 
     async def get_positions(self, profile: AccountProfile) -> list[dict[str, Any]]:
         account_hash = await self._resolve_account_hash(profile)
@@ -353,7 +358,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
         return min(seconds, self.max_retry_after_sec)
 
     async def _request(
-        self, method: str, path: str, base_url: Optional[str] = None, return_headers: bool = False, **kwargs: Any
+        self, method: str, path: str, base_url: Optional[str] = None, return_headers: bool = False, retry_allowed: bool = True, **kwargs: Any
     ) -> dict[str, Any] | list[dict[str, Any]] | tuple[dict[str, Any] | list[dict[str, Any]], httpx.Headers]:
         """
         Issues one Schwab API call with an explicit timeout and retry-with-
@@ -382,7 +387,8 @@ class SchwabBrokerAdapter(BrokerAdapter):
         last_was_rate_limit = False
         last_retry_after: Optional[float] = None
 
-        for attempt in range(1, self.retry_max_attempts + 1):
+        max_attempts = self.retry_max_attempts if retry_allowed else 1
+        for attempt in range(1, max_attempts + 1):
             await self._limiter.acquire()
             token = await self.oauth.get_access_token()
             try:
@@ -398,7 +404,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
                     last_was_rate_limit = True
                     last_retry_after = self._retry_after_seconds(response)
                     last_exc = httpx.HTTPStatusError("Schwab returned 429", request=response.request, response=response)
-                    if attempt < self.retry_max_attempts:
+                    if attempt < max_attempts:
                         delay = (
                             last_retry_after
                             if last_retry_after is not None
@@ -432,7 +438,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
 
                 last_exc = exc
                 last_was_rate_limit = False  # this failure is a timeout/network/5xx, not a 429
-                if attempt < self.retry_max_attempts:
+                if attempt < max_attempts:
                     backoff = self.retry_backoff_sec * (2 ** (attempt - 1))
                     logger.warning(
                         "schwab_request_retrying",

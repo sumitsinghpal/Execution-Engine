@@ -70,6 +70,12 @@ class OrderBuilder:
         import json
         
         normalized = {
+            "agent_id": proposal.agent_id,
+            "strategy_id": proposal.strategy_id,
+            "strategy_stop_loss_price": str(proposal.strategy_stop_loss_price) if proposal.strategy_stop_loss_price is not None else None,
+            "strategy_take_profit_price": str(proposal.strategy_take_profit_price) if proposal.strategy_take_profit_price is not None else None,
+            "algo_duration_minutes": proposal.algo_duration_minutes,
+            "algo_slices": proposal.algo_slices,
             "decision_id": proposal.decision_id,
             "account": proposal.account,
             "symbol": proposal.symbol,

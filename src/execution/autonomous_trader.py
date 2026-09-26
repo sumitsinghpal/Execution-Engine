@@ -36,6 +36,15 @@ Three things make that safe to ship:
    docstring for exactly which methods are real vs. simulated. Making
    ORDERS (not just data) real would mean changing what this function
    returns, a deliberate code change, not a config flip.
+   build_broker_adapter() can now also return a BrokerRouter (multiple
+   configured brokers — see src/brokers/router.py) or a raw
+   RobinhoodHostBridgeAdapter, neither of which is a SchwabBrokerAdapter;
+   _build_broker() unwraps a BrokerRouter looking specifically for a
+   Schwab adapter to extract and wrap the same way, and falls back to
+   fully-synthetic PaperBrokerAdapter (never the router or a live-capable
+   adapter directly) for anything else it doesn't recognize how to wrap —
+   fail closed, not fail open, for any broker type this function doesn't
+   explicitly know how to make safe.
 4. scan_for_entries() opens NOTHING unless a human has explicitly armed
    a strategy set and a per-trade quantity for today (see
    src/execution/daily_plan.py) — which strategies get to trade, and how
@@ -60,8 +69,11 @@ from typing import Callable
 from sqlmodel import Session
 
 from src.agentic.llm_narrator import narrate_entry, narrate_exit
+from src.accounts.profiles import BrokerName
 from src.brokers.base import BrokerAdapter
 from src.brokers.factory import build_broker_adapter
+from src.brokers.paper import PaperBrokerAdapter
+from src.brokers.router import BrokerRouter
 from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
@@ -84,13 +96,29 @@ def _build_broker(settings: Settings) -> BrokerAdapter:
     and src/brokers/schwab_data_paper.py. build_broker_adapter(settings)
     already resolves whether Schwab is actually usable (execution_mode,
     credentials, an account profile that names it); if what it returns
-    isn't a SchwabBrokerAdapter, Schwab isn't configured and plain
-    PaperBrokerAdapter (fully synthetic, unchanged) is correct as-is.
+    isn't a SchwabBrokerAdapter (or a BrokerRouter with one inside — see
+    src/brokers/router.py, which build_broker_adapter now returns
+    whenever more than one broker is configured, which is effectively
+    always once Schwab is added alongside the default "primary" PAPER
+    profile), Schwab isn't safely extractable and plain PaperBrokerAdapter
+    (fully synthetic) is used instead. This is a deliberate fail-closed
+    default, not just the "nothing configured" case: a RobinhoodHostBridgeAdapter,
+    or a BrokerRouter with no Schwab adapter inside it, is real and
+    live-capable, and this function has no simulate-fills wrapper for it —
+    so it is never returned directly, on purpose, even though that means
+    losing real market data for the autonomous loop in that configuration.
     """
     broker = build_broker_adapter(settings)
-    if isinstance(broker, SchwabBrokerAdapter):
-        return SchwabDataPaperBroker(broker)
-    return broker
+    if isinstance(broker, PaperBrokerAdapter):
+        return broker
+    schwab = broker if isinstance(broker, SchwabBrokerAdapter) else None
+    if schwab is None and isinstance(broker, BrokerRouter):
+        candidate = broker.adapters.get(BrokerName.SCHWAB)
+        if isinstance(candidate, SchwabBrokerAdapter):
+            schwab = candidate
+    if schwab is not None:
+        return SchwabDataPaperBroker(schwab)
+    return PaperBrokerAdapter()
 
 
 async def manage_open_positions(session: Session, settings: Settings) -> int:
