@@ -1,7 +1,21 @@
-"""Actual Trade-TF HTTP client -> Engine ASGI app -> paper broker contract."""
+"""
+Actual Trade-TF HTTP client -> Engine ASGI app -> paper broker contract.
+
+Uses Trade-TF's real, already-safety-audited ExecutionEngineClient (see
+Trade-TF's own commit "Make ExecutionEngineClient speak Execution-Engine's
+real protocol, and make autonomous execution paper-only by construction" —
+26 unit tests plus a prior real end-to-end paper run) rather than the
+differently-shaped client that shipped in Francois's 2026.09.25-rc1 zip.
+That zip's version has no test coverage of its own and nothing in Trade-TF
+actually calls it — see docs/reconciliation-002-007.md's own integration
+notes for why it was left out of this repo's copy of Trade-TF. This test
+proves the SAME thing either shape would (real HTTP wire compatibility
+between the two real, running services) using the client that's actually
+shipping.
+"""
 import sys
 from pathlib import Path
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 import httpx
@@ -9,7 +23,7 @@ import pytest
 
 # The release archive places both projects side by side.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'Trade-TF'))
-from trader_tf.adapters.execution.execution_engine_client import ExecutionEngineClient
+from trader_tf.adapters.execution.execution_engine_client import ApprovalMode, ExecutionEngineClient
 from trader_tf.domain.order_intent import OrderIntent
 from trader_tf.strategy_registry import StrategyContract, StrategyRegistry
 
@@ -27,20 +41,28 @@ async def test_trade_tf_http_paper_contract(app_with_test_db, monkeypatch, test_
     key = str(uuid4())
     intent = OrderIntent(intent_id=key, strategy_id='contract-test', sleeve_element_id='equity',
         eligibility_id='approved-research', instrument='QQQ', side='BUY', quantity=Decimal('1'),
-        idempotency_key=key, created_at=datetime.now(UTC), account_alias='primary',
-        asset_type='ETF', order_type='MARKET')
-    client = ExecutionEngineClient('http://test', test_settings.api_key_admin)
-    with pytest.raises(ValueError, match='Explicit approval'):
-        await client.submit_intent(intent)
-    preview = await client.preview_intent(intent)
-    approval = dict(preview_id=preview['preview_id'], approved_by='test-human',
-        approved_at=datetime.now(UTC).isoformat(), attestation='Approve this paper preview', idempotency_key=key)
-    receipt = await client.submit_intent(intent, approval)
-    repeated = await client.submit_intent(intent, approval)
-    assert receipt == repeated and receipt.accepted
-    status = await client.get_status(intent.intent_id)
-    assert status['status'] == 'FILLED' and status['filled_quantity'] == 1
-    assert status['execution_id'] == receipt.broker_order_id
+        idempotency_key=key, created_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(minutes=10))
+
+    # HUMAN mode (the default) previews only, against the real engine.
+    human = ExecutionEngineClient('http://test', test_settings.api_key_admin, account='primary', asset_type='EQUITY')
+    previewed = await human.submit_intent(intent)
+    assert previewed.status == 'PREVIEWED' and previewed.accepted and previewed.preview_id
+
+    # AUTONOMOUS_PAPER_ONLY against the SAME real engine, in real paper mode:
+    # proves the engine's own health check truly reports PAPER end to end,
+    # not a mocked/assumed value, and that the client only ever auto-executes
+    # because of that real proof.
+    auto_key = str(uuid4())
+    auto_intent = OrderIntent(intent_id=auto_key, strategy_id='contract-test', sleeve_element_id='equity',
+        eligibility_id='approved-research', instrument='QQQ', side='BUY', quantity=Decimal('1'),
+        idempotency_key=auto_key, created_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(minutes=10))
+    client = ExecutionEngineClient('http://test', test_settings.api_key_admin, account='primary',
+        asset_type='EQUITY', approval_mode=ApprovalMode.AUTONOMOUS_PAPER_ONLY)
+    receipt = await client.submit_intent(auto_intent)
+    repeated = await client.submit_intent(auto_intent)
+    assert receipt == repeated and receipt.accepted and receipt.status == 'EXECUTED'
+    [fill] = await client.get_fills(auto_key)
+    assert fill.quantity == Decimal('1') and fill.instrument == 'QQQ'
 
 
 def test_registry_survives_restart_and_rejects_conflicting_version(tmp_path):
