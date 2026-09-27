@@ -327,3 +327,139 @@ class TestExecuteMultiLegOrder:
         assert result.failed_leg_index == 0
         assert result.executed_legs == []
         assert KillSwitchService(session).is_enabled("multi-leg-test-agent-2") is False  # nothing was open, so no need to halt
+
+
+class TestMultiLegSubmissionClaims:
+    """
+    src/execution/submission_guard.py's durable per-decision submission
+    claims (see src/execution/executor.py's execute_order) key on each
+    leg's OWN decision_id — execute_multi_leg_order() gives every leg a
+    distinct one (see its idempotency_key=f"{leg.decision_id}:{combo_id}:
+    leg{i}" call), so a combo's two legs never share a claim row and can
+    never collide with each other. These tests make that explicit rather
+    than leaving it implied by the plain success-path test above, and
+    cover the restart/retry semantics the reconciliation notes flagged as
+    "not certified by the new single-order claim tests": a caller retrying
+    the same leg with its original idempotency key must be a no-op (not a
+    second broker submission), a caller retrying with a DIFFERENT key must
+    be refused outright, and a process restart between legs (nothing but
+    DB state survives) must still let the remaining leg execute normally.
+    """
+
+    @pytest.mark.asyncio
+    async def test_both_legs_get_independent_submission_claims(self, test_db_engine_and_session, monkeypatch):
+        from src.execution.submission_guard import SubmissionClaim
+
+        _, session = test_db_engine_and_session
+        _settings(monkeypatch)
+        broker = _FakeOptionsBroker()
+        legs = [
+            _leg("ml-claim-1", _occ(strike="400", days_out=60), Instruction.BUY, quantity=1),
+            _leg("ml-claim-2", _occ(strike="410", days_out=60), Instruction.SELL, quantity=1),
+        ]
+        executor = Executor(session=session, broker=broker)
+        preview = await preview_multi_leg_order(executor, legs, combo_type="vertical_spread")
+        leg_refs = [lp.to_leg_ref() for lp in preview.legs]
+        result = await execute_multi_leg_order(executor, preview.combo_id, leg_refs, approved_by="test-op", attestation="test combo")
+        assert result.fully_executed is True
+
+        claim_1 = session.get(SubmissionClaim, "ml-claim-1")
+        claim_2 = session.get(SubmissionClaim, "ml-claim-2")
+        assert claim_1 is not None and claim_2 is not None
+        assert claim_1.idempotency_key != claim_2.idempotency_key  # distinct rows, not one shared claim
+        assert claim_1.preview_id == leg_refs[0].preview_id
+        assert claim_2.preview_id == leg_refs[1].preview_id
+
+    @pytest.mark.asyncio
+    async def test_retrying_a_leg_with_its_original_idempotency_key_does_not_resubmit(self, test_db_engine_and_session, monkeypatch):
+        _, session = test_db_engine_and_session
+        _settings(monkeypatch)
+        broker = _FakeOptionsBroker()
+        legs = [
+            _leg("ml-retry-same-1", _occ(strike="400", days_out=65), Instruction.BUY, quantity=1),
+            _leg("ml-retry-same-2", _occ(strike="410", days_out=65), Instruction.SELL, quantity=1),
+        ]
+        executor = Executor(session=session, broker=broker)
+        preview = await preview_multi_leg_order(executor, legs, combo_type="vertical_spread")
+        leg_refs = [lp.to_leg_ref() for lp in preview.legs]
+        first = await execute_multi_leg_order(executor, preview.combo_id, leg_refs, approved_by="test-op", attestation="test combo")
+        assert first.fully_executed is True
+        assert len(broker.submitted_specs) == 2
+
+        # Simulates a caller (or a client library) retrying leg 1 after, say,
+        # a network timeout on the original response — same decision_id, same
+        # preview_id, same idempotency_key it used the first time.
+        leg0 = leg_refs[0]
+        retry_key = f"{leg0.decision_id}:{preview.combo_id}:leg0"
+        retried = await executor.execute_order(
+            decision_id=leg0.decision_id, preview_id=leg0.preview_id, approved_by="test-op",
+            approved_at=datetime.now(UTC), attestation="retry same leg", idempotency_key=retry_key,
+        )
+        assert retried.execution_id == first.executed_legs[0]["execution_id"]
+        assert len(broker.submitted_specs) == 2  # unchanged — no second broker call for leg 1
+
+    @pytest.mark.asyncio
+    async def test_retrying_a_leg_with_a_different_idempotency_key_is_refused_not_double_submitted(self, test_db_engine_and_session, monkeypatch):
+        _, session = test_db_engine_and_session
+        _settings(monkeypatch)
+        broker = _FakeOptionsBroker()
+        legs = [
+            _leg("ml-retry-diff-1", _occ(strike="400", days_out=70), Instruction.BUY, quantity=1),
+            _leg("ml-retry-diff-2", _occ(strike="410", days_out=70), Instruction.SELL, quantity=1),
+        ]
+        executor = Executor(session=session, broker=broker)
+        preview = await preview_multi_leg_order(executor, legs, combo_type="vertical_spread")
+        leg_refs = [lp.to_leg_ref() for lp in preview.legs]
+        await execute_multi_leg_order(executor, preview.combo_id, leg_refs, approved_by="test-op", attestation="test combo")
+        assert len(broker.submitted_specs) == 2
+
+        # A caller that (incorrectly) generates a FRESH idempotency key on
+        # retry, instead of reusing the one from its own original request —
+        # this must be refused outright, not treated as a new submission.
+        leg0 = leg_refs[0]
+        with pytest.raises(ValueError, match="idempotency key conflict"):
+            await executor.execute_order(
+                decision_id=leg0.decision_id, preview_id=leg0.preview_id, approved_by="test-op",
+                approved_at=datetime.now(UTC), attestation="retry with a fresh key", idempotency_key="a-brand-new-key",
+            )
+        assert len(broker.submitted_specs) == 2  # still unchanged — refused before ever reaching the broker
+
+    @pytest.mark.asyncio
+    async def test_a_restart_between_legs_still_lets_the_remaining_leg_execute_normally(self, test_db_engine_and_session, monkeypatch):
+        """
+        Nothing but DB state survives a real process restart — this
+        simulates that by executing leg 1 through one Executor instance,
+        discarding it, then finishing the combo on a brand-new Executor
+        built from the same session/DB, the same way a fresh request after
+        a restart would. Each leg's own persisted preview/claim is what
+        makes this safe, not any in-memory state carried between legs.
+        """
+        _, session = test_db_engine_and_session
+        _settings(monkeypatch)
+        broker = _FakeOptionsBroker()
+        legs = [
+            _leg("ml-restart-1", _occ(strike="400", days_out=75), Instruction.BUY, quantity=1),
+            _leg("ml-restart-2", _occ(strike="410", days_out=75), Instruction.SELL, quantity=1),
+        ]
+        first_executor = Executor(session=session, broker=broker)
+        preview = await preview_multi_leg_order(first_executor, legs, combo_type="vertical_spread")
+        leg_refs = [lp.to_leg_ref() for lp in preview.legs]
+
+        leg0 = leg_refs[0]
+        await first_executor.execute_order(
+            decision_id=leg0.decision_id, preview_id=leg0.preview_id, approved_by="test-op",
+            approved_at=datetime.now(UTC), attestation="leg 1 before the (simulated) restart",
+            idempotency_key=f"{leg0.decision_id}:{preview.combo_id}:leg0",
+        )
+        assert len(broker.submitted_specs) == 1
+        del first_executor  # the process "restarts" here — nothing in memory survives
+
+        second_executor = Executor(session=session, broker=broker)
+        leg1 = leg_refs[1]
+        receipt = await second_executor.execute_order(
+            decision_id=leg1.decision_id, preview_id=leg1.preview_id, approved_by="test-op",
+            approved_at=datetime.now(UTC), attestation="leg 2 resumed after the restart, on a fresh Executor",
+            idempotency_key=f"{leg1.decision_id}:{preview.combo_id}:leg1",
+        )
+        assert receipt.execution_id is not None
+        assert len(broker.submitted_specs) == 2
