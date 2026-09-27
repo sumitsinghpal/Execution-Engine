@@ -278,6 +278,7 @@ class OrderPreview(BaseModel):
     risk_details: dict = Field(..., description="Risk check results")
     payload_checksum: str = Field(..., description="SHA256 checksum of normalized trade proposal")
     expires_at: datetime = Field(..., description="Expiration time for this preview")
+    simulated: bool = Field(..., description="True if this account's configured broker simulates fills rather than reaching a real broker")
 
 
 class ApprovalArtifact(BaseModel):
@@ -312,6 +313,7 @@ class ExecutionReceipt(BaseModel):
     status: OrderStatus = Field(..., description="Current order status")
     submitted_at: datetime = Field(..., description="Submission timestamp")
     broker_response: dict = Field(..., description="Raw Schwab response")
+    simulated: bool = Field(..., description="True if this account's configured broker simulates fills rather than reaching a real broker")
 
 
 class OrderStatus_Model(BaseModel):
@@ -326,6 +328,7 @@ class OrderStatus_Model(BaseModel):
     average_fill_price: Optional[Decimal] = None
     broker_status: Optional[str] = None
     broker_message: Optional[str] = None
+    simulated: bool = Field(..., description="True if this account's configured broker simulates fills rather than reaching a real broker")
 
 
 class KillSwitchStatus(BaseModel):

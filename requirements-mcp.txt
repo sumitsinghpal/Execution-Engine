@@ -1,0 +1,22 @@
+# Dependencies for running src/mcp/server.py — the MCP tool bridge.
+#
+# Deliberately a SEPARATE environment from the main app (see
+# docs/MCP_BRIDGE.md): the `mcp` package requires pydantic>=2.8,
+# anyio>=4.6, starlette>=0.39 even on its oldest 1.x release, which
+# conflicts outright with this repo's pinned FastAPI stack
+# (fastapi==0.104.1 / pydantic==2.5.0 / starlette==0.27.0 / uvicorn==
+# 0.24.0 — installing mcp into that venv upgrades those packages and
+# breaks the API app). No upper pins on the OTHER packages here on
+# purpose: this venv never runs the FastAPI app itself, only talks to it
+# over HTTP.
+#
+# mcp IS upper-pinned, unlike the floor-only "mcp>=1.0" Trade-TF uses for
+# the identical FastMCP import: mcp 2.x renamed
+# mcp.server.fastmcp.FastMCP to mcp.server.mcpserver.MCPServer and changed
+# other APIs (verified directly — mcp==2.2.0 raises ModuleNotFoundError on
+# exactly this import with a message pointing at its own migration guide).
+# src/mcp/server.py is written against the v1 FastMCP API, matching
+# Trade-TF's own trader_tf/mcp/server.py.
+mcp>=1.0,<2
+httpx>=0.27
+pydantic-settings>=2.2

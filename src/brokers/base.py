@@ -99,3 +99,27 @@ class BrokerAdapter(ABC):
         a minimum history length must check the returned length
         themselves rather than assume it).
         """
+
+
+def is_simulated_broker(broker: "BrokerAdapter", profile: AccountProfile) -> bool:
+    """
+    Whether an order routed through `broker` for this account `profile`
+    will actually simulate its fill rather than reach a real broker — the
+    "simulated" flag on ExecutionReceipt/OrderPreview/OrderStatus_Model
+    (see src/models/orders.py) is computed from this, once per order,
+    rather than assumed from execution_mode alone.
+
+    A BrokerRouter (src/brokers/router.py) can hold a mix of paper and
+    live adapters at once, so this isn't a static property of the broker
+    object itself — it resolves to whichever adapter this profile's own
+    configured broker actually routes to, then checks THAT. Imports are
+    deferred to avoid a circular import: both PaperBrokerAdapter and
+    BrokerRouter subclass BrokerAdapter, defined in this same module.
+    """
+    from src.brokers.paper import PaperBrokerAdapter
+    from src.brokers.router import BrokerRouter
+
+    effective = broker
+    if isinstance(broker, BrokerRouter):
+        effective = broker.adapters.get(profile.broker, broker)
+    return isinstance(effective, PaperBrokerAdapter)

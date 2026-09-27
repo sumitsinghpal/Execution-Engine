@@ -274,6 +274,7 @@ class TestClaimAndReportUpstream:
             average_fill_price=451.20,
             broker_status="FILLED",
             broker_message=None,
+            simulated=True,
         )
 
         await report_upstream(record, settings, order_status)
@@ -311,6 +312,7 @@ class TestClaimAndReportUpstream:
             average_fill_price=None,
             broker_status="REJECTED",
             broker_message="insufficient buying power",
+            simulated=True,
         )
 
         # Must not raise.

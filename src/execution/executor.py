@@ -11,7 +11,7 @@ from typing import Optional
 from sqlmodel import SQLModel, Session, select, Field
 
 from src.broker.order_builder import OrderBuilder
-from src.brokers.base import BrokerAdapter, BrokerAuthenticationError
+from src.brokers.base import BrokerAdapter, BrokerAuthenticationError, is_simulated_broker
 from src.brokers.factory import build_broker_adapter
 from src.config import get_settings
 from src.execution.algo_slices import build_twap_plan, build_vwap_plan, schedule_algo_execution
@@ -246,6 +246,7 @@ class Executor:
             risk_details={"checks": verdict.checks, "rejections": verdict.rejections},
             payload_checksum=checksum,
             expires_at=expires_at,
+            simulated=is_simulated_broker(self.broker, profile),
         )
 
         # Register idempotency with the actual response, so a duplicate
@@ -363,6 +364,8 @@ class Executor:
         if kill_switch_on:
             raise ValueError("Kill switch is ON - order rejected")
 
+        profile = self.settings.get_account_profile(order.account)
+
         if order.order_type in ("TWAP", "VWAP"):
             # A TWAP/VWAP order was never going to be one broker order —
             # it's this system's own instruction to submit several MARKET
@@ -394,7 +397,6 @@ class Executor:
                 order.account,
             )
 
-            profile = self.settings.get_account_profile(order.account)
             try:
                 broker_response = await self.broker.submit_order(profile, order_spec)
             except Exception as exc:
@@ -456,6 +458,7 @@ class Executor:
             status=OrderStatus(order.status),
             submitted_at=datetime.utcnow(),
             broker_response=broker_response,
+            simulated=is_simulated_broker(self.broker, profile),
         )
 
         # Register idempotency with the actual response body, so a duplicate
@@ -482,7 +485,8 @@ class Executor:
         
         if not order:
             raise ValueError(f"Order {decision_id} not found")
-        
+
+        profile = self.settings.get_account_profile(order.account)
         return OrderStatus_Model(
             decision_id=decision_id,
             agent_id=order.agent_id,
@@ -494,6 +498,7 @@ class Executor:
             average_fill_price=Decimal(order.average_fill_price) if order.average_fill_price is not None else None,
             broker_status=order.broker_status,
             broker_message=order.broker_message,
+            simulated=is_simulated_broker(self.broker, profile),
         )
     
     def _get_kill_switch_state(self, agent_id: str) -> bool:

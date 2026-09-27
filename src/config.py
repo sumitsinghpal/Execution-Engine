@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     robinhood_live_trading_enabled: bool = False
     market_data_broker: str = ""
 
+    # A trusted MCP tool bridge (see src/mcp/) — never a new capability of
+    # its own, just an LLM-callable proxy onto the existing HTTP API. The
+    # admin key lives here, server-side, and is never a parameter any tool
+    # accepts from its caller.
+    mcp_transport: str = "stdio"
+    mcp_target_base_url: str = "http://localhost:8000"
+
 
     # Account aliases prevent EDGE-TF callers from providing raw broker account IDs.
     account_profiles: dict[str, AccountProfile] = Field(
@@ -349,6 +356,27 @@ class Settings(BaseSettings):
     @symbol_denylist.setter
     def symbol_denylist(self, value: list[str]) -> None:
         self.symbol_denylist_raw = ",".join(value)
+
+    @property
+    def execution_policy(self) -> str:
+        """
+        A purely-derived, explicit label for which of Francois's named
+        execution policies this deployment is actually running —
+        "research_test" (no live broker order submission is possible at
+        all) or "hitl_live" (a human approval artifact is required before
+        any live submission; see src/execution/executor.py's execute_order
+        and src/execution/submission_guard.py). Computed from
+        execution_mode rather than replacing it, so nothing that already
+        depends on execution_mode's own values needs to change.
+
+        Deliberately has no "continuous_autonomous" branch yet — that mode
+        (persistent, unattended live trading under a pre-authorized
+        mandate) is a separate, much higher-stakes piece of work requiring
+        its own explicit sign-off before any code is written for it; see
+        docs/MCP_BRIDGE.md and the reconciliation docs for why paper-vs-
+        live safety in this codebase has been deliberately conservative.
+        """
+        return "research_test" if self.execution_mode.upper() in {"PAPER", "SHADOW"} else "hitl_live"
 
 
 def get_settings() -> Settings:

@@ -1416,6 +1416,24 @@ async def autonomous_status(settings: Settings = Depends(get_settings_dep), db: 
     }
 
 
+@app.get("/v1/execution-policy", dependencies=[Depends(verify_admin_key)])
+async def execution_policy_status(settings: Settings = Depends(get_settings_dep)):
+    """
+    Single place to answer "what mode is this deployment actually in" —
+    see Settings.execution_policy (src/config.py) for what "research_test"
+    vs. "hitl_live" means and why there's deliberately no third value yet.
+    """
+    return {
+        "policy": settings.execution_policy,
+        "execution_mode": settings.execution_mode,
+        "broker": settings.market_data_broker or settings.execution_mode,
+        "live_trading_enabled": {
+            "schwab": settings.schwab_live_trading_enabled,
+            "robinhood": settings.robinhood_live_trading_enabled,
+        },
+    }
+
+
 @app.post("/v1/autonomous/run-once", dependencies=[Depends(verify_admin_key)])
 async def autonomous_run_once(
     db: Session = Depends(get_db),
