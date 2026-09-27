@@ -14,6 +14,18 @@ still means what it says even for an order that's still executing.
 This runs after the original HTTP request has already returned (the
 request can't block for the whole execution window), so it cannot reuse
 that request's DB session — every slice opens and closes its own.
+
+Restart safety: this loop is a fire-and-forget asyncio task (see
+schedule_algo_execution) tied to this process — a crash or restart mid-flight
+loses it, with no automatic resumption built here. If this function is ever
+invoked again for the same decision_id (e.g. a future recovery job, or a
+duplicate schedule call), it must not resubmit a slice that already reached
+the broker: each iteration checks for an existing AlgoSliceRecord with
+status SUBMITTED for that (decision_id, slice_index) first, and skips
+straight past it if found, counting its quantity toward the final total
+rather than re-submitting. A FAILED or SKIPPED_KILL_SWITCH record is not
+treated as done — neither reached the broker, so retrying that slice is a
+legitimate resume, not a duplicate.
 """
 
 import asyncio
@@ -127,6 +139,32 @@ async def execute_algo_slices(
 
         session = session_factory()
         try:
+            already_submitted = session.exec(
+                select(AlgoSliceRecord).where(
+                    AlgoSliceRecord.parent_decision_id == decision_id,
+                    AlgoSliceRecord.slice_index == i,
+                    AlgoSliceRecord.status == "SUBMITTED",
+                )
+            ).first()
+            if already_submitted is not None:
+                # This exact slice already reached the broker on an earlier
+                # run of this loop — the only way that's possible is this
+                # function being invoked again for a decision_id that's
+                # already in flight or was interrupted (e.g. a process
+                # restart losing the original background task). Never
+                # resubmit it: that would be a genuine duplicate broker
+                # order, the one outcome submission_guard.py exists
+                # elsewhere in this system to prevent. A FAILED or
+                # SKIPPED_KILL_SWITCH record for this slice_index is NOT
+                # treated as done here — neither ever reached the broker,
+                # so retrying is a legitimate resume, not a duplicate.
+                total_submitted += already_submitted.quantity
+                logger.warning(
+                    "algo_slice_already_submitted_skipping_resubmit",
+                    decision_id=decision_id, slice_index=i, broker_order_id=already_submitted.broker_order_id,
+                )
+                continue
+
             if KillSwitchService(session).is_halted(agent_id):
                 session.add(
                     AlgoSliceRecord(

@@ -227,6 +227,90 @@ class TestExecuteAlgoSlices:
         finally:
             KillSwitchService(session).set_state(enabled=False, set_by="test_cleanup", scope=agent_id)
 
+    async def test_resuming_after_a_submitted_slice_does_not_resubmit_it(self, test_db_engine_and_session, monkeypatch):
+        """
+        The restart-safety property this file previously had no coverage
+        for: nothing but DB state survives a real process crash mid-loop,
+        so this simulates one by seeding exactly the DB state a crash right
+        after slice 0's own commit would leave behind (its AlgoSliceRecord,
+        SUBMITTED, plus the filled_quantity that same commit would already
+        have added to the parent order), then calling execute_algo_slices
+        again for the same decision_id — as a future recovery job re-
+        invoking it would. Slice 0 must not reach the broker a second time.
+        """
+        engine, session = test_db_engine_and_session
+        factory = _session_factory(engine)
+        monkeypatch.setattr(algo, "get_settings", _settings_with_algo_test_account)
+        decision_id = "algo-resume-001"
+        session.add(OrderRecord(
+            decision_id=decision_id, account=_ALGO_TEST_ACCOUNT, symbol="QQQ", quantity=30,
+            instruction="BUY", asset_type="ETF", order_type="TWAP",
+            payload_checksum="test", status="SUBMITTED", filled_quantity=10,
+        ))
+        session.add(AlgoSliceRecord(
+            parent_decision_id=decision_id, slice_index=0, quantity=10, status="SUBMITTED",
+            broker_order_id="already-placed-order-1", submitted_at=datetime.utcnow(),
+        ))
+        session.commit()
+
+        await execute_algo_slices(
+            decision_id=decision_id, account=_ALGO_TEST_ACCOUNT, agent_id="default", symbol="QQQ",
+            asset_type="ETF", instruction="BUY", quantities=[10, 10, 10], interval_seconds=0,
+            session_factory=factory,
+        )
+
+        check = factory()
+        try:
+            slices = check.exec(select(AlgoSliceRecord).where(AlgoSliceRecord.parent_decision_id == decision_id)).all()
+            slice0 = [s for s in slices if s.slice_index == 0]
+            assert len(slice0) == 1  # not resubmitted -- still exactly the one original record
+            assert slice0[0].broker_order_id == "already-placed-order-1"
+
+            fresh = [s for s in slices if s.slice_index in (1, 2)]
+            assert len(fresh) == 2 and all(s.status == "SUBMITTED" for s in fresh)
+
+            order = check.exec(select(OrderRecord).where(OrderRecord.decision_id == decision_id)).first()
+            assert order.status == "FILLED"
+            assert order.filled_quantity == 30  # slice 0's 10 (already there) + this run's 20
+        finally:
+            check.close()
+
+    async def test_a_failed_slice_is_not_treated_as_done_and_is_retried_on_resume(self, test_db_engine_and_session, monkeypatch):
+        """Only a SUBMITTED record means "reached the broker" -- a FAILED slice never did, so a resume must retry it, not skip it."""
+        engine, session = test_db_engine_and_session
+        factory = _session_factory(engine)
+        monkeypatch.setattr(algo, "get_settings", _settings_with_algo_test_account)
+        decision_id = "algo-resume-retry-failed-001"
+        session.add(OrderRecord(
+            decision_id=decision_id, account=_ALGO_TEST_ACCOUNT, symbol="QQQ", quantity=20,
+            instruction="BUY", asset_type="ETF", order_type="TWAP",
+            payload_checksum="test", status="SUBMITTED",
+        ))
+        session.add(AlgoSliceRecord(
+            parent_decision_id=decision_id, slice_index=0, quantity=10, status="FAILED", error="simulated prior failure",
+        ))
+        session.commit()
+
+        await execute_algo_slices(
+            decision_id=decision_id, account=_ALGO_TEST_ACCOUNT, agent_id="default", symbol="QQQ",
+            asset_type="ETF", instruction="BUY", quantities=[10, 10], interval_seconds=0,
+            session_factory=factory,
+        )
+
+        check = factory()
+        try:
+            slice0_records = check.exec(
+                select(AlgoSliceRecord).where(AlgoSliceRecord.parent_decision_id == decision_id, AlgoSliceRecord.slice_index == 0)
+            ).all()
+            assert len(slice0_records) == 2  # the original FAILED record, plus a new attempt
+            assert any(s.status == "SUBMITTED" for s in slice0_records)  # the retry actually reached the broker this time
+
+            order = check.exec(select(OrderRecord).where(OrderRecord.decision_id == decision_id)).first()
+            assert order.status == "FILLED"
+            assert order.filled_quantity == 20  # both slices counted once the retry succeeded
+        finally:
+            check.close()
+
 
 @pytest.mark.asyncio
 class TestExecutorTwapIntegration:
