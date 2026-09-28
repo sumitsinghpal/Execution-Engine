@@ -44,6 +44,20 @@ class Settings(BaseSettings):
     mcp_transport: str = "stdio"
     mcp_target_base_url: str = "http://localhost:8000"
 
+    # Bounded LLM evidence scoring for the Silo probabilistic gate (see
+    # src/execution/llm_evidence.py). Groq/Gemini rate an already-selected,
+    # already-authorized candidate on "eig"/"regime" (0..1) — they never
+    # decide whether to trade, how much, or when to exit; those stay fixed,
+    # deterministic decisions made before this is ever called. Defaults to
+    # disabled with no keys configured, so this capability is fully inert
+    # unless explicitly turned on.
+    llm_evidence_enabled: bool = False
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
+    llm_evidence_timeout_seconds: float = 8.0
+
 
     # Account aliases prevent EDGE-TF callers from providing raw broker account IDs.
     account_profiles: dict[str, AccountProfile] = Field(

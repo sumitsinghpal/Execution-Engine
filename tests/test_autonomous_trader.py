@@ -234,6 +234,33 @@ class TestScanForEntries:
         assert position.quantity == 10  # $1000 notional / $100 entry
 
     @pytest.mark.asyncio
+    async def test_llm_evidence_makes_no_network_call_when_disabled_by_default(self, test_db_engine_and_session, monkeypatch, tmp_path):
+        """
+        settings.llm_evidence_enabled defaults to False (src/execution/
+        llm_evidence.py) -- proves that through the real scan loop, not
+        just by reading the default: no httpx.AsyncClient is even
+        constructed when scoring a real candidate, so Groq/Gemini are
+        fully inert unless explicitly turned on.
+        """
+        import httpx
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch)  # llm_evidence_enabled left at its default (False)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZLLMD"])
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        calls = []
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: calls.append(1))
+
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 1
+        assert calls == []
+
+    @pytest.mark.asyncio
     async def test_order_actually_reaches_the_broker(self, test_db_engine_and_session, monkeypatch, tmp_path, _fake_broker):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)

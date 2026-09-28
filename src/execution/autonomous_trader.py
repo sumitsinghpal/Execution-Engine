@@ -81,6 +81,7 @@ from src.execution.autonomous_positions import AutonomousPositionService, Autono
 from src.execution.silo_runtime import SiloRuntime
 from src.execution.drawdown_guard import DrawdownGuard, _extract_equity
 from src.execution.silo_evidence import compute_evidence, concentration_pct_of_equity
+from src.execution.llm_evidence import CandidateContext, compute_llm_evidence
 from src.execution.executor import Executor
 from src.execution.risk_reward import compute_standardized_exit, size_position
 from src.logging_config import get_logger
@@ -293,6 +294,18 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
             except Exception as exc:
                 logger.warning("autonomous_silo_evidence_quote_failed", symbol=symbol, strategy_id=strategy_id, error=str(exc))
                 evidence = {}
+            try:
+                llm_evidence = await compute_llm_evidence(
+                    CandidateContext(
+                        symbol=symbol, strategy_id=strategy_id, entry_price=detail.entry_price,
+                        stop_loss_price=exit_levels.stop_loss_price, take_profit_price=exit_levels.take_profit_price,
+                        rationale=detail.rationale,
+                    ),
+                    settings,
+                )
+                evidence.update(llm_evidence)
+            except Exception as exc:
+                logger.warning("autonomous_silo_llm_evidence_failed", symbol=symbol, strategy_id=strategy_id, error=str(exc))
             silo_decision = runtime.evaluate_candidate(
                 symbol=symbol,
                 strategy_id=strategy_id,
