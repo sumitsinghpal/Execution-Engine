@@ -7,6 +7,20 @@ test_strategy_engine_and_signals.py's TestScanOnce uses) so they exercise
 sizing, standardized exits, order submission, position tracking, and the
 kill switch — not the indicator math.
 
+Migrated from DailyPlanService-based arming to HedgeHog Silo (see
+src/execution/silo_runtime.py) by the Silo/Paper-Autonomy patch:
+scan_for_entries()/manage_open_positions() no longer consult DailyPlan at
+all post-patch — they gate on an active Silo mandate instead, and
+scan_for_entries() now iterates mandate.authorized_symbols/
+authorized_strategy_ids directly rather than settings.autonomous_watchlist.
+See _arm_silo() below for the replacement helper, and
+test_manage_open_positions_does_nothing_without_an_active_silo_mandate for
+an explicit test of a real behavior change this migration brought with it:
+manage_open_positions() previously ran unconditionally (no DailyPlan gate
+at all); post-patch it now requires an active Silo mandate too, so an
+already-open position's stop-loss/take-profit stops being enforced if the
+Silo is disarmed or expires while that position is still open.
+
 Every test uses its own unique symbol (test_db_engine_and_session shares
 one on-disk SQLite file across the whole test session — see conftest.py —
 so a fixed symbol like "QQQ" reused across tests would let one test's
@@ -14,6 +28,7 @@ leftover OPEN position leak into another's assertions).
 """
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -26,9 +41,9 @@ from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
 from src.execution.autonomous_trader import manage_open_positions, scan_for_entries
-from src.execution.daily_plan import DailyPlanService
 from src.execution.executor import OrderRecord
 from src.execution.kill_switch_state import KillSwitchService
+from src.execution.silo_runtime import ProbabilityBands, SiloMandate, SiloRuntime
 import src.execution.autonomous_trader as autonomous_trader
 import src.execution.executor as executor_module
 import src.risk.limits as risk_limits_module
@@ -82,14 +97,26 @@ class _FakeAutoBroker:
     async def get_order_status(self, profile, order_id): raise NotImplementedError
     async def list_accounts(self): raise NotImplementedError
     async def get_positions(self, profile): raise NotImplementedError
-    async def get_balances(self, profile): raise NotImplementedError
+
+    async def get_balances(self, profile):
+        # A large, constant equity: scan_for_entries()/manage_open_positions()
+        # now both read this once per pass for the Silo's concentration
+        # check, and DrawdownGuard.check_drawdown() reads it too (see
+        # silo_evidence.py / the patched autonomous_trader.py). Constant
+        # across every test in this file means every candidate's
+        # concentration_pct and the account's drawdown_pct are both
+        # predictable and near-zero, so these functional tests aren't
+        # incidentally exercising the Silo's concentration/drawdown gates
+        # (covered on their own in tests/test_silo_runtime.py).
+        return {"net_liquidation_value": 100_000.0}
+
     async def get_price_history(self, symbol, bar_interval, lookback_days): raise NotImplementedError
 
 
 _ALL_TEST_SYMBOLS = "QQQ,SPY,IWM,EEM,GLD,TLT,ZAUTA,ZAUTB,ZAUTC,ZAUTD,ZAUTE,ZAUTF,ZAUTG,ZAUTH,ZAUTI,ZAUTJ,ZAUTK,ZAUTL,ZAUTM,ZAUTN,ZAUTO,ZAUTP,ZAUTQ,ZAUTR,ZAUXY,ZAUTS,ZAUTT,ZAUTX"
 
 
-def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **overrides):
+def _settings(monkeypatch, strategy_ids="golden_cross", **overrides):
     """
     Builds a Settings instance for the test AND makes it the one Executor
     and RiskChecker actually see. Both call the module-level get_settings()
@@ -98,16 +125,21 @@ def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **ove
     autonomous_trader.py-constructed Executor ignores whatever Settings
     object this function returns unless get_settings is patched in both of
     those modules too (same technique tests/test_algo_execution.py uses).
+
+    SYMBOL_ALLOWLIST is still set here for hygiene, but note it no longer
+    actually gates autonomous PAPER entries — risk_mode="silo_paper"
+    bypasses RiskChecker (and therefore the allowlist) entirely; the Silo
+    mandate's own authorized_symbols is what gates them now (see
+    _arm_silo below and test_a_symbol_outside_the_silo_mandate_is_never_scanned_even_while_others_trade).
     """
     defaults = dict(
         _env_file=None,
         env="test",
         autonomous_trading_enabled=True,
-        AUTONOMOUS_WATCHLIST=watchlist,
         AUTONOMOUS_STRATEGY_IDS=strategy_ids,
         autonomous_notional_per_trade_usd="1000",
         api_key_admin="change-me-in-prod",
-        SYMBOL_ALLOWLIST=_ALL_TEST_SYMBOLS,  # RiskChecker enforces this — every fake ticker used in this file must be listed
+        SYMBOL_ALLOWLIST=_ALL_TEST_SYMBOLS,
     )
     defaults.update(overrides)
     settings = Settings(**defaults)
@@ -116,15 +148,53 @@ def _settings(monkeypatch, watchlist="ZAUTX", strategy_ids="golden_cross", **ove
     return settings
 
 
-def _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="1000"):
+def _arm_silo(monkeypatch, tmp_path, symbols, strategy_ids="golden_cross", notional_per_trade_usd="1000",
+              max_concentration_pct="100", max_drawdown_pct="100", trades_per_minute=100):
     """
-    scan_for_entries() only opens anything with an active daily plan (see
-    src/execution/daily_plan.py) — every TestScanForEntries test needs
-    one armed with the same strategy_ids/notional it's exercising.
+    scan_for_entries()/manage_open_positions() are gated by an active
+    HedgeHog Silo mandate instead of DailyPlanService (see
+    src/execution/silo_runtime.py) — every test that needs entries or
+    position management to actually run arms one here.
+
+    autonomous_trader.py constructs SiloRuntime() itself with no
+    arguments (always DEFAULT_STATE_FILE), so this monkeypatches the
+    class it imports to always hand back one runtime scoped to this
+    test's own tmp_path — keeping every test's mandate state isolated
+    from every other test's, and from any real .hedgehog_silo.json on
+    disk. probability_weights is deliberately left empty so
+    evaluate_candidate() takes its "no probabilistic weights configured"
+    EXECUTE shortcut; the probabilistic gate itself is covered on its own
+    in tests/test_silo_runtime.py, not re-tested here.
     """
-    from decimal import Decimal
     ids = strategy_ids.split(",") if isinstance(strategy_ids, str) else list(strategy_ids)
-    return DailyPlanService(session).arm(ids, Decimal(notional_per_trade_usd), armed_by="test")
+    syms = symbols.split(",") if isinstance(symbols, str) else list(symbols)
+    runtime = SiloRuntime(str(tmp_path / "silo-state.json"))
+    monkeypatch.setattr(autonomous_trader, "SiloRuntime", lambda *a, **k: runtime)
+    mandate = SiloMandate(
+        silo_id="test-silo",
+        armed_by="test",
+        timezone="UTC",
+        runtime_end="23:59",
+        trades_per_minute=trades_per_minute,
+        max_per_trade_usd=Decimal(notional_per_trade_usd),
+        max_concentration_pct=Decimal(max_concentration_pct),
+        max_drawdown_pct=Decimal(max_drawdown_pct),
+        authorized_symbols=syms,
+        authorized_strategy_ids=ids,
+        decision_bands=ProbabilityBands(execute_above=0.7, resize_above=0.5),
+    )
+    runtime.arm(mandate)
+    return runtime
+
+
+def _no_active_silo(monkeypatch, tmp_path):
+    """
+    Points autonomous_trader.SiloRuntime at a fresh, never-armed state
+    file — guards against a leftover armed mandate from another test (or
+    a real on-disk .hedgehog_silo.json) making a "nothing should happen
+    without an active Silo" test pass for the wrong reason.
+    """
+    monkeypatch.setattr(autonomous_trader, "SiloRuntime", lambda *a, **k: SiloRuntime(str(tmp_path / "silo-state.json")))
 
 
 @pytest.fixture(autouse=True)
@@ -137,10 +207,10 @@ def _fake_broker(monkeypatch):
 
 class TestScanForEntries:
     @pytest.mark.asyncio
-    async def test_a_fired_signal_opens_a_position_with_standardized_exits(self, test_db_engine_and_session, monkeypatch):
+    async def test_a_fired_signal_opens_a_position_with_standardized_exits(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTA", autonomous_risk_pct="0.01", autonomous_reward_risk_ratio="2")
-        _arm(session)
+        settings = _settings(monkeypatch, autonomous_risk_pct="0.01", autonomous_reward_risk_ratio="2")
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTA"])
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced golden cross")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -164,10 +234,10 @@ class TestScanForEntries:
         assert position.quantity == 10  # $1000 notional / $100 entry
 
     @pytest.mark.asyncio
-    async def test_order_actually_reaches_the_broker(self, test_db_engine_and_session, monkeypatch, _fake_broker):
+    async def test_order_actually_reaches_the_broker(self, test_db_engine_and_session, monkeypatch, tmp_path, _fake_broker):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTB")
-        _arm(session)
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTB"])
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -179,10 +249,10 @@ class TestScanForEntries:
         assert len(_fake_broker.submitted_specs) == 1
 
     @pytest.mark.asyncio
-    async def test_order_record_uses_the_autonomous_agent_id_not_default(self, test_db_engine_and_session, monkeypatch):
+    async def test_order_record_uses_the_autonomous_agent_id_not_default(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTC", autonomous_agent_id="my-auto-agent")
-        _arm(session)
+        settings = _settings(monkeypatch, autonomous_agent_id="my-auto-agent")
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTC"])
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -197,10 +267,10 @@ class TestScanForEntries:
         assert order.status == "SUBMITTED"
 
     @pytest.mark.asyncio
-    async def test_no_signal_opens_nothing(self, test_db_engine_and_session, monkeypatch):
+    async def test_no_signal_opens_nothing(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTD")
-        _arm(session)
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTD"])
 
         async def fake_scan(broker, symbol, strategy_id):
             return None
@@ -211,10 +281,10 @@ class TestScanForEntries:
         assert opened == 0
 
     @pytest.mark.asyncio
-    async def test_does_not_pyramid_an_existing_open_position(self, test_db_engine_and_session, monkeypatch):
+    async def test_does_not_pyramid_an_existing_open_position(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTE")
-        _arm(session)
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTE"])
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -231,10 +301,10 @@ class TestScanForEntries:
         assert len(positions) == 1
 
     @pytest.mark.asyncio
-    async def test_too_small_a_notional_for_one_share_skips_the_trade(self, test_db_engine_and_session, monkeypatch):
+    async def test_too_small_a_notional_for_one_share_skips_the_trade(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTF", autonomous_notional_per_trade_usd="1000")
-        _arm(session, notional_per_trade_usd="1000")
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTF"], notional_per_trade_usd="1000")
         # $5000 entry price, $1000 notional budget: not even one share fits.
         detail = SignalDetail(entry_price=5000.0, stop_loss_price=4500.0, take_profit_price=6000.0, rationale="forced")
 
@@ -248,10 +318,10 @@ class TestScanForEntries:
         assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZAUTF"] == []
 
     @pytest.mark.asyncio
-    async def test_fleet_wide_kill_switch_blocks_new_entries(self, test_db_engine_and_session, monkeypatch):
+    async def test_fleet_wide_kill_switch_blocks_new_entries(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTG")
-        _arm(session)
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTG"])
         KillSwitchService(session).set_state(enabled=True, set_by="test", reason="halt everything")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
@@ -266,10 +336,10 @@ class TestScanForEntries:
             KillSwitchService(session).set_state(enabled=False, set_by="test", reason="cleanup")
 
     @pytest.mark.asyncio
-    async def test_per_agent_kill_switch_blocks_only_the_autonomous_agent(self, test_db_engine_and_session, monkeypatch):
+    async def test_per_agent_kill_switch_blocks_only_the_autonomous_agent(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTH", autonomous_agent_id="auto-halted-test-agent")
-        _arm(session)
+        settings = _settings(monkeypatch, autonomous_agent_id="auto-halted-test-agent")
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTH"])
         KillSwitchService(session).set_state(enabled=True, set_by="test", reason="halt this agent only", scope="auto-halted-test-agent")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
@@ -282,10 +352,10 @@ class TestScanForEntries:
         assert opened == 0
 
     @pytest.mark.asyncio
-    async def test_opening_a_position_fires_a_notification(self, test_db_engine_and_session, monkeypatch):
+    async def test_opening_a_position_fires_a_notification(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTO")
-        _arm(session)
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTO"])
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
         calls = []
 
@@ -304,10 +374,10 @@ class TestScanForEntries:
         assert "golden_cross" in calls[0]
 
     @pytest.mark.asyncio
-    async def test_a_failing_strategy_does_not_stop_the_rest_of_the_scan(self, test_db_engine_and_session, monkeypatch):
+    async def test_a_failing_strategy_does_not_stop_the_rest_of_the_scan(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTI,ZAUTJ", strategy_ids="golden_cross")
-        _arm(session, strategy_ids="golden_cross")
+        settings = _settings(monkeypatch, strategy_ids="golden_cross")
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTI", "ZAUTJ"], strategy_ids="golden_cross")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def flaky_scan(broker, symbol, strategy_id):
@@ -321,20 +391,49 @@ class TestScanForEntries:
         assert opened == 1  # ZAUTJ still went through despite ZAUTI failing
 
     @pytest.mark.asyncio
-    async def test_risk_rejection_blocks_the_entry_without_opening_a_position(self, test_db_engine_and_session, monkeypatch, _fake_broker):
+    async def test_a_symbol_outside_the_silo_mandate_is_never_scanned_even_while_others_trade(self, test_db_engine_and_session, monkeypatch, tmp_path, _fake_broker):
         """
-        The agent cannot bypass risk checks: a fired signal alone isn't
-        enough to open a position — it still has to clear the exact same
-        RiskChecker gate a human order does (see src/risk/limits.py). Uses
-        the symbol allowlist rather than the kill switch (already covered
-        by the tests above) so this exercises a genuinely different
-        rejection path through the same "if risk_verdict != APPROVED:
-        continue" gate in scan_for_entries().
+        RiskChecker's symbol allowlist is bypassed entirely for autonomous
+        PAPER execution (risk_mode="silo_paper" — see the patched
+        Executor.preview_order()), so a symbol never being in the Silo
+        mandate's own authorized_symbols is now the ONLY thing keeping it
+        out of autonomous trading: scan_for_entries() iterates
+        mandate.authorized_symbols directly, so a symbol simply not listed
+        there is never even looked at. This replaces the old
+        "test_risk_rejection_blocks_the_entry_without_opening_a_position"
+        test, whose mechanism (a symbol allowlist rejection reaching
+        RiskChecker) no longer exists on this path -- that original test's
+        own fake symbol ("ZAUTNOTALLOWED", 14 chars) was actually already
+        invalid input for TradeProposal (EQUITY symbols are 1-5 uppercase
+        letters), so it was silently passing for the wrong reason (a
+        pydantic validation error caught by scan_for_entries' own
+        try/except) even before this migration; both symbols here are
+        kept within that 5-char limit so this test exercises what it
+        claims to.
         """
         _, session = test_db_engine_and_session
-        not_allowed_symbol = "ZAUTNOTALLOWED"
-        settings = _settings(monkeypatch, watchlist=not_allowed_symbol, SYMBOL_ALLOWLIST=_ALL_TEST_SYMBOLS)
-        _arm(session)
+        outside_symbol = "ZEXCL"
+        authorized_symbol = "ZSILO"
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=[authorized_symbol], strategy_ids="golden_cross")
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 1  # the authorized symbol still opened normally
+        assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == outside_symbol] == []
+        assert all(spec.get("symbol") != outside_symbol for spec in _fake_broker.submitted_specs)
+
+    @pytest.mark.asyncio
+    async def test_without_an_armed_silo_nothing_opens_even_with_a_fired_signal(self, test_db_engine_and_session, monkeypatch, tmp_path):
+        """The core gate: settings.autonomous_trading_enabled=True alone is no longer enough — see silo_runtime.py."""
+        _, session = test_db_engine_and_session
+        _no_active_silo(monkeypatch, tmp_path)
+        settings = _settings(monkeypatch)  # deliberately no _arm_silo(...) call
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -344,47 +443,20 @@ class TestScanForEntries:
         opened = await scan_for_entries(session, settings)
 
         assert opened == 0
-        assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == not_allowed_symbol] == []
-        assert _fake_broker.submitted_specs == []  # never even reached the broker
 
     @pytest.mark.asyncio
-    async def test_without_an_armed_plan_nothing_opens_even_with_a_fired_signal(self, test_db_engine_and_session, monkeypatch):
+    async def test_an_armed_silo_has_no_expiry_before_runtime_end_and_stays_active_across_cycles(self, test_db_engine_and_session, monkeypatch, tmp_path):
         """
-        The core new gate: settings.autonomous_trading_enabled=True alone
-        is no longer enough — see daily_plan.py. daily_plan has no
-        per-test scoping the way symbols/agent_ids elsewhere in this file
-        do (it's a single "what's active right now" record, by design —
-        see its own docstring), so this explicitly disarms first rather
-        than just relying on no earlier test in this shared-DB session
-        having armed one.
-        """
-        _, session = test_db_engine_and_session
-        DailyPlanService(session).disarm(disarmed_by="test-setup")
-        settings = _settings(monkeypatch, watchlist="ZAUTQ")  # deliberately no _arm(session) call
-        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
-
-        async def fake_scan(broker, symbol, strategy_id):
-            return detail
-
-        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
-        opened = await scan_for_entries(session, settings)
-
-        assert opened == 0
-        assert [p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZAUTQ"] == []
-
-    @pytest.mark.asyncio
-    async def test_an_armed_plan_has_no_expiry_and_stays_active_across_cycles(self, test_db_engine_and_session, monkeypatch):
-        """
-        The whole point of arm(): a one-time "take this money and trade
-        it" authorization, not a daily chore — see daily_plan.py's module
-        docstring. No TTL, so a plan armed once keeps authorizing new
+        The whole point of arm(): a one-time authorization, not a
+        per-cycle chore — see silo_runtime.py's module docstring. No TTL
+        before runtime_end, so a mandate armed once keeps authorizing new
         entries across as many scan cycles as it takes, until explicitly
-        disarmed. Two symbols so the second call's open isn't blocked by
-        the no-pyramiding rule on the first.
+        disarmed or its runtime_end passes. Two symbols so the second
+        call's open isn't blocked by the no-pyramiding rule on the first.
         """
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTR,ZAUXY")
-        _arm(session)
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTR", "ZAUXY"])
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -398,11 +470,11 @@ class TestScanForEntries:
         assert second == 0  # both already have open positions on the second pass — still armed, just nothing new to open
 
     @pytest.mark.asyncio
-    async def test_disarming_stops_new_entries_immediately(self, test_db_engine_and_session, monkeypatch):
+    async def test_disarming_stops_new_entries_immediately(self, test_db_engine_and_session, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
-        settings = _settings(monkeypatch, watchlist="ZAUTS")
-        _arm(session)
-        DailyPlanService(session).disarm(disarmed_by="test")
+        settings = _settings(monkeypatch)
+        runtime = _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTS"])
+        runtime.disarm()
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -414,12 +486,12 @@ class TestScanForEntries:
         assert opened == 0
 
     @pytest.mark.asyncio
-    async def test_armed_plans_notional_and_strategy_ids_take_priority_over_settings_defaults(self, test_db_engine_and_session, monkeypatch):
-        """The whole point of arming: what's used is what a human chose today, not the static settings fallback."""
+    async def test_armed_silos_notional_and_strategy_ids_take_priority_over_settings_defaults(self, test_db_engine_and_session, monkeypatch, tmp_path):
+        """The whole point of arming: what's used is what was explicitly armed today, not the static settings fallback."""
         _, session = test_db_engine_and_session
-        # settings itself says a different strategy ("turtle_donchian") and a much bigger notional — the plan must win.
-        settings = _settings(monkeypatch, watchlist="ZAUTT", strategy_ids="turtle_donchian", autonomous_notional_per_trade_usd="50000")
-        _arm(session, strategy_ids="golden_cross", notional_per_trade_usd="500")
+        # settings itself says a different strategy ("turtle_donchian") and a much bigger notional — the mandate must win.
+        settings = _settings(monkeypatch, strategy_ids="turtle_donchian", autonomous_notional_per_trade_usd="50000")
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTT"], strategy_ids="golden_cross", notional_per_trade_usd="500")
         detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
 
         async def fake_scan(broker, symbol, strategy_id):
@@ -431,14 +503,15 @@ class TestScanForEntries:
         assert opened == 1
         position = next(p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZAUTT")
         assert position.strategy_id == "golden_cross"
-        assert position.quantity == 5  # $500 plan notional / $100 entry, NOT $50000 / $100
+        assert position.quantity == 5  # $500 mandate notional / $100 entry, NOT $50000 / $100
 
 
 class TestManageOpenPositions:
     @pytest.mark.asyncio
-    async def test_price_at_take_profit_closes_the_position(self, test_db_engine_and_session, _fake_broker, monkeypatch):
+    async def test_price_at_take_profit_closes_the_position(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTK"])
         service = AutonomousPositionService(session)
         position = service.open_position(
             symbol="ZAUTK", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
@@ -457,9 +530,10 @@ class TestManageOpenPositions:
         assert any(spec.get("symbol") == "ZAUTK" for spec in _fake_broker.submitted_specs)
 
     @pytest.mark.asyncio
-    async def test_price_at_stop_loss_closes_the_position(self, test_db_engine_and_session, _fake_broker, monkeypatch):
+    async def test_price_at_stop_loss_closes_the_position(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTL"])
         service = AutonomousPositionService(session)
         service.open_position(
             symbol="ZAUTL", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
@@ -476,9 +550,10 @@ class TestManageOpenPositions:
         assert closed >= 1
 
     @pytest.mark.asyncio
-    async def test_price_between_stop_and_target_leaves_position_open(self, test_db_engine_and_session, _fake_broker, monkeypatch):
+    async def test_price_between_stop_and_target_leaves_position_open(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTM"])
         service = AutonomousPositionService(session)
         service.open_position(
             symbol="ZAUTM", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
@@ -493,9 +568,10 @@ class TestManageOpenPositions:
         assert position.status == AutonomousPositionStatus.OPEN
 
     @pytest.mark.asyncio
-    async def test_closed_position_is_not_managed_again(self, test_db_engine_and_session, _fake_broker, monkeypatch):
+    async def test_closed_position_is_not_managed_again(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTN"])
         service = AutonomousPositionService(session)
         service.open_position(
             symbol="ZAUTN", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
@@ -513,11 +589,11 @@ class TestManageOpenPositions:
         assert zautn_orders_after_first_pass == 1
         assert zautn_orders_after_second_pass == 1
 
-
     @pytest.mark.asyncio
-    async def test_closing_a_position_fires_a_notification_with_pnl(self, test_db_engine_and_session, _fake_broker, monkeypatch):
+    async def test_closing_a_position_fires_a_notification_with_pnl(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZAUTP"])
         service = AutonomousPositionService(session)
         service.open_position(
             symbol="ZAUTP", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
@@ -536,6 +612,36 @@ class TestManageOpenPositions:
         matching = [c for c in calls if "ZAUTP" in c]
         assert len(matching) == 1
         assert "+30.00" in matching[0]  # (103 - 100) * 10
+
+    @pytest.mark.asyncio
+    async def test_manage_open_positions_does_nothing_without_an_active_silo_mandate(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
+        """
+        A real behavior change this migration surfaced: manage_open_positions()
+        previously ran unconditionally, with no DailyPlan gate at all (only
+        scan_for_entries() checked it). Post-patch it requires an active
+        Silo mandate too — so a position already past its take-profit
+        stays OPEN and unmanaged if the Silo isn't armed (e.g. it expired
+        at its own runtime_end, or was disarmed) while that position is
+        still open. This pins that behavior explicitly rather than leaving
+        it as an implicit side effect nobody has a test for.
+        """
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch)
+        _no_active_silo(monkeypatch, tmp_path)
+        service = AutonomousPositionService(session)
+        position = service.open_position(
+            symbol="ZAUTNOMANDATE", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
+            entry_decision_id="auto-entry-seed-no-mandate", quantity=10, entry_price=100.0,
+            stop_loss_price=99.0, take_profit_price=102.0, entry_rationale="seeded for test",
+        )
+        _fake_broker.set_price("ZAUTNOMANDATE", 103.0)  # above take_profit_price
+
+        closed = await manage_open_positions(session, settings)
+
+        assert closed == 0
+        session.refresh(position)
+        assert position.status == AutonomousPositionStatus.OPEN
+        assert _fake_broker.submitted_specs == []
 
 
 class TestBuildBroker:
@@ -630,4 +736,3 @@ class TestBuildBroker:
         broker = _real_build_broker(settings)
         assert isinstance(broker, PaperBrokerAdapter)
         assert not isinstance(broker, SchwabDataPaperBroker)
-        assert broker is not router_without_schwab

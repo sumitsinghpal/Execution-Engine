@@ -28,7 +28,7 @@ from src.models.orders import (
     ExecutionReceipt,
     OrderStatus_Model,
 )
-from src.risk.limits import RiskChecker
+from src.risk.limits import RiskChecker, RiskVerdict
 
 logger = get_logger(__name__)
 
@@ -90,6 +90,7 @@ class Executor:
         session: Session,
         mock_broker: bool = False,
         broker: Optional[BrokerAdapter] = None,
+        risk_mode: str = "standard",
     ):
         self.session = session
         self.settings = get_settings()
@@ -98,6 +99,7 @@ class Executor:
         self.risk_checker = RiskChecker()
         self.idempotency = IdempotencyManager(session)
         self.approval_manager = ApprovalManager(session)
+        self.risk_mode = risk_mode
     
     async def preview_order(self, proposal: TradeProposal) -> OrderPreview:
         """
@@ -141,8 +143,23 @@ class Executor:
             logger.warning("quote_fetch_failed", decision_id=proposal.decision_id, symbol=proposal.symbol, error=str(exc))
             quote = None
 
-        # Run risk checks
-        verdict = self.risk_checker.evaluate(proposal, kill_switch_on, quote=quote)
+        # Standard interactive/live flow uses the deterministic RiskChecker.
+        # Autonomous PAPER runs are pre-authorized by HedgeHog Silo instead: the
+        # legacy static limits are intentionally bypassed, while the emergency
+        # kill switch and broker preview remain non-bypassable invariants.
+        if self.risk_mode == "silo_paper":
+            verdict = RiskVerdict(
+                approved=not kill_switch_on,
+                checks={
+                    "kill_switch_off": not kill_switch_on,
+                    "silo_mandate_authorized": True,
+                    "legacy_static_limits_bypassed": True,
+                },
+                rejections=["Kill switch is ON - trading disabled"] if kill_switch_on else [],
+                notional_usd=None,
+            )
+        else:
+            verdict = self.risk_checker.evaluate(proposal, kill_switch_on, quote=quote)
 
         # Cross-agent coordination check: does this order, combined with
         # what every agent has already committed to this (account, symbol)
@@ -151,7 +168,7 @@ class Executor:
         # when RiskChecker could price the order at all and settings has
         # opted into a combined cap; see SymbolCoordinationGuard's own
         # docstring for the concurrency caveat.
-        if verdict.notional_usd is not None and self.settings.max_combined_symbol_notional_usd is not None:
+        if self.risk_mode != "silo_paper" and verdict.notional_usd is not None and self.settings.max_combined_symbol_notional_usd is not None:
             coordination_report = SymbolCoordinationGuard(self.session, settings=self.settings).check(
                 proposal.account, proposal.symbol, verdict.notional_usd
             )

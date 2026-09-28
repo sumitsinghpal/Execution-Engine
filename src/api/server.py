@@ -68,6 +68,7 @@ from src.models.orders import (
 from src.risk.pretrade import MarketHoursValidator
 from src.strategy import engine as strategy_engine
 from src.strategy.catalog import STRATEGIES
+from src.api.silo_routes import router as silo_router
 
 logger = get_logger(__name__)
 
@@ -78,6 +79,7 @@ app = FastAPI(
     description="Deterministic broker-neutral order execution microservice for EDGE-TF",
     version="0.1.0",
 )
+app.include_router(silo_router)
 
 # Named origin allowlist (CORS_ALLOWED_ORIGINS in .env) — not "*", which would
 # let any page on the internet call this API using a visitor's own browser as

@@ -78,7 +78,9 @@ from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
-from src.execution.daily_plan import DailyPlanService
+from src.execution.silo_runtime import SiloRuntime
+from src.execution.drawdown_guard import DrawdownGuard, _extract_equity
+from src.execution.silo_evidence import compute_evidence, concentration_pct_of_equity
 from src.execution.executor import Executor
 from src.execution.risk_reward import compute_standardized_exit, size_position
 from src.logging_config import get_logger
@@ -131,8 +133,11 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
     closed defensively (CLOSED_ERROR) rather than left silently retrying
     forever against a broker that may keep rejecting it.
     """
+    runtime = SiloRuntime()
+    if runtime.active_mandate() is None:
+        return 0
     broker = _build_broker(settings)
-    executor = Executor(session=session, broker=broker)
+    executor = Executor(session=session, broker=broker, risk_mode="silo_paper")
     service = AutonomousPositionService(session)
     closed = 0
 
@@ -226,18 +231,42 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
     a strategy ranking and explicitly armed a strategy set + quantity
     for today before this function does anything.
     """
-    plan = DailyPlanService(session).get_active_plan()
-    if plan is None:
+    runtime = SiloRuntime()
+    mandate = runtime.active_mandate()
+    if mandate is None:
         return 0
 
     broker = _build_broker(settings)
-    executor = Executor(session=session, broker=broker)
+    executor = Executor(session=session, broker=broker, risk_mode="silo_paper")
     service = AutonomousPositionService(session)
     opened = 0
-    notional_per_trade_usd = Decimal(plan.notional_per_trade_usd)
+    # Silo owns sizing policy. Using the mandate max as the paper sizing budget
+    # removes the legacy hard-coded per-trade notional from autonomous mode.
+    notional_per_trade_usd = mandate.max_per_trade_usd
 
-    for symbol in settings.autonomous_watchlist:
-        for strategy_id in plan.strategy_ids:
+    # Concentration and drawdown are both percentages of *account equity*,
+    # captured once per scan pass rather than once per candidate -- equity
+    # does not meaningfully change between candidates evaluated
+    # microseconds apart, and DrawdownGuard already treats "once per day"
+    # as the right baseline granularity. If equity can't be read at all,
+    # the Silo mandate's own concentration/drawdown authority can't be
+    # verified right now, so this whole pass defers rather than silently
+    # trading without checking them (see silo_evidence.py).
+    try:
+        profile = settings.get_account_profile(settings.autonomous_account)
+        balances = await broker.get_balances(profile)
+        account_equity = _extract_equity(balances)
+        drawdown_report = await DrawdownGuard(session, broker).check_drawdown(settings.autonomous_account)
+        current_drawdown_pct = Decimal(str(drawdown_report.drawdown_pct * 100))
+    except Exception as exc:
+        logger.warning("autonomous_silo_concentration_drawdown_unavailable", error=str(exc))
+        return 0
+    if account_equity is None:
+        logger.warning("autonomous_silo_concentration_unavailable_no_equity")
+        return 0
+
+    for symbol in mandate.authorized_symbols:
+        for strategy_id in mandate.authorized_strategy_ids:
             if service.has_open_position(symbol, strategy_id):
                 continue
             try:
@@ -254,6 +283,33 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
             quantity = size_position(notional_per_trade_usd, detail.entry_price)
             if quantity < 1:
                 logger.info("autonomous_entry_skipped_too_small", symbol=symbol, strategy_id=strategy_id, entry_price=detail.entry_price)
+                continue
+
+            estimated_notional = Decimal(str(detail.entry_price)) * Decimal(quantity)
+            candidate_concentration_pct = concentration_pct_of_equity(estimated_notional, account_equity)
+            try:
+                quote = await broker.get_quote(symbol)
+                evidence = compute_evidence(quote, settings.max_quote_age_seconds)
+            except Exception as exc:
+                logger.warning("autonomous_silo_evidence_quote_failed", symbol=symbol, strategy_id=strategy_id, error=str(exc))
+                evidence = {}
+            silo_decision = runtime.evaluate_candidate(
+                symbol=symbol,
+                strategy_id=strategy_id,
+                estimated_notional_usd=estimated_notional,
+                concentration_pct=candidate_concentration_pct,
+                drawdown_pct=current_drawdown_pct,
+                evidence=evidence,
+            )
+            if not silo_decision.allowed:
+                logger.info(
+                    "autonomous_entry_deferred_by_silo",
+                    symbol=symbol,
+                    strategy_id=strategy_id,
+                    action=silo_decision.action,
+                    probability_score=silo_decision.probability_score,
+                    reason=silo_decision.reason,
+                )
                 continue
 
             decision_id = f"auto-entry-{uuid.uuid4()}"
@@ -320,6 +376,7 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
                 f":large_green_circle: Opened {symbol} ({strategy_id}): {quantity} @ {detail.entry_price:.2f}, "
                 f"stop {exit_levels.stop_loss_price:.2f} / target {exit_levels.take_profit_price:.2f}",
             )
+            runtime.record_trade()
             opened += 1
 
     return opened
@@ -343,16 +400,15 @@ async def run_autonomous_loop(
         settings = get_settings_fn()
         interval = max(settings.autonomous_scan_interval_sec, 5)
 
-        if settings.autonomous_trading_enabled:
-            session = session_factory()
-            try:
-                result = await autonomous_cycle_once(session, settings)
-                if result["positions_opened"] or result["positions_closed"]:
-                    logger.info("autonomous_cycle_complete", **result)
-            except Exception as exc:
-                logger.error("autonomous_loop_iteration_failed", error=str(exc))
-            finally:
-                session.close()
+        session = session_factory()
+        try:
+            result = await autonomous_cycle_once(session, settings)
+            if result["positions_opened"] or result["positions_closed"]:
+                logger.info("autonomous_cycle_complete", **result)
+        except Exception as exc:
+            logger.error("autonomous_loop_iteration_failed", error=str(exc))
+        finally:
+            session.close()
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
