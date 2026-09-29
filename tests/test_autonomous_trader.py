@@ -8,18 +8,23 @@ sizing, standardized exits, order submission, position tracking, and the
 kill switch — not the indicator math.
 
 Migrated from DailyPlanService-based arming to HedgeHog Silo (see
-src/execution/silo_runtime.py) by the Silo/Paper-Autonomy patch:
-scan_for_entries()/manage_open_positions() no longer consult DailyPlan at
-all post-patch — they gate on an active Silo mandate instead, and
-scan_for_entries() now iterates mandate.authorized_symbols/
-authorized_strategy_ids directly rather than settings.autonomous_watchlist.
-See _arm_silo() below for the replacement helper, and
-test_manage_open_positions_does_nothing_without_an_active_silo_mandate for
-an explicit test of a real behavior change this migration brought with it:
-manage_open_positions() previously ran unconditionally (no DailyPlan gate
-at all); post-patch it now requires an active Silo mandate too, so an
-already-open position's stop-loss/take-profit stops being enforced if the
-Silo is disarmed or expires while that position is still open.
+src/execution/silo_runtime.py): scan_for_entries()/manage_open_positions()
+gate on an active Silo mandate instead, and scan_for_entries() iterates
+mandate.authorized_symbols/authorized_strategy_ids directly. See
+_arm_silo() below for the arming helper (supports both AUTONOMOUS_PAPER
+and AUTONOMOUS_LIVE mandates) and
+test_manage_open_positions_still_closes_a_position_without_an_active_silo_mandate
+for why exit management is deliberately NOT gated the same way entries
+are: an open position keeps being checked against its stop-loss/
+take-profit even with no mandate armed at all.
+
+TestBuildBroker covers the fail-closed broker-resolution contract for
+both modes — AUTONOMOUS_PAPER never reaches a live-capable adapter no
+matter how account_profiles/build_broker_adapter() resolve, and
+AUTONOMOUS_LIVE only ever returns a real Robinhood adapter when every one
+of its independent conditions holds (see _build_broker()'s own
+docstring). test_an_autonomous_paper_mandate_never_reaches_a_live_broker_even_with_a_live_robinhood_router
+is the regression test for the bug this was built to fix.
 
 Every test uses its own unique symbol (test_db_engine_and_session shares
 one on-disk SQLite file across the whole test session — see conftest.py —
@@ -32,7 +37,8 @@ from decimal import Decimal
 
 import pytest
 
-from src.accounts.profiles import BrokerName
+from src.accounts.profiles import AccountProfile, BrokerName
+from src.brokers.base import LiveTradingDisabledError
 from src.brokers.paper import PaperBrokerAdapter
 from src.brokers.robinhood.adapter import RobinhoodHostBridgeAdapter
 from src.brokers.router import BrokerRouter
@@ -149,7 +155,9 @@ def _settings(monkeypatch, strategy_ids="golden_cross", **overrides):
 
 
 def _arm_silo(monkeypatch, tmp_path, symbols, strategy_ids="golden_cross", notional_per_trade_usd="1000",
-              max_concentration_pct="100", max_drawdown_pct="100", trades_per_minute=100):
+              max_concentration_pct="100", max_drawdown_pct="100", trades_per_minute=100,
+              mode="AUTONOMOUS_PAPER", broker=None, account_alias=None, live_execution_authorized=False,
+              approved_algos=None, admin_key="change-me-in-prod"):
     """
     scan_for_entries()/manage_open_positions() are gated by an active
     HedgeHog Silo mandate instead of DailyPlanService (see
@@ -165,6 +173,12 @@ def _arm_silo(monkeypatch, tmp_path, symbols, strategy_ids="golden_cross", notio
     evaluate_candidate() takes its "no probabilistic weights configured"
     EXECUTE shortcut; the probabilistic gate itself is covered on its own
     in tests/test_silo_runtime.py, not re-tested here.
+
+    admin_key defaults to the same value _settings()'s own
+    api_key_admin default uses, so a test that just calls
+    _settings(monkeypatch) with no override gets a mandate whose HMAC
+    (for AUTONOMOUS_LIVE) verifies against the settings the loop actually
+    reads.
     """
     ids = strategy_ids.split(",") if isinstance(strategy_ids, str) else list(strategy_ids)
     syms = symbols.split(",") if isinstance(symbols, str) else list(symbols)
@@ -173,6 +187,7 @@ def _arm_silo(monkeypatch, tmp_path, symbols, strategy_ids="golden_cross", notio
     mandate = SiloMandate(
         silo_id="test-silo",
         armed_by="test",
+        mode=mode,
         timezone="UTC",
         runtime_end="23:59",
         trades_per_minute=trades_per_minute,
@@ -182,8 +197,12 @@ def _arm_silo(monkeypatch, tmp_path, symbols, strategy_ids="golden_cross", notio
         authorized_symbols=syms,
         authorized_strategy_ids=ids,
         decision_bands=ProbabilityBands(execute_above=0.7, resize_above=0.5),
+        broker=broker,
+        account_alias=account_alias,
+        live_execution_authorized=live_execution_authorized,
+        approved_algos=approved_algos or ([] if mode != "AUTONOMOUS_LIVE" else ["test-algo"]),
     )
-    runtime.arm(mandate)
+    runtime.arm(mandate, admin_key=admin_key)
     return runtime
 
 
@@ -201,7 +220,7 @@ def _no_active_silo(monkeypatch, tmp_path):
 def _fake_broker(monkeypatch):
     """Every test in this file gets a fresh _FakeAutoBroker in place of the real PaperBrokerAdapter."""
     broker = _FakeAutoBroker()
-    monkeypatch.setattr(autonomous_trader, "_build_broker", lambda settings: broker)
+    monkeypatch.setattr(autonomous_trader, "_build_broker", lambda settings, mandate: broker)
     return broker
 
 
@@ -232,6 +251,55 @@ class TestScanForEntries:
         assert position.take_profit_price == pytest.approx(102.0)
         assert position.status == AutonomousPositionStatus.OPEN
         assert position.quantity == 10  # $1000 notional / $100 entry
+
+    @pytest.mark.asyncio
+    async def test_a_restart_after_the_broker_submitted_but_before_local_state_recorded_does_not_double_submit(
+        self, test_db_engine_and_session, monkeypatch, tmp_path, _fake_broker,
+    ):
+        """
+        decision_id is deterministic per (symbol, strategy_id, calendar
+        day) -- see the comment right above where it's built in
+        scan_for_entries(). Simulates the real failure window this
+        protects against: AutonomousPositionService.open_position() is
+        called AFTER the broker order has already been submitted and
+        executed, so an exception there (standing in for a process crash)
+        loses the local position record but NOT the broker's own record of
+        the order. The next scan_for_entries() call (standing in for the
+        next tick after a restart) re-evaluates the same candidate with
+        the SAME decision_id -- Executor's existing idempotent-duplicate
+        handling must mean this reaches the broker at most once, never
+        twice, across both calls.
+        """
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZRETR"])
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+
+        real_open_position = AutonomousPositionService.open_position
+        call_count = {"n": 0}
+
+        def flaky_open_position(self, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated crash: broker already submitted, local record never written")
+            return real_open_position(self, *args, **kwargs)
+
+        monkeypatch.setattr(AutonomousPositionService, "open_position", flaky_open_position)
+
+        with pytest.raises(RuntimeError):
+            await scan_for_entries(session, settings)  # the "crash"
+
+        second_pass = await scan_for_entries(session, settings)  # the next tick after a restart
+
+        assert second_pass == 1
+        assert len(_fake_broker.submitted_specs) == 1  # not 2 -- the retry's execute_order hit the idempotent path, didn't resubmit
+        positions = [p for p in AutonomousPositionService(session).list_all() if p.symbol == "ZRETR"]
+        assert len(positions) == 1  # local state caught up on the retry, not duplicated either
 
     @pytest.mark.asyncio
     async def test_llm_evidence_makes_no_network_call_when_disabled_by_default(self, test_db_engine_and_session, monkeypatch, tmp_path):
@@ -513,6 +581,40 @@ class TestScanForEntries:
         assert opened == 0
 
     @pytest.mark.asyncio
+    async def test_autonomous_live_routes_orders_to_the_mandates_own_account_alias_not_the_static_default(
+        self, test_db_engine_and_session, monkeypatch, tmp_path, _fake_broker,
+    ):
+        """
+        AUTONOMOUS_LIVE mandates must route through mandate.account_alias
+        (the live account authorized for that specific mandate), never
+        the static settings.autonomous_account paper default -- and use
+        the real RiskChecker (risk_mode="standard"), not the silo_paper
+        bypass. _fake_broker still stands in for the actual broker here
+        (broker RESOLUTION is TestBuildBroker's job); this test is about
+        which account and which risk path an AUTONOMOUS_LIVE order takes.
+        """
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch, ACCOUNT_ALLOWLIST="primary,robinhood_live",
+                              SYMBOL_ALLOWLIST=_ALL_TEST_SYMBOLS + ",ZLIVE", autonomous_account="primary")
+        settings.account_profiles["robinhood_live"] = AccountProfile(broker=BrokerName.ROBINHOOD, live_enabled=True)
+        _arm_silo(
+            monkeypatch, tmp_path, symbols=["ZLIVE"], mode="AUTONOMOUS_LIVE",
+            broker="robinhood", account_alias="robinhood_live", live_execution_authorized=True,
+        )
+        detail = SignalDetail(entry_price=100.0, stop_loss_price=90.0, take_profit_price=130.0, rationale="forced")
+
+        async def fake_scan(broker, symbol, strategy_id):
+            return detail
+
+        monkeypatch.setattr(strategy_engine, "scan", fake_scan)
+        opened = await scan_for_entries(session, settings)
+
+        assert opened == 1
+        order = session.exec(select(OrderRecord).where(OrderRecord.symbol == "ZLIVE")).first()
+        assert order is not None
+        assert order.account == "robinhood_live"
+
+    @pytest.mark.asyncio
     async def test_armed_silos_notional_and_strategy_ids_take_priority_over_settings_defaults(self, test_db_engine_and_session, monkeypatch, tmp_path):
         """The whole point of arming: what's used is what was explicitly armed today, not the static settings fallback."""
         _, session = test_db_engine_and_session
@@ -641,47 +743,115 @@ class TestManageOpenPositions:
         assert "+30.00" in matching[0]  # (103 - 100) * 10
 
     @pytest.mark.asyncio
-    async def test_manage_open_positions_does_nothing_without_an_active_silo_mandate(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
+    async def test_a_restart_between_exit_submission_and_local_close_does_not_double_submit(
+        self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path,
+    ):
         """
-        A real behavior change this migration surfaced: manage_open_positions()
-        previously ran unconditionally, with no DailyPlan gate at all (only
-        scan_for_entries() checked it). Post-patch it requires an active
-        Silo mandate too — so a position already past its take-profit
-        stays OPEN and unmanaged if the Silo isn't armed (e.g. it expired
-        at its own runtime_end, or was disarmed) while that position is
-        still open. This pins that behavior explicitly rather than leaving
-        it as an implicit side effect nobody has a test for.
+        Same crash-and-restart scenario as the entry-side test, for exits:
+        decision_id is tied to position.entry_decision_id (deterministic,
+        not a fresh uuid4() every cycle), so a retry after a simulated
+        crash between the broker sell order submitting and
+        close_position() recording it locally reuses the same decision_id
+        -- Executor's idempotent-duplicate handling means the retry's
+        execute_order does not resubmit to the broker a second time.
+        """
+        _, session = test_db_engine_and_session
+        settings = _settings(monkeypatch)
+        _arm_silo(monkeypatch, tmp_path, symbols=["ZEXRT"])
+        service = AutonomousPositionService(session)
+        service.open_position(
+            symbol="ZEXRT", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
+            entry_decision_id="auto-entry-seed-exretry", quantity=10, entry_price=100.0,
+            stop_loss_price=99.0, take_profit_price=102.0, entry_rationale="seeded for test",
+        )
+        _fake_broker.set_price("ZEXRT", 103.0)  # above take_profit_price
+
+        real_close_position = AutonomousPositionService.close_position
+        call_count = {"n": 0}
+
+        def flaky_close_position(self, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated crash: broker already submitted, local record never written")
+            return real_close_position(self, *args, **kwargs)
+
+        monkeypatch.setattr(AutonomousPositionService, "close_position", flaky_close_position)
+
+        with pytest.raises(RuntimeError):
+            await manage_open_positions(session, settings)  # the "crash"
+
+        second_pass = await manage_open_positions(session, settings)  # the next tick after a restart
+
+        assert second_pass == 1
+        assert len(_fake_broker.submitted_specs) == 1  # not 2
+
+    @pytest.mark.asyncio
+    async def test_manage_open_positions_still_closes_a_position_without_an_active_silo_mandate(self, test_db_engine_and_session, _fake_broker, monkeypatch, tmp_path):
+        """
+        Exit management is deliberately NOT gated by the Silo: an
+        already-open position keeps being checked against its standardized
+        stop-loss/take-profit and can still be closed even with no
+        mandate armed at all (disarmed, expired, or never armed this
+        session) — only NEW entries require an active mandate. An open
+        position must never go unmonitored just because authorization to
+        open new ones lapsed. See _synthetic_paper_mandate() in
+        autonomous_trader.py, used here to resolve a (paper) broker when
+        no real mandate is active.
         """
         _, session = test_db_engine_and_session
         settings = _settings(monkeypatch)
         _no_active_silo(monkeypatch, tmp_path)
         service = AutonomousPositionService(session)
         position = service.open_position(
-            symbol="ZAUTNOMANDATE", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
+            symbol="ZNOMA", strategy_id="golden_cross", account="primary", agent_id="autonomous-trader",
             entry_decision_id="auto-entry-seed-no-mandate", quantity=10, entry_price=100.0,
             stop_loss_price=99.0, take_profit_price=102.0, entry_rationale="seeded for test",
         )
-        _fake_broker.set_price("ZAUTNOMANDATE", 103.0)  # above take_profit_price
+        _fake_broker.set_price("ZNOMA", 103.0)  # above take_profit_price
 
         closed = await manage_open_positions(session, settings)
 
-        assert closed == 0
+        assert closed == 1
         session.refresh(position)
-        assert position.status == AutonomousPositionStatus.OPEN
-        assert _fake_broker.submitted_specs == []
+        assert position.status == AutonomousPositionStatus.CLOSED_TARGET
+        assert any(spec.get("symbol") == "ZNOMA" for spec in _fake_broker.submitted_specs)
+
+
+def _paper_mandate() -> SiloMandate:
+    """A minimal AUTONOMOUS_PAPER mandate for TestBuildBroker's non-LIVE cases — same shape autonomous_trader._synthetic_paper_mandate() uses."""
+    return SiloMandate(
+        silo_id="test", armed_by="test", trades_per_minute=1,
+        max_per_trade_usd=Decimal("1"), max_concentration_pct=Decimal("100"),
+        decision_bands=ProbabilityBands(execute_above=1.0, resize_above=1.0),
+    )
+
+
+def _live_mandate(**overrides) -> SiloMandate:
+    """A fully-authorized AUTONOMOUS_LIVE mandate for the happy-path test; individual condition tests override deployment settings, not this."""
+    defaults = dict(
+        silo_id="test-live", armed_by="test", mode="AUTONOMOUS_LIVE", trades_per_minute=1,
+        max_per_trade_usd=Decimal("100"), max_concentration_pct=Decimal("10"),
+        authorized_symbols=["QQQ"], authorized_strategy_ids=["golden_cross"],
+        decision_bands=ProbabilityBands(execute_above=1.0, resize_above=1.0),
+        broker="robinhood", account_alias="robinhood_live", live_execution_authorized=True,
+        approved_algos=["algo-1"],
+    )
+    defaults.update(overrides)
+    return SiloMandate(**defaults)
 
 
 class TestBuildBroker:
     """
-    _build_broker(settings) decides where the autonomous trader's market
-    data comes from (real Schwab vs. synthetic) — never whether its orders
-    are real, which stays fixed. See src/brokers/schwab_data_paper.py.
+    _build_broker(settings, mandate) decides where the autonomous trader's
+    market data comes from for AUTONOMOUS_PAPER (real Schwab vs. synthetic)
+    and whether it can reach a real broker at all for AUTONOMOUS_LIVE. See
+    src/brokers/schwab_data_paper.py and the module docstring's point 3.
     """
 
     def test_paper_settings_return_a_plain_paper_broker(self):
         settings = Settings(_env_file=None, env="test", execution_mode="PAPER")
 
-        broker = _real_build_broker(settings)
+        broker = _real_build_broker(settings, _paper_mandate())
 
         assert isinstance(broker, PaperBrokerAdapter)
         assert not isinstance(broker, SchwabDataPaperBroker)
@@ -691,7 +861,7 @@ class TestBuildBroker:
         fake_schwab = SchwabBrokerAdapter.__new__(SchwabBrokerAdapter)  # isinstance-only double; never calls its methods
         monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: fake_schwab)
 
-        broker = _real_build_broker(settings)
+        broker = _real_build_broker(settings, _paper_mandate())
 
         assert isinstance(broker, SchwabDataPaperBroker)
 
@@ -700,7 +870,7 @@ class TestBuildBroker:
         settings = Settings(_env_file=None, env="test", execution_mode="SCHWAB")
         monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: PaperBrokerAdapter())
 
-        broker = _real_build_broker(settings)
+        broker = _real_build_broker(settings, _paper_mandate())
 
         assert isinstance(broker, PaperBrokerAdapter)
         assert not isinstance(broker, SchwabDataPaperBroker)
@@ -734,7 +904,7 @@ class TestBuildBroker:
         router = BrokerRouter({BrokerName.PAPER: PaperBrokerAdapter(), BrokerName.SCHWAB: fake_schwab}, BrokerName.SCHWAB)
         monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: router)
 
-        broker = _real_build_broker(settings)
+        broker = _real_build_broker(settings, _paper_mandate())
 
         assert isinstance(broker, SchwabDataPaperBroker)
         assert broker.submit_order.__func__ is PaperBrokerAdapter.submit_order
@@ -744,22 +914,106 @@ class TestBuildBroker:
         A RobinhoodHostBridgeAdapter (or any BrokerRouter with no Schwab
         adapter inside it) is real and live-capable, and there is no
         simulate-fills wrapper for it yet — _build_broker() must never
-        return it, or a router containing it, directly. Fail closed to a
-        fully-synthetic PaperBrokerAdapter instead, even though that means
-        losing real market data for the autonomous loop in this
-        configuration — the alternative is a live order path with no
-        simulation at all, which is never acceptable here.
+        return it, or a router containing it, directly, for an
+        AUTONOMOUS_PAPER mandate. Fail closed to a fully-synthetic
+        PaperBrokerAdapter instead, even though that means losing real
+        market data for the autonomous loop in this configuration.
         """
         settings = Settings(_env_file=None, env="test", execution_mode="LIVE")
         fake_robinhood = RobinhoodHostBridgeAdapter.__new__(RobinhoodHostBridgeAdapter)
 
         monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: fake_robinhood)
-        broker = _real_build_broker(settings)
+        broker = _real_build_broker(settings, _paper_mandate())
         assert isinstance(broker, PaperBrokerAdapter)
         assert not isinstance(broker, SchwabDataPaperBroker)
 
         router_without_schwab = BrokerRouter({BrokerName.PAPER: PaperBrokerAdapter(), BrokerName.ROBINHOOD: fake_robinhood}, BrokerName.ROBINHOOD)
         monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: router_without_schwab)
-        broker = _real_build_broker(settings)
+        broker = _real_build_broker(settings, _paper_mandate())
         assert isinstance(broker, PaperBrokerAdapter)
         assert not isinstance(broker, SchwabDataPaperBroker)
+
+    def test_an_autonomous_paper_mandate_never_reaches_a_live_broker_even_with_a_live_robinhood_router(self, monkeypatch):
+        """
+        THE regression test for Mode 3: arm AUTONOMOUS_PAPER (the default)
+        in a deployment where account_profiles genuinely includes a
+        live-enabled Robinhood profile alongside PAPER -- exactly the
+        configuration build_broker_adapter() turns into a BrokerRouter for
+        (see src/brokers/factory.py). Before this fix, _build_broker()'s
+        non-LIVE branch only ever checked for a bare SchwabBrokerAdapter
+        and fell through to `return broker` for anything else, which meant
+        returning that live-capable BrokerRouter directly for what the
+        Silo believed was a paper-only mandate.
+        """
+        settings = Settings(
+            _env_file=None, env="test", execution_mode="ROBINHOOD",
+            robinhood_bridge_url="https://bridge.example", robinhood_bridge_token="tok",
+            robinhood_live_trading_enabled=True,
+        )
+        live_robinhood = RobinhoodHostBridgeAdapter.__new__(RobinhoodHostBridgeAdapter)
+        router = BrokerRouter({BrokerName.PAPER: PaperBrokerAdapter(), BrokerName.ROBINHOOD: live_robinhood}, BrokerName.ROBINHOOD)
+        monkeypatch.setattr(autonomous_trader, "build_broker_adapter", lambda s: router)
+
+        broker = _real_build_broker(settings, _paper_mandate())  # mode="AUTONOMOUS_PAPER"
+
+        assert isinstance(broker, PaperBrokerAdapter)
+        assert broker is not live_robinhood
+        assert broker is not router
+
+    def test_autonomous_live_returns_a_live_robinhood_adapter_when_every_condition_holds(self):
+        settings = Settings(_env_file=None, env="test", robinhood_bridge_url="https://bridge.example",
+                             robinhood_bridge_token="tok", robinhood_live_trading_enabled=True,
+                             autonomous_live_robinhood_enabled=True)
+        settings.account_profiles["robinhood_live"] = AccountProfile(broker=BrokerName.ROBINHOOD, live_enabled=True)
+
+        broker = _real_build_broker(settings, _live_mandate())
+
+        assert isinstance(broker, RobinhoodHostBridgeAdapter)
+        assert broker.live_enabled is True
+
+    def test_a_mandate_missing_broker_robinhood_cannot_even_be_constructed_as_autonomous_live(self):
+        """SiloMandate's own validator (src/execution/silo_runtime.py) refuses this before _build_broker ever sees it."""
+        with pytest.raises(Exception):
+            SiloMandate(
+                silo_id="bad", armed_by="test", mode="AUTONOMOUS_LIVE", trades_per_minute=1,
+                max_per_trade_usd=Decimal("100"), max_concentration_pct=Decimal("10"),
+                authorized_symbols=["QQQ"], authorized_strategy_ids=["golden_cross"],
+                decision_bands=ProbabilityBands(execute_above=1.0, resize_above=1.0),
+                broker=None, account_alias="robinhood_live", live_execution_authorized=True, approved_algos=["a"],
+            )
+
+    def test_autonomous_live_fails_closed_when_autonomous_live_robinhood_enabled_is_false(self):
+        settings = Settings(_env_file=None, env="test", robinhood_bridge_url="https://bridge.example",
+                             robinhood_bridge_token="tok", robinhood_live_trading_enabled=True,
+                             autonomous_live_robinhood_enabled=False)
+        settings.account_profiles["robinhood_live"] = AccountProfile(broker=BrokerName.ROBINHOOD, live_enabled=True)
+
+        with pytest.raises(LiveTradingDisabledError):
+            _real_build_broker(settings, _live_mandate())
+
+    def test_autonomous_live_fails_closed_when_robinhood_live_trading_enabled_is_false(self):
+        settings = Settings(_env_file=None, env="test", robinhood_bridge_url="https://bridge.example",
+                             robinhood_bridge_token="tok", robinhood_live_trading_enabled=False,
+                             autonomous_live_robinhood_enabled=True)
+        settings.account_profiles["robinhood_live"] = AccountProfile(broker=BrokerName.ROBINHOOD, live_enabled=True)
+
+        with pytest.raises(LiveTradingDisabledError):
+            _real_build_broker(settings, _live_mandate())
+
+    def test_autonomous_live_fails_closed_when_the_account_alias_profile_is_not_live_enabled(self):
+        settings = Settings(_env_file=None, env="test", robinhood_bridge_url="https://bridge.example",
+                             robinhood_bridge_token="tok", robinhood_live_trading_enabled=True,
+                             autonomous_live_robinhood_enabled=True)
+        settings.account_profiles["robinhood_live"] = AccountProfile(broker=BrokerName.ROBINHOOD, live_enabled=False)
+
+        with pytest.raises(LiveTradingDisabledError):
+            _real_build_broker(settings, _live_mandate())
+
+    def test_autonomous_live_fails_closed_when_the_account_alias_resolves_to_a_non_robinhood_profile(self):
+        settings = Settings(_env_file=None, env="test", robinhood_bridge_url="https://bridge.example",
+                             robinhood_bridge_token="tok", robinhood_live_trading_enabled=True,
+                             autonomous_live_robinhood_enabled=True)
+        settings.account_profiles["robinhood_live"] = AccountProfile(broker=BrokerName.PAPER, live_enabled=True)
+
+        with pytest.raises(LiveTradingDisabledError):
+            _real_build_broker(settings, _live_mandate())

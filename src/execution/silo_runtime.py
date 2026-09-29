@@ -1,18 +1,23 @@
-"""Persistent HedgeHog Silo mandate for autonomous PAPER execution.
+"""Persistent HedgeHog Silo mandate for autonomous PAPER and LIVE execution.
 
 The Silo replaces DailyPlan as the run-authorization layer. Trading limits are
-not hard-coded here; they are supplied by the armed mandate. The autonomous
-broker remains paper-only in autonomous_trader.py.
+not hard-coded here; they are supplied by the armed mandate. Whether the
+autonomous loop's orders are actually real is decided by
+autonomous_trader.py's _build_broker(settings, mandate), never by this
+module alone -- a mandate with mode="AUTONOMOUS_LIVE" only ever describes an
+authorization; it grants nothing by existing.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac as hmac_module
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 DEFAULT_STATE_FILE = ".hedgehog_silo.json"
 
@@ -25,7 +30,7 @@ class ProbabilityBands(BaseModel):
 class SiloMandate(BaseModel):
     silo_id: str
     armed_by: str
-    mode: str = "AUTONOMOUS_PAPER"
+    mode: Literal["AUTONOMOUS_PAPER", "AUTONOMOUS_LIVE"] = "AUTONOMOUS_PAPER"
     timezone: str = "America/New_York"
     runtime_start: Optional[datetime] = None
     runtime_end: str = "16:00"
@@ -42,6 +47,47 @@ class SiloMandate(BaseModel):
     armed_at: datetime = Field(default_factory=datetime.utcnow)
     active: bool = True
 
+    # AUTONOMOUS_LIVE-only fields. A mandate authorizes real order routing
+    # for autonomous_trader.py's _build_broker(settings, mandate) ONLY when
+    # mode == "AUTONOMOUS_LIVE" AND every field below is set AND (separately,
+    # at the deployment level, outside this file) both
+    # settings.autonomous_live_robinhood_enabled and
+    # settings.robinhood_live_trading_enabled are true AND the resolved
+    # account profile is itself live_enabled. This mandate alone can never
+    # grant live trading -- see _build_broker()'s own docstring.
+    broker: Optional[Literal["robinhood"]] = None
+    account_alias: Optional[str] = None
+    live_execution_authorized: bool = False
+    # HMAC over this mandate's own fields, keyed on the server's admin key
+    # (see compute_mandate_hmac below) -- stamped by arm(), verified by
+    # active_mandate() for AUTONOMOUS_LIVE mandates. A plain checksum would
+    # let anyone who can write the state file recompute a matching value
+    # after editing e.g. authorized_symbols; an HMAC can't be recomputed
+    # without the same server-side secret every other admin-gated write in
+    # this codebase already relies on.
+    mandate_hmac: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_live_contract(self) -> "SiloMandate":
+        if self.mode != "AUTONOMOUS_LIVE":
+            return self
+        missing = []
+        if self.broker != "robinhood":
+            missing.append("broker='robinhood'")
+        if not self.account_alias:
+            missing.append("account_alias")
+        if not self.live_execution_authorized:
+            missing.append("live_execution_authorized=true")
+        if not self.authorized_symbols:
+            missing.append("authorized_symbols")
+        if not self.authorized_strategy_ids:
+            missing.append("authorized_strategy_ids")
+        if not self.approved_trade_cards and not self.approved_algos:
+            missing.append("approved_trade_cards or approved_algos")
+        if missing:
+            raise ValueError(f"AUTONOMOUS_LIVE mandate missing required: {', '.join(missing)}")
+        return self
+
 
 class CandidateDecision(BaseModel):
     allowed: bool
@@ -53,6 +99,19 @@ class CandidateDecision(BaseModel):
 class SiloState(BaseModel):
     mandate: Optional[SiloMandate] = None
     trade_timestamps: list[datetime] = Field(default_factory=list)
+
+
+def compute_mandate_hmac(mandate: SiloMandate, secret: str) -> str:
+    """
+    HMAC-SHA256 over the mandate's own fields (excluding mandate_hmac
+    itself), keyed on secret. Unlike a plain checksum, this can't be
+    recomputed to match a tampered mandate without knowing secret --
+    intended to be settings.api_key_admin, the same server-side secret
+    every other admin-gated write in this codebase already relies on, so
+    arming/verifying an AUTONOMOUS_LIVE mandate needs no new secret.
+    """
+    payload = mandate.model_dump_json(exclude={"mandate_hmac"})
+    return hmac_module.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 class SiloRuntime:
@@ -68,7 +127,7 @@ class SiloRuntime:
     def _save(self, state: SiloState) -> None:
         self.path.write_text(state.model_dump_json(indent=2))
 
-    def arm(self, mandate: SiloMandate) -> SiloMandate:
+    def arm(self, mandate: SiloMandate, admin_key: Optional[str] = None) -> SiloMandate:
         mandate.active = True
         mandate.armed_at = datetime.utcnow()
         if mandate.runtime_start is None:
@@ -76,6 +135,10 @@ class SiloRuntime:
             # active_mandate()'s handling of a naive runtime_start below,
             # which assumes exactly this.
             mandate.runtime_start = datetime.now(timezone.utc)
+        if mandate.mode == "AUTONOMOUS_LIVE":
+            if not admin_key:
+                raise ValueError("Arming an AUTONOMOUS_LIVE mandate requires the server's admin key")
+            mandate.mandate_hmac = compute_mandate_hmac(mandate, admin_key)
         self._save(SiloState(mandate=mandate, trade_timestamps=[]))
         return mandate
 
@@ -86,11 +149,20 @@ class SiloRuntime:
             self._save(state)
         return state.mandate
 
-    def active_mandate(self, now: Optional[datetime] = None) -> Optional[SiloMandate]:
+    def active_mandate(self, now: Optional[datetime] = None, admin_key: Optional[str] = None) -> Optional[SiloMandate]:
         state = self._load()
         m = state.mandate
         if m is None or not m.active:
             return None
+        if m.mode == "AUTONOMOUS_LIVE":
+            # A missing or mismatched HMAC is treated exactly like an
+            # inactive mandate -- fails closed, not an exception, so a
+            # tampered or un-verifiable LIVE mandate simply stops
+            # authorizing anything rather than raising mid-scan.
+            if not admin_key or not m.mandate_hmac or not hmac_module.compare_digest(
+                m.mandate_hmac, compute_mandate_hmac(m, admin_key)
+            ):
+                return None
         tz = ZoneInfo(m.timezone)
         current = now.astimezone(tz) if now and now.tzinfo else datetime.now(tz)
         hh, mm = (int(x) for x in m.runtime_end.split(":", 1))
@@ -134,9 +206,10 @@ class SiloRuntime:
         concentration_pct: Optional[Decimal] = None,
         drawdown_pct: Optional[Decimal] = None,
         evidence: Optional[dict[str, float]] = None,
+        admin_key: Optional[str] = None,
     ) -> CandidateDecision:
         state = self._load()
-        m = self.active_mandate()
+        m = self.active_mandate(admin_key=admin_key)
         if m is None:
             return CandidateDecision(allowed=False, action="DEFER", reason="No active Silo mandate")
         now = datetime.utcnow()
@@ -172,4 +245,4 @@ class SiloRuntime:
         return CandidateDecision(allowed=False, action="DEFER", probability_score=score, reason="Probabilistic Silo gate: defer")
 
 
-__all__ = ["CandidateDecision", "ProbabilityBands", "SiloMandate", "SiloRuntime", "SiloState"]
+__all__ = ["CandidateDecision", "ProbabilityBands", "SiloMandate", "SiloRuntime", "SiloState", "compute_mandate_hmac"]

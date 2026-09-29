@@ -24,45 +24,40 @@ Three things make that safe to ship:
    it exactly like any other agent, including mid-position: a halt just
    stops new entries and stop/target management from firing, it doesn't
    touch what's already been submitted to the broker.
-3. _build_broker() below NEVER lets this loop preview or submit an order
-   against a real broker — that stays fixed regardless of settings. What
-   IS configurable is where its market data (quotes, price history) comes
-   from: real Schwab when settings.execution_mode == "SCHWAB" and
-   credentials are present (build_broker_adapter(settings) resolves this
-   exactly like every other component does), else the synthetic paper
-   generator. Either way, the object actually used for preview_order()/
-   submit_order() is SchwabDataPaperBroker or plain PaperBrokerAdapter —
-   both simulate every fill; see src/brokers/schwab_data_paper.py's
-   docstring for exactly which methods are real vs. simulated. Making
-   ORDERS (not just data) real would mean changing what this function
-   returns, a deliberate code change, not a config flip.
-   build_broker_adapter() can now also return a BrokerRouter (multiple
-   configured brokers — see src/brokers/router.py) or a raw
-   RobinhoodHostBridgeAdapter, neither of which is a SchwabBrokerAdapter;
-   _build_broker() unwraps a BrokerRouter looking specifically for a
-   Schwab adapter to extract and wrap the same way, and falls back to
-   fully-synthetic PaperBrokerAdapter (never the router or a live-capable
-   adapter directly) for anything else it doesn't recognize how to wrap —
-   fail closed, not fail open, for any broker type this function doesn't
-   explicitly know how to make safe.
+3. _build_broker(settings, mandate) decides whether this loop can reach a
+   real broker at all, and the answer is almost always no. For an
+   AUTONOMOUS_PAPER mandate (the default), it behaves exactly as before:
+   real Schwab market data when configured, wrapped in
+   SchwabDataPaperBroker so every preview/submission still simulates;
+   anything it can't safely identify as Schwab (a BrokerRouter, a raw
+   RobinhoodHostBridgeAdapter, anything else) falls back to fully-synthetic
+   PaperBrokerAdapter — fail closed, never the live object itself, even
+   though that means losing real market data in that configuration. Only
+   an AUTONOMOUS_LIVE mandate can reach a real broker, and only Robinhood,
+   and only when EVERY ONE of these is independently true at once:
+   mandate.mode == "AUTONOMOUS_LIVE", mandate.live_execution_authorized,
+   mandate.mandate_hmac verifies against the server's own admin key (see
+   SiloRuntime.active_mandate — a tampered or unverifiable mandate is
+   treated as inactive, not an error), settings.
+   autonomous_live_robinhood_enabled, settings.robinhood_live_trading_enabled,
+   AND the account profile mandate.account_alias resolves to is itself
+   live_enabled. Merely arming a Silo mandate, or configuring Robinhood
+   credentials, or setting either deployment switch alone, changes
+   nothing — every one of these is a separate, independent gate.
 4. scan_for_entries() opens NOTHING unless a human has explicitly armed
-   a strategy set and a per-trade quantity for today (see
-   src/execution/daily_plan.py) — which strategies get to trade, and how
-   much, are never silently inherited from a static default. The
-   strategies offered for arming are themselves ranked from real recent
-   performance (src/execution/strategy_ranking.py), not hand-picked once
-   and left there; see that module's docstring for how the ranking
-   itself is computed and why it's a starting point for a human decision,
-   not an autonomous decision of its own. manage_open_positions() is NOT
-   gated by this — a position already open still gets managed/exited
-   normally even after the plan is disarmed or expires.
+   a Silo mandate (see src/execution/silo_runtime.py) — which strategies
+   get to trade, and how much, are never silently inherited from a
+   static default. manage_open_positions() is deliberately NOT gated by
+   this: an already-open position keeps being checked against its
+   standardized stop-loss/take-profit and can still be closed even after
+   the Silo is disarmed or its mandate expires — an open position never
+   goes unmonitored just because authorization to open NEW ones lapsed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Callable
 
@@ -70,15 +65,16 @@ from sqlmodel import Session
 
 from src.agentic.llm_narrator import narrate_entry, narrate_exit
 from src.accounts.profiles import BrokerName
-from src.brokers.base import BrokerAdapter
+from src.brokers.base import BrokerAdapter, LiveTradingDisabledError
 from src.brokers.factory import build_broker_adapter
 from src.brokers.paper import PaperBrokerAdapter
+from src.brokers.robinhood.adapter import RobinhoodHostBridgeAdapter
 from src.brokers.router import BrokerRouter
 from src.brokers.schwab.adapter import SchwabBrokerAdapter
 from src.brokers.schwab_data_paper import SchwabDataPaperBroker
 from src.config import Settings
 from src.execution.autonomous_positions import AutonomousPositionService, AutonomousPositionStatus
-from src.execution.silo_runtime import SiloRuntime
+from src.execution.silo_runtime import ProbabilityBands, SiloMandate, SiloRuntime
 from src.execution.drawdown_guard import DrawdownGuard, _extract_equity
 from src.execution.silo_evidence import compute_evidence, concentration_pct_of_equity
 from src.execution.llm_evidence import CandidateContext, compute_llm_evidence
@@ -92,25 +88,36 @@ from src.strategy import engine as strategy_engine
 logger = get_logger(__name__)
 
 
-def _build_broker(settings: Settings) -> BrokerAdapter:
+def _build_broker(settings: Settings, mandate: SiloMandate) -> BrokerAdapter:
     """
-    Real Schwab market data when configured, wrapped so every order
-    preview/submission still simulates — see module docstring, point 3,
-    and src/brokers/schwab_data_paper.py. build_broker_adapter(settings)
-    already resolves whether Schwab is actually usable (execution_mode,
-    credentials, an account profile that names it); if what it returns
-    isn't a SchwabBrokerAdapter (or a BrokerRouter with one inside — see
-    src/brokers/router.py, which build_broker_adapter now returns
-    whenever more than one broker is configured, which is effectively
-    always once Schwab is added alongside the default "primary" PAPER
-    profile), Schwab isn't safely extractable and plain PaperBrokerAdapter
-    (fully synthetic) is used instead. This is a deliberate fail-closed
-    default, not just the "nothing configured" case: a RobinhoodHostBridgeAdapter,
-    or a BrokerRouter with no Schwab adapter inside it, is real and
-    live-capable, and this function has no simulate-fills wrapper for it —
-    so it is never returned directly, on purpose, even though that means
-    losing real market data for the autonomous loop in that configuration.
+    Resolve the autonomous broker from the armed Silo mandate. See module
+    docstring point 3 for the full independent-switch chain AUTONOMOUS_LIVE
+    requires; every path through this function that isn't that fully-
+    validated branch ends at plain PaperBrokerAdapter or a Schwab adapter
+    wrapped in SchwabDataPaperBroker (real data, simulated fills) — never a
+    bare live-capable object. Raises LiveTradingDisabledError (never
+    silently falls back) when mode == "AUTONOMOUS_LIVE" but any condition
+    is unmet, so a misconfigured live mandate fails loudly rather than
+    quietly trading paper.
     """
+    if mandate.mode == "AUTONOMOUS_LIVE":
+        if mandate.broker != "robinhood":
+            raise LiveTradingDisabledError("AUTONOMOUS_LIVE currently supports Robinhood only")
+        if not settings.autonomous_live_robinhood_enabled:
+            raise LiveTradingDisabledError("AUTONOMOUS_LIVE_ROBINHOOD_ENABLED is false")
+        if not settings.robinhood_live_trading_enabled:
+            raise LiveTradingDisabledError("ROBINHOOD_LIVE_TRADING_ENABLED is false")
+        profile = settings.get_account_profile(mandate.account_alias)
+        if profile.broker != BrokerName.ROBINHOOD or not profile.live_enabled:
+            raise LiveTradingDisabledError("Armed Silo account alias is not a live-enabled Robinhood profile")
+        return RobinhoodHostBridgeAdapter(settings.robinhood_bridge_url, settings.robinhood_bridge_token, live_enabled=True)
+
+    # AUTONOMOUS_PAPER — identical fail-closed shape this function has
+    # always used: real Schwab market data wrapped in SchwabDataPaperBroker
+    # when safely extractable, plain PaperBrokerAdapter for everything else
+    # this function doesn't explicitly know how to make safe (a
+    # BrokerRouter with no Schwab inside, a bare RobinhoodHostBridgeAdapter,
+    # anything else) — never the router or a live-capable adapter directly.
     broker = build_broker_adapter(settings)
     if isinstance(broker, PaperBrokerAdapter):
         return broker
@@ -124,6 +131,24 @@ def _build_broker(settings: Settings) -> BrokerAdapter:
     return PaperBrokerAdapter()
 
 
+def _synthetic_paper_mandate() -> SiloMandate:
+    """
+    A minimal, always-active AUTONOMOUS_PAPER mandate used ONLY to resolve
+    a broker for manage_open_positions() when no real Silo mandate is
+    currently armed — see that function's docstring for why exit
+    management must never depend on an active mandate the way entries do.
+    Never persisted, never armed, never seen by evaluate_candidate().
+    """
+    return SiloMandate(
+        silo_id="synthetic-exit-management",
+        armed_by="system",
+        trades_per_minute=1,
+        max_per_trade_usd=Decimal("1"),
+        max_concentration_pct=Decimal("100"),
+        decision_bands=ProbabilityBands(execute_above=1.0, resize_above=1.0),
+    )
+
+
 async def manage_open_positions(session: Session, settings: Settings) -> int:
     """
     Checks every OPEN autonomous position's live quote against its
@@ -135,10 +160,10 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
     forever against a broker that may keep rejecting it.
     """
     runtime = SiloRuntime()
-    if runtime.active_mandate() is None:
-        return 0
-    broker = _build_broker(settings)
-    executor = Executor(session=session, broker=broker, risk_mode="silo_paper")
+    mandate = runtime.active_mandate(admin_key=settings.api_key_admin) or _synthetic_paper_mandate()
+    broker = _build_broker(settings, mandate)
+    risk_mode = "standard" if mandate.mode == "AUTONOMOUS_LIVE" else "silo_paper"
+    executor = Executor(session=session, broker=broker, risk_mode=risk_mode)
     service = AutonomousPositionService(session)
     closed = 0
 
@@ -157,7 +182,16 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
 
         exit_reason = "take-profit" if hit_target else "stop-loss"
         status = AutonomousPositionStatus.CLOSED_TARGET if hit_target else AutonomousPositionStatus.CLOSED_STOP
-        decision_id = f"auto-exit-{uuid.uuid4()}"
+        # Deterministic, tied to the specific position being closed rather
+        # than a fresh uuid4() every cycle: a crash between this order
+        # actually submitting and close_position() recording it locally
+        # means the position is STILL OPEN on the next cycle, and this
+        # code re-runs for it — with the same decision_id, that retry hits
+        # Executor's existing idempotent-duplicate handling (cached preview
+        # / cached receipt) and catches up local state, instead of a fresh
+        # random key bypassing submission_guard.py entirely and risking a
+        # second real sell order.
+        decision_id = f"auto-exit-{position.entry_decision_id}"
 
         try:
             proposal = TradeProposal(
@@ -216,29 +250,29 @@ async def manage_open_positions(session: Session, settings: Settings) -> int:
 
 async def scan_for_entries(session: Session, settings: Settings) -> int:
     """
-    Runs every strategy in today's armed plan (see
-    src/execution/daily_plan.py) against every symbol in
-    settings.autonomous_watchlist; for each fresh entry signal (skipping
+    Runs every strategy in the armed Silo mandate's authorized_strategy_ids
+    against every symbol in its authorized_symbols (see
+    src/execution/silo_runtime.py); for each fresh entry signal (skipping
     any (symbol, strategy) pair already holding an open position — no
-    pyramiding), sizes it using the plan's own notional_per_trade_usd,
+    pyramiding), sizes it using the mandate's own max_per_trade_usd,
     computes the standardized stop/target, and submits it through the
     normal preview -> execute gate. Returns how many positions were
     opened.
 
     Opens nothing at all — not an error, just 0 — when there is no
-    active plan: this is the "ready to execute" gate the rest of the
-    autonomous safety machinery (the master enable setting, the kill
-    switch) sits on top of, not underneath. A human has to have reviewed
-    a strategy ranking and explicitly armed a strategy set + quantity
-    for today before this function does anything.
+    active mandate: this is the "ready to execute" gate the rest of the
+    autonomous safety machinery (the kill switch, RiskChecker for
+    AUTONOMOUS_LIVE) sits on top of, not underneath. A human has to have
+    explicitly armed a Silo mandate before this function does anything.
     """
     runtime = SiloRuntime()
-    mandate = runtime.active_mandate()
+    mandate = runtime.active_mandate(admin_key=settings.api_key_admin)
     if mandate is None:
         return 0
 
-    broker = _build_broker(settings)
-    executor = Executor(session=session, broker=broker, risk_mode="silo_paper")
+    broker = _build_broker(settings, mandate)
+    risk_mode = "standard" if mandate.mode == "AUTONOMOUS_LIVE" else "silo_paper"
+    executor = Executor(session=session, broker=broker, risk_mode=risk_mode)
     service = AutonomousPositionService(session)
     opened = 0
     # Silo owns sizing policy. Using the mandate max as the paper sizing budget
@@ -313,6 +347,7 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
                 concentration_pct=candidate_concentration_pct,
                 drawdown_pct=current_drawdown_pct,
                 evidence=evidence,
+                admin_key=settings.api_key_admin,
             )
             if not silo_decision.allowed:
                 logger.info(
@@ -325,12 +360,30 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
                 )
                 continue
 
-            decision_id = f"auto-entry-{uuid.uuid4()}"
+            # Deterministic, not a fresh uuid4() every cycle: one attempt
+            # per (symbol, strategy_id) per calendar day. A crash between
+            # this order actually submitting and open_position() recording
+            # it locally means has_open_position() above still says False
+            # on the next cycle, and this candidate is re-evaluated fresh —
+            # with the same decision_id, that retry hits Executor's
+            # existing idempotent-duplicate handling (cached preview /
+            # cached receipt) if terms match, or is cleanly refused if they
+            # don't, instead of a fresh random key bypassing
+            # submission_guard.py entirely and risking a second real order.
+            decision_id = f"auto-entry-{symbol}-{strategy_id}-{date.today().isoformat()}"
             try:
+                # AUTONOMOUS_LIVE routes to the mandate's OWN authorized
+                # account_alias (its live Robinhood account), never the
+                # static paper default -- a mismatch here would mean
+                # _build_broker() correctly resolved a live adapter while
+                # the order itself still targeted the paper account, or
+                # vice versa.
+                account = mandate.account_alias if mandate.mode == "AUTONOMOUS_LIVE" else settings.autonomous_account
+                mode_label = "LIVE Robinhood order" if mandate.mode == "AUTONOMOUS_LIVE" else "PAPER only"
                 proposal = TradeProposal(
                     decision_id=decision_id,
                     agent_id=settings.autonomous_agent_id,
-                    account=settings.autonomous_account,
+                    account=account,
                     symbol=symbol,
                     asset_type=AssetType.EQUITY,
                     instruction=Instruction.BUY,
@@ -352,7 +405,8 @@ async def scan_for_entries(session: Session, settings: Settings) -> int:
                     approved_at=datetime.utcnow(),
                     attestation=(
                         f"Autonomous rule-based entry: {strategy_id}, standardized "
-                        f"1:{settings.autonomous_reward_risk_ratio} R:R, PAPER only — no human review."
+                        f"1:{settings.autonomous_reward_risk_ratio} R:R, {mode_label} — no human review, "
+                        f"Silo mandate {mandate.silo_id}."
                     ),
                     idempotency_key=f"{decision_id}:auto-entry",
                 )

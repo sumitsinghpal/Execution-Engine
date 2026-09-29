@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     robinhood_live_trading_enabled: bool = False
     market_data_broker: str = ""
 
+    # A THIRD, independent switch specifically for the autonomous loop's
+    # AUTONOMOUS_LIVE Silo mode (src/execution/silo_runtime.py) — deliberately
+    # separate from robinhood_live_trading_enabled above, which governs
+    # ordinary HITL-live Robinhood orders. An armed AUTONOMOUS_LIVE mandate
+    # plus robinhood_live_trading_enabled=true alone still does not enable
+    # autonomous live routing; this must ALSO be true, and the resolved
+    # account profile must ALSO be live_enabled. See autonomous_trader.py's
+    # _build_broker() for the full chain.
+    autonomous_live_robinhood_enabled: bool = False
+
     # A trusted MCP tool bridge (see src/mcp/) — never a new capability of
     # its own, just an LLM-callable proxy onto the existing HTTP API. The
     # admin key lives here, server-side, and is never a parameter any tool
@@ -202,10 +212,13 @@ class Settings(BaseSettings):
     # and still runs through the same preview/risk-checks/kill-switch gate
     # as any other order, scoped to its own agent_id so it can be halted
     # independently via /v1/kill-switch/agents/{autonomous_agent_id}/on.
-    # Order preview/submission always simulates (paper fills), regardless
-    # of execution_mode below — that's a code-level guarantee, not a
-    # config one; see autonomous_trader._build_broker()'s docstring.
-    # execution_mode DOES control where its market data comes from: real
+    # Order preview/submission simulates (paper fills) UNLESS an armed
+    # Silo mandate's own mode is AUTONOMOUS_LIVE, in which case a real
+    # Robinhood order is possible -- and only then, and only when every
+    # one of several independent conditions also holds; see
+    # autonomous_trader._build_broker()'s docstring for the full chain.
+    # This setting (execution_mode) does not itself grant or block that —
+    # it controls where AUTONOMOUS_PAPER's market data comes from: real
     # Schwab quotes/history when SCHWAB is configured (more realistic
     # signals — see src/brokers/schwab_data_paper.py), synthetic
     # otherwise. Disabled by default.
